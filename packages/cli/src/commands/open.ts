@@ -1,6 +1,6 @@
 // `mnemonic open <hash|link>` — decrypt and print a sealed memory.
 //
-// Reads the sealed blob from the server (by content hash) or parses a share
+// Reads caller-owned local ciphertext by content hash, or parses a legacy share
 // link (URL with `#k=<base64url>` fragment) and decrypts it locally.
 //
 // Keychain: reads the private key when the hash form is used (needs the
@@ -8,9 +8,10 @@
 // the key is embedded in the fragment — no identity key needed unless the
 // link is missing the `#k=` fragment (then it falls back to the identity key).
 
+import { loadSealed } from "../sealed-store.js";
 import { fromSdkError, UserError } from "../errors.js";
 import { format, hint, type OutputOptions } from "../output.js";
-import { openSession } from "../session.js";
+import { openSession, openLocalSession } from "../session.js";
 
 export interface OpenOptions extends OutputOptions {
   baseUrl?: string;
@@ -32,7 +33,8 @@ export async function runOpen(
     opts.baseUrl ?? process.env.MNEMONIC_BASE_URL ?? DEFAULT_BASE_URL;
 
   // open always reads the private key (to derive the X25519 decryption key).
-  const { client, signer } = await openSession(baseUrl, opts, true);
+  const isLink = /^https?:\/\//.test(hashOrLink);
+  const { client, signer } = isLink ? await openSession(baseUrl, opts, true) : openLocalSession(baseUrl);
 
   // Provide the keypair — for `open` we always need to decrypt.
   client.setKeypairProvider(() => signer.keypair());
@@ -46,7 +48,7 @@ export async function runOpen(
       result = await client.importLink(hashOrLink);
     } else {
       // Content hash — decrypt using identity X25519 key.
-      result = await client.openMemory(hashOrLink);
+      result = await client.openMemory(loadSealed(signer.pubkey, hashOrLink).outerCbor, {expectedHash:hashOrLink});
     }
   } catch (e) {
     throw fromSdkError(e);

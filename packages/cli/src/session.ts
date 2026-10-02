@@ -22,6 +22,7 @@ import {
 
 import {
   identitySecretInFile,
+  tokenExists,
   isTokenFresh,
   readTokenFile,
   saveToken,
@@ -211,4 +212,12 @@ function renewalHint(
 
 function describe(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** Device-only operations require identity but never refresh or require HTTP auth. */
+export function openLocalSession(baseUrl: string): Pick<Session, "client" | "signer"> {
+  const signer = lazyIdentitySigner();
+  // Preserve mismatch diagnostics when an existing login is available.
+  if (tokenExists()) assertIdentityMatchesToken(readTokenFile());
+  return {signer, client:new MnemonicClient({baseUrl, signer})};
 }

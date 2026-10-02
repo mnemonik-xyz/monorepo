@@ -1518,7 +1518,7 @@ pub async fn mcp_handler(
     };
     // Decision 12: HTTP/JWT presence is the trigger for the deferred-signing
     // branch in `tools::sign_memory`. Stdio path always passes `None` here.
-    let jwt_sub: Option<String> = claims.map(|c| c.sub);
+    let jwt_sub: Option<String> = claims.as_ref().map(|c| c.sub.clone());
 
     let is_sign_memory = req.method == "tools/call"
         && req.params.get("name").and_then(|n| n.as_str()) == Some("mnemonic_sign_memory");
@@ -1905,7 +1905,7 @@ pub async fn mcp_handler(
                 ndjson_response(StatusCode::UNAUTHORIZED, &err_body)
             }
         }
-    } else if is_attest_a2a && state.payment_mode != "none" {
+    } else if is_attest_a2a {
         // Verify client authorship and binding before charging or claiming a nonce.
         let validation = async {
             anyhow::ensure!(jwt_sub.is_some(), "authentication required");
@@ -1934,8 +1934,9 @@ pub async fn mcp_handler(
                 Some(Value::String(s)) => Some(s.as_str()),
                 _ => anyhow::bail!("invalid prev_id"),
             };
+            let signed_bytes = hex::decode(signed)?;
             let child = mnemonic_a2a::validate_signed_a2a(
-                &hex::decode(signed)?,
+                &signed_bytes,
                 &owner_pubkey,
                 args["kind"]
                     .as_str()
@@ -1947,116 +1948,65 @@ pub async fn mcp_handler(
                 prev,
             )?;
             if prev.is_some() {
-                let id = args["prev_locator"]
+                let locator = args["prev_locator"]
                     .as_str()
-                    .and_then(|s| s.strip_prefix("ar://"))
                     .ok_or_else(|| anyhow::anyhow!("ParentLocatorRequired"))?;
                 let bytes = state
                     .arweave
-                    .read_a2a(id)
+                    .read_parent_locator(locator)
                     .await
                     .map_err(|_| anyhow::anyhow!("ParentUnavailable"))?;
                 let parent = mnemonic_core::codec::a2a::signed::verify_signed_a2a(&bytes, None)?;
                 mnemonic_core::codec::a2a::signed::verify_parent_link(&child, &parent)?;
+            } else if args.get("prev_locator").is_some() {
+                anyhow::bail!("root cannot have parent locator");
             }
-            Ok::<(), anyhow::Error>(())
+            Ok::<_, anyhow::Error>((signed_bytes, child))
         }
         .await;
-        if let Err(error) = validation {
+        let (signed_bytes, child) = match validation {
+            Ok(validated) => validated,
+            Err(error) => {
             return ndjson_response(
                 StatusCode::BAD_REQUEST,
                 &serde_json::json!({"jsonrpc":"2.0", "id":req.id,"error":{"code":-32602,"message":error.to_string()}}),
             );
         }
-        // Payment gate for `mnemonic_attest_a2a`. Simpler than sign_memory:
-        // no WriteMode complexity, no free-anchor-quota, no deferred-signing
-        // flow — A2A attestations deliver client-signed external artifacts.
-        let gate = payment::check_payment(
-            &headers,
-            &state.payment_mode,
-            &state.store,
-            &state.solana,
-            &state.treasury_pubkey,
-            &state.usdc_mint,
-            state.pricing.current_price(),
-            state.evm_payment.as_ref(),
-        )
-        .await;
-
-        match gate {
-            payment::PaymentGate::Proceed => {
-                let x402_proof = payment::extract_x402_proof(&headers);
-                if let Some(proof) = x402_proof.as_ref() {
-                    let claimed = match state.store.lock() {
-                        Ok(store) => payment::claim_x402_nonce(&store, &proof.tx_sig),
-                        Err(_) => Err(anyhow::anyhow!("store mutex poisoned")),
-                    };
-                    match claimed {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            let err_body = serde_json::json!({
-                                "jsonrpc": "2.0", "id": req.id,
-                                "error": {"code": -32600, "message": format!("x402 payment already used: {}", proof.tx_sig)}
-                            });
-                            return ndjson_response(StatusCode::UNAUTHORIZED, &err_body);
-                        }
-                        Err(error) => {
-                            tracing::error!(error = %error, "x402 nonce claim failed (attest_a2a)");
-                            return ndjson_error(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                -32603,
-                                "payment state unavailable",
-                            );
-                        }
-                    }
-                }
-                let resp = handle_request_with_resolved_mode(
-                    &req,
-                    &state,
-                    &owner_pubkey,
-                    jwt_sub.as_deref(),
-                    crate::tools::Transport::Http,
-                    resolved_mode_for_gate,
-                )
-                .await;
-                // On failure, release the nonce so the caller can retry.
-                if resp.error.is_some() {
-                    if let Some(proof) = x402_proof.as_ref() {
-                        match state.store.lock() {
-                            Ok(store) => {
-                                if let Err(error) =
-                                    payment::release_x402_nonce(&store, &proof.tx_sig)
-                                {
-                                    tracing::warn!(tx_sig = %proof.tx_sig, error = %error, "x402 nonce release failed (attest_a2a)");
-                                }
-                            }
-                            Err(_) => tracing::warn!(
-                                "x402 nonce release (attest_a2a): store mutex poisoned"
-                            ),
-                        }
-                    }
-                }
-                ndjson_response(StatusCode::OK, &resp)
-            }
-            payment::PaymentGate::NeedPayment(x402) => {
-                ndjson_response(StatusCode::PAYMENT_REQUIRED, &x402)
-            }
-            payment::PaymentGate::NeedUniversalPaywall(ref up_req) => {
-                let x402 = payment::up_payment_required(up_req, "");
-                let body = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": req.id,
-                    "error": {"code": -32012, "message": "payment required", "data": x402}
-                });
-                ndjson_response(StatusCode::PAYMENT_REQUIRED, &body)
-            }
-            payment::PaymentGate::Unauthorized(msg) => {
-                let err_body = serde_json::json!({
-                    "jsonrpc": "2.0", "id": req.id,
-                    "error": {"code": -32600, "message": msg}
-                });
-                ndjson_response(StatusCode::UNAUTHORIZED, &err_body)
-            }
+        };
+        let descriptor = crate::ingestion::ValidatedMemory {
+            author: child.signer.clone(), kind: "a2a".into(),
+            content_hash: child.content_hash.clone(),
+            envelope_digest: mnemonic_core::codec::hash::hash_bytes(&signed_bytes),
+        };
+        let response = crate::ingestion::ingest_validated(
+            state.clone(), claims.expect("validated authenticated A2A"), headers,
+            client_ip, axum::body::Bytes::from(signed_bytes), descriptor,
+            Some(child.binding.context_id.clone()),
+        ).await;
+        let status = response.status();
+        let payment_header = response.headers().get("payment-required").cloned();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await
+            .ok().and_then(|b|serde_json::from_slice::<Value>(&b).ok())
+            .unwrap_or_else(||serde_json::json!({"error":"invalid coordinator response"}));
+        if status.is_success() && body["delivery_status"] == "verified" {
+            let locator = body["arweave_tx"].as_str().unwrap_or("");
+            let receipt_persisted = state.store.lock().ok()
+                .is_some_and(|store|store.record_a2a_receipt(&child, locator, true).is_ok());
+            let result = serde_json::json!({
+                "attestation_id":format!("a2a:{}",child.content_hash),
+                "blake3":child.content_hash,"sealed":child.binding.sealed,
+                "arweave_tx":locator,"locator":body["locator"],"write_mode":"anchored",
+                "delivery_status":"verified","receipt_persisted":receipt_persisted,
+                "operation_id":body["operation_id"],"payment_status":body["payment_status"]
+            });
+            ndjson_response(StatusCode::OK,&serde_json::json!({"jsonrpc":"2.0","id":req.id,
+                "result":{"content":[{"type":"text","text":result.to_string()}]}}))
+        } else {
+            let mut response=ndjson_response(status,&serde_json::json!({"jsonrpc":"2.0","id":req.id,
+                "error":{"code":if status==StatusCode::PAYMENT_REQUIRED{-32012}else{-32013},
+                    "message":"artifact ingestion pending or unavailable","data":body}}));
+            if let Some(value)=payment_header {response.headers_mut().insert("payment-required",value);}
+            response
         }
     } else {
         let resp = handle_request_with_resolved_mode(
@@ -2445,48 +2395,10 @@ async fn handle_tool_call(
                     (Some(owner_pubkey), None)
                 };
 
-                // Task 13: if an active recall session exists for the
-                // authenticated owner, use it to decrypt sealed rows and
-                // include them in the results.
-                if jwt_sub.is_some() {
-                    let active_rk =
-                        crate::api::get_active_rk(&state.recall_sessions, owner_pubkey).await;
-                    if let Some(rk) = active_rk {
-                        tools::recall_with_hosted_rk(
-                            &state.keypair,
-                            &state.store,
-                            state.embedder.as_ref(),
-                            query,
-                            limit,
-                            owner_pubkey,
-                            &rk,
-                        )
-                        .await
-                    } else {
-                        let store = state.store.lock().unwrap();
-                        tools::recall(
-                            &state.keypair,
-                            &store,
-                            state.embedder.as_ref(),
-                            query,
-                            limit,
-                            recall_owner,
-                            visibility_filter,
-                        )
-                    }
-                } else {
-                    // DB-only: lock, query, release
-                    let store = state.store.lock().unwrap();
-                    tools::recall(
-                        &state.keypair,
-                        &store,
-                        state.embedder.as_ref(),
-                        query,
-                        limit,
-                        recall_owner,
-                        visibility_filter,
-                    )
-                }
+                // Hosted recall never opens sealed payloads or recall keys.
+                let store = state.store.lock().unwrap();
+                tools::recall(&state.keypair, &store, state.embedder.as_ref(),
+                    query, limit, recall_owner, visibility_filter)
             }
         }
         "mnemonic_check_pending" => {

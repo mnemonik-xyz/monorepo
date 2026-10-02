@@ -133,7 +133,7 @@ describe("CLI end-to-end redaction (sign → 401 with leaky body)", () => {
     // stubbed via the throw in the assertion).
     let thrown: unknown;
     try {
-      await runSign("hello", { content: "hello", baseUrl: "http://test" });
+      await runSign("hello", { content: "hello", baseUrl: "http://test", anchor: true });
     } catch (e) {
       thrown = e;
     }

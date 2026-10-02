@@ -1,7 +1,8 @@
 # Product protocol technical specification
 
 Status: planned. MUST and MUST NOT define target requirements, not shipped behavior.
-Baseline: `44fc172e3afa0efcd3beff2fa555b05dd8583eec`.
+Reviewed baseline: `89532db4556e53e81b5243c57535a76046c08207`.
+See [baseline audit](baseline-audit.md) for current implementation and test limits.
 
 ## 1. Scope
 

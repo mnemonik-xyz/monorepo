@@ -1,18 +1,5 @@
-// `mnemonic sign [content] [--anchor|--public]` — save a memory.
-//
-// Write modes:
-//   default     → sealed local write via `sealMemory({mode:"store"})`. The content
-//                 is encrypted client-side; the server stores the ciphertext only.
-//                 Needs the keypair (for E2E encryption) but NEVER reads the OS
-//                 keychain — only the private key already in a file.  When the
-//                 identity is keychain-backed and the key is NOT in a file, the
-//                 command stops with a helpful hint.
-//   --anchor    → `sealMemory({mode:"anchor"})`. Same E2E encryption, but also
-//                 anchors the sealed blob on Arweave + Solana.  One keychain read
-//                 (the same read that the COSE sign uses).
-//   --public    → plaintext anchor via `signMemory({mode:"local"})` — the
-//                 existing plaintext path retained for backward-compatibility.
-//                 Add `--public --anchor` to also anchor on-chain as plaintext.
+// Sealed writes persist signed ciphertext locally before optional external delivery.
+// --public --anchor uses the legacy plaintext preparation flow.
 //
 // Content sources:
 //   1. positional argument (preferred)
@@ -21,13 +8,15 @@
 //
 // Tags from `--tags=a,b,c` (comma-separated, trimmed, empty entries dropped).
 
+import { saveSealed } from "../sealed-store.js";
+
 import { AuthError, parseJwtPayload } from "@mnemonik-xyz/sdk";
 
 import { identityPath, identitySecretInFile, tokenPath } from "../config.js";
 import { fromSdkError, UserError } from "../errors.js";
 import { format, hint, type OutputOptions, verbose } from "../output.js";
 import { formatMismatchError } from "../preflight.js";
-import { openSession } from "../session.js";
+import { openSession, openLocalSession } from "../session.js";
 
 export interface SignOptions extends OutputOptions {
   tags?: string;
@@ -60,6 +49,8 @@ export async function runSign(
   const anchor = opts.anchor === true;
   const isPublic = opts.public === true;
 
+  if (isPublic && !anchor) throw new UserError("--public without --anchor is no longer supported over HTTP. Use default sealed local storage, or explicitly choose --public --anchor for permanent public disclosure.");
+
   if (isPublic) {
     // --public: plaintext signMemory path (unchanged legacy behavior).
     await runSignPublic(content, tags, anchor, baseUrl, opts);
@@ -83,15 +74,12 @@ async function runSignSealed(
   // Sealed write needs the keypair for E2E encryption.  We never read the OS
   // keychain unless the command also reads it anyway (--anchor) OR the key is
   // file-backed (no prompt possible).
-  const { client, signer, token: tok } = await openSession(
-    baseUrl,
-    opts,
-    anchor
-  );
+  const { client, signer } = anchor
+    ? await openSession(baseUrl, opts, true)
+    : openLocalSession(baseUrl);
 
   verbose(`base_url=${baseUrl}`, opts);
   verbose(`local pubkey=${signer.pubkey}`, opts);
-  verbose(`token.sub=${tok.sub}`, opts);
   verbose(`mode=${anchor ? "seal+anchor" : "seal+store"}`, opts);
 
   // Provide the keypair lazily — refuse keychain reads unless --anchor or
@@ -103,7 +91,7 @@ async function runSignSealed(
         "the OS keychain and this command does not read the keychain by default. " +
         "Options:\n" +
         "  • `mnemonic sign --anchor` to seal and anchor (reads the keychain once)\n" +
-        "  • `mnemonic sign --public` to write plaintext without encryption",
+        "  • restore a file-backed identity to seal locally without a keychain prompt",
     );
   });
 
@@ -111,9 +99,21 @@ async function runSignSealed(
   let result;
   try {
     result = await client.sealMemory(content, {
-      mode: anchor ? "anchor" : "store",
+      mode: "store",
       ...(tags.length > 0 ? { tags } : {}),
     });
+    if (!result.outerCbor || !result.signedBytes) throw new UserError("SDK did not return original sealed bytes; upgrade to a client-prepared-memory SDK before saving");
+    const localPath = saveSealed(signer.pubkey, {memoryHash:result.memoryHash,outerCbor:result.outerCbor,signedBytes:result.signedBytes});
+    if (anchor) {
+      try {
+        const receipt = await client.ingestPreparedMemory(result.signedBytes);
+        if (receipt.content_hash !== result.memoryHash || receipt.author !== signer.pubkey) throw new UserError("delivery receipt does not match the prepared memory");
+        result = {...result, locator: receipt.locator as string, receipt};
+      } catch (e) {
+        hint(`Original signed ciphertext retained at ${localPath}. Retry these bytes with SDK ingestPreparedMemory; do not re-run sign to resume a paid operation.`, opts);
+        throw e;
+      }
+    }
   } catch (e) {
     throw fromSdkError(e);
   }
@@ -134,29 +134,12 @@ async function runSignPublic(
   baseUrl: string,
   opts: SignOptions
 ): Promise<void> {
-  const mode = anchor ? "anchored" : "local";
-  // Pre-flight (identity/JWT mismatch, bug 3 / Decision 7) runs inside
-  // openSession BEFORE any fetch. Only an anchored write may read the OS
-  // keychain (for a silent re-login or the signature itself).
-  const { client, signer, token: tok } = await openSession(baseUrl, opts, anchor);
-
+  const mode = "anchored";
+  const { client, signer, token: tok } = await openSession(baseUrl, opts, true);
   verbose(`base_url=${baseUrl}`, opts);
   verbose(`local pubkey=${signer.pubkey}`, opts);
-  verbose(`token.sub=${tok.sub}`, opts);
-  verbose(`mode=${mode} (public/plaintext)`, opts);
-
-  // The private key is read lazily — only if the server asks for a client
-  // signature. For `local` that happens only against an older server that
-  // predates hash-only local writes; then we use a file-stored key (no
-  // prompt) but refuse to read the OS keychain.
-  client.setKeypairProvider(() => {
-    if (anchor || identitySecretInFile()) return signer.keypair();
-    throw new UserError(
-      "the server asked for a client signature on a local write (it predates hash-only local writes). " +
-        "`mnemonic sign --public` reads the private key from the OS keychain only with --anchor. " +
-        "Upgrade the server, or re-run with --anchor to sign and anchor the memory on-chain.",
-    );
-  });
+  verbose(`mode=${mode} (public/plaintext legacy preparation)`, opts);
+  client.setKeypairProvider(() => signer.keypair());
 
   hint(anchor ? "signing and anchoring memory..." : "saving memory...", opts);
   let result;

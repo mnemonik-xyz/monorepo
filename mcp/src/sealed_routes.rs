@@ -3,9 +3,9 @@
 //! New surfaces:
 //!
 //! - `POST /api/anchor-sealed`   — body = signed COSE_Sign1 (producer == did:sol:<jwt.sub>)
-//! - `POST /api/store-sealed`    — unsigned outer CBOR for local writes (owner = jwt.sub)
+//! - `POST /api/store-sealed`    — retired (410), local writes belong on the client
 //! - `GET  /api/sealed`          — list caller's own sealed blobs
-//! - `POST /api/grants`          — persist a signed GRANT_V1 (author = jwt.sub)
+//! - `POST /api/grants`          — retired (410), distribute grants client-side
 //! - `GET  /api/grants`          — non-withdrawn grants for a given reader kid
 //! - `DELETE /api/grants/{id}`   — withdraw a grant (sets withdrawn_at)
 //! - `POST /api/embed`           — returns an embedding vector; NEVER logs the body
@@ -18,10 +18,7 @@ use axum::{
     response::{IntoResponse, Response},
     Extension, Json,
 };
-use mnemonic_core::codec::{hash::hash_bytes, sign::verify_artifact};
-use mnemonic_core::storage::{WriteMode};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::mcp::McpState;
 use crate::oauth::Claims;
@@ -40,228 +37,18 @@ fn error_resp(status: StatusCode, msg: &str) -> Response {
 
 /// `POST /api/anchor-sealed` — body is raw COSE_Sign1 bytes of a sealed memory.
 ///
-/// Validation:
-/// 1. Verify COSE_Sign1 — rejects invalid signatures.
-/// 2. Assert `producer == did:sol:<jwt.sub>` — rejects cross-owner writes.
-/// 3. Payment / free quota (reuses `payment.rs` logic).
-/// 4. Upload to Arweave, SPL Memo anchor, delivery check (local-mode: synthetic ids).
-/// 5. `save_sealed_attestation` — never writes an embedding row.
+/// Compatibility adapter to shared validation, quota/payment and external delivery.
+/// No synthetic local IDs, Solana memo, or artifact-byte SQL persistence.
 pub async fn anchor_sealed_handler(
     State(state): State<Arc<McpState>>,
-    Extension(claims): Extension<Claims>,
-    body: axum::body::Bytes,
+    request: axum::http::Request<axum::body::Body>,
 ) -> Response {
-    let jwt_sub = &claims.sub;
-
-    // 1. Verify the COSE_Sign1 envelope.
-    let result = match verify_artifact(&body, None) {
-        Ok(r) => r,
-        Err(e) => {
-            return error_resp(
-                StatusCode::BAD_REQUEST,
-                &format!("COSE verification failed: {e}"),
-            );
-        }
-    };
-    if !result.valid || !result.cose_signature || !result.algorithm_valid {
-        return error_resp(StatusCode::UNAUTHORIZED, "COSE signature invalid");
-    }
-
-    // 2. Enforce producer == did:sol:<jwt.sub>.
-    let expected_producer = format!("did:sol:{jwt_sub}");
-    // The `signer` field from verify_artifact is the raw base58 pubkey (COSE kid).
-    // Check it against jwt_sub directly.
-    if result.signer != *jwt_sub {
-        return error_resp(
-            StatusCode::FORBIDDEN,
-            "producer does not match authenticated identity",
-        );
-    }
-
-    // Also verify the producer DID in the payload, if present.
-    if let Ok(payload_json) = mnemonic_core::codec::canonical::from_canonical_cbor(&result.payload)
-    {
-        if let Some(producer) = payload_json.get("producer").and_then(|v| v.as_str()) {
-            if producer != expected_producer {
-                return error_resp(
-                    StatusCode::FORBIDDEN,
-                    "payload producer DID does not match authenticated identity",
-                );
-            }
-        }
-    }
-
-    // 3. Payment / free quota — same gating as sign-callback (local-mode: free).
-    // For simplicity in V1 we only run on local-mode (storage_mode == "local")
-    // where no payment is needed. Full-mode payment is handled by the deferred
-    // sign-callback path, not this direct route.
-    // (A future wave can add UP billing here.)
-
-    let content_hash = hash_bytes(&result.payload);
-    let attestation_id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-
-    // 4. Anchoring (local-mode uses synthetic ids; full-mode skipped in V1).
-    let is_local = state.storage_mode == "local";
-    let (solana_tx, arweave_tx) = if is_local {
-        (
-            format!("local:{}", &content_hash[..16]),
-            format!("local:{}", &attestation_id[..8]),
-        )
-    } else {
-        // Full-mode: upload to Arweave + SPL Memo. Minimal tags for sealed entries.
-        let producer_did = expected_producer.clone();
-        let sealed_tags: &[(&str, &str)] = &[
-            ("Producer", producer_did.as_str()),
-            ("Created-At", now.as_str()),
-            ("Mnemonic-Type", "sealed"),
-        ];
-        let operator_keypair = match state.keypair.keypair() {
-            Ok(kp) => kp,
-            Err(e) => {
-                return error_resp(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    &format!("operator identity unavailable: {e:#}"),
-                );
-            }
-        };
-        let ar_tx = match state
-            .arweave
-            .write_item(&body, operator_keypair, sealed_tags)
-            .await
-        {
-            Ok(t) => t,
-            Err(e) => {
-                return error_resp(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("arweave upload failed: {e}"),
-                );
-            }
-        };
-        let _ = state.arweave.mine().await;
-        let memo = serde_json::json!({"h": content_hash, "a": ar_tx, "v": 3});
-        let operator_keypair = match state.keypair.keypair() {
-            Ok(kp) => kp,
-            Err(e) => {
-                return error_resp(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    &format!("operator identity unavailable: {e:#}"),
-                );
-            }
-        };
-        let sol_tx = match state
-            .solana
-            .submit_memo(operator_keypair, &memo.to_string())
-            .await
-        {
-            Ok(sig) => sig,
-            Err(e) => {
-                return error_resp(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("solana memo write failed: {e}"),
-                );
-            }
-        };
-        (sol_tx, ar_tx)
-    };
-
-    // 5. Persist via save_sealed_attestation.
-    let save_res = {
-        let store = match state.store.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable");
-            }
-        };
-        store.save_sealed_attestation(
-            &attestation_id,
-            &content_hash,
-            &[],
-            &solana_tx,
-            &arweave_tx,
-            jwt_sub.as_str(), // signer
-            jwt_sub.as_str(), // owner
-            &now,
-            WriteMode::Local, // anchored in full-mode but stored as Local for routing
-            &body,
-        )
-    };
-    if let Err(e) = save_res {
-        return error_resp(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("persist failed: {e}"),
-        );
-    }
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "ok",
-            "attestation_id": attestation_id,
-            "content_hash": content_hash,
-            "solana_tx": solana_tx,
-            "arweave_tx": arweave_tx,
-        })),
-    )
-        .into_response()
+    crate::ingestion::ingest_handler(State(state), request).await
 }
 
-// ── POST /api/store-sealed ────────────────────────────────────────────────────
-
-/// `POST /api/store-sealed` — unsigned outer CBOR for `local` writes.
-///
-/// The body is the raw unsigned SEALED_V1 CBOR (no COSE wrapper).
-/// Owner = `jwt.sub`. Never writes an embedding row.
-pub async fn store_sealed_handler(
-    State(state): State<Arc<McpState>>,
-    Extension(claims): Extension<Claims>,
-    body: axum::body::Bytes,
-) -> Response {
-    let jwt_sub = &claims.sub;
-    let content_hash = hash_bytes(&body);
-    let attestation_id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    let solana_tx = format!("local:{}", &content_hash[..16]);
-    let arweave_tx = format!("local:{}", &attestation_id[..8]);
-
-    let save_res = {
-        let store = match state.store.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable");
-            }
-        };
-        store.save_sealed_attestation(
-            &attestation_id,
-            &content_hash,
-            &[],
-            &solana_tx,
-            &arweave_tx,
-            jwt_sub.as_str(), // signer
-            jwt_sub.as_str(), // owner
-            &now,
-            WriteMode::Local,
-            &body,
-        )
-    };
-    if let Err(e) = save_res {
-        return error_resp(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("persist failed: {e}"),
-        );
-    }
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "ok",
-            "attestation_id": attestation_id,
-            "content_hash": content_hash,
-            "solana_tx": solana_tx,
-            "arweave_tx": arweave_tx,
-        })),
-    )
-        .into_response()
+/// Hosted local writes are retired. Store signed bytes on the agent's device.
+pub async fn store_sealed_handler() -> Response {
+    error_resp(StatusCode::GONE, "hosted local storage retired; retain sealed bytes on the client")
 }
 
 // ── GET /api/sealed ───────────────────────────────────────────────────────────
@@ -321,92 +108,9 @@ pub async fn list_sealed_handler(
 // ── POST /api/grants ──────────────────────────────────────────────────────────
 
 /// Body of `POST /api/grants`.
-#[derive(Debug, Deserialize)]
-pub struct CreateGrantRequest {
-    /// base64 (standard) encoded COSE_Sign1 bytes of the GRANT_V1 artifact.
-    pub grant_cose_b64: String,
-    /// The blake3 hex hash of the sealed memory this grant targets.
-    pub memory_hash: String,
-    /// Optional reader DID/kid. `None` for broadcast/anonymous grants.
-    pub reader_kid: Option<String>,
-}
-
-/// `POST /api/grants` — persist a signed GRANT_V1 (author = jwt.sub).
-pub async fn create_grant_handler(
-    State(state): State<Arc<McpState>>,
-    Extension(claims): Extension<Claims>,
-    Json(req): Json<CreateGrantRequest>,
-) -> Response {
-    let jwt_sub = &claims.sub;
-
-    // Decode the COSE bytes.
-    let grant_cose = match base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        req.grant_cose_b64.as_bytes(),
-    ) {
-        Ok(b) => b,
-        Err(e) => {
-            return error_resp(
-                StatusCode::BAD_REQUEST,
-                &format!("grant_cose_b64 is not valid base64: {e}"),
-            );
-        }
-    };
-
-    // Verify the COSE_Sign1.
-    let result = match verify_artifact(&grant_cose, None) {
-        Ok(r) => r,
-        Err(e) => {
-            return error_resp(
-                StatusCode::BAD_REQUEST,
-                &format!("COSE verification failed: {e}"),
-            );
-        }
-    };
-    if !result.valid || !result.cose_signature {
-        return error_resp(StatusCode::UNAUTHORIZED, "grant COSE signature invalid");
-    }
-    // Enforce author == jwt.sub.
-    if result.signer != *jwt_sub {
-        return error_resp(
-            StatusCode::FORBIDDEN,
-            "grant signer does not match authenticated identity",
-        );
-    }
-
-    let grant_id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    let save_res = {
-        let store = match state.store.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable");
-            }
-        };
-        store.save_grant(
-            &grant_id,
-            &req.memory_hash,
-            req.reader_kid.as_deref(),
-            &grant_cose,
-            jwt_sub.as_str(),
-            &now,
-        )
-    };
-    if let Err(e) = save_res {
-        return error_resp(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("persist failed: {e}"),
-        );
-    }
-
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "status": "ok",
-            "grant_id": grant_id,
-        })),
-    )
-        .into_response()
+/// `POST /api/grants` — retired (410), distribute grants client-side.
+pub async fn create_grant_handler() -> Response {
+    error_resp(StatusCode::GONE, "hosted grant storage retired; retain and deliver signed grants client-side, or use sealed A2A recipient grants")
 }
 
 // ── GET /api/grants ───────────────────────────────────────────────────────────

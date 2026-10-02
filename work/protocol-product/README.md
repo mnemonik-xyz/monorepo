@@ -1,7 +1,8 @@
 # Mnemonik product and protocol
 
-Status: planned product contract. This package does not change runtime behavior.
-Baseline: `44fc172e3afa0efcd3beff2fa555b05dd8583eec`, checked on 2026-10-01.
+Status: product contract with implementation evidence. Source implementation and release acceptance are tracked separately.
+Reviewed baseline: `89532db4556e53e81b5243c57535a76046c08207`, checked on 2026-10-02.
+Task 1 records source and test evidence; implementation and release acceptance remain separate.
 
 Mnemonik gives an agent one service to save and restore signed memory.
 It accepts a finished artifact, delivers it through external infrastructure,
@@ -19,6 +20,9 @@ Product delivery does not depend on token issuance or a new blockchain.
 | [Surface map](surfaces.md) | Data, trust, modules and responsibility |
 | [Product plan](product-plan.md) | Packaging, sales tests and funding choices |
 | [Gap register](gaps.md) | Code evidence, remaining work and closure tests |
+| [Baseline audit](baseline-audit.md) | Baseline paths, existing tests and claim-to-release map |
+| [Implementation evidence](implementation-evidence.md) | Executed checks, supported scope and remaining release gates |
+| [Repository inventory](repository-inventory.md) | Package boundaries, migration work and proposed extraction gates |
 | [Decisions](decisions.md) | Owner inputs, recommendations and open choices |
 | [Proof of concept](proof-of-concept.md) | Research handoff roles, flow and failure demonstration |
 | [Acceptance plan](acceptance.md) | Evidence required before product claims |

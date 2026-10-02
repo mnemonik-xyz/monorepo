@@ -110,6 +110,7 @@ pub fn mock_state() -> Arc<McpState> {
     // returning `Ok(None)`, and the sign-callback recovery branch turns an
     // expired or replayed bundle into a 500 rather than a 410.
     crate::paid_operation::migrate_paid_operations(store.conn()).expect("migrate paid operations");
+    crate::delivery_operation::migrate(store.conn()).expect("delivery operation schema");
     crate::paid_artifact::migrate_paid_artifact_staging(store.conn())
         .expect("migrate paid artifact staging");
     crate::payment::migrate_free_anchor_usage(store.conn()).expect("migrate free anchor usage");
@@ -222,6 +223,7 @@ pub fn mock_state_with(
     // returning `Ok(None)`, and the sign-callback recovery branch turns an
     // expired or replayed bundle into a 500 rather than a 410.
     crate::paid_operation::migrate_paid_operations(store.conn()).expect("migrate paid operations");
+    crate::delivery_operation::migrate(store.conn()).expect("delivery operation schema");
     crate::paid_artifact::migrate_paid_artifact_staging(store.conn())
         .expect("migrate paid artifact staging");
     crate::payment::migrate_free_anchor_usage(store.conn()).expect("migrate free anchor usage");
@@ -350,6 +352,7 @@ pub fn mock_state_for_delivery(
     // returning `Ok(None)`, and the sign-callback recovery branch turns an
     // expired or replayed bundle into a 500 rather than a 410.
     crate::paid_operation::migrate_paid_operations(store.conn()).expect("migrate paid operations");
+    crate::delivery_operation::migrate(store.conn()).expect("delivery operation schema");
     crate::paid_artifact::migrate_paid_artifact_staging(store.conn())
         .expect("migrate paid artifact staging");
     crate::payment::migrate_free_anchor_usage(store.conn()).expect("migrate free anchor usage");
@@ -469,6 +472,7 @@ pub fn mock_state_with_embedder_and_endpoint(
     // returning `Ok(None)`, and the sign-callback recovery branch turns an
     // expired or replayed bundle into a 500 rather than a 410.
     crate::paid_operation::migrate_paid_operations(store.conn()).expect("migrate paid operations");
+    crate::delivery_operation::migrate(store.conn()).expect("delivery operation schema");
     crate::paid_artifact::migrate_paid_artifact_staging(store.conn())
         .expect("migrate paid artifact staging");
     crate::payment::migrate_free_anchor_usage(store.conn()).expect("migrate free anchor usage");

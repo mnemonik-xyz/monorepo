@@ -152,7 +152,7 @@ async fn anchor_sealed_rejects_wrong_producer() {
     .await;
 
     assert!(
-        status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED,
+        status == StatusCode::BAD_REQUEST || status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED,
         "expected 403/401 for cross-owner COSE, got {status}: {body}"
     );
 }
@@ -161,7 +161,7 @@ async fn anchor_sealed_rejects_wrong_producer() {
 // Test 2: store-sealed never writes an embedding row
 // ────────────────────────────────────────────────────────────────────────────
 #[tokio::test]
-async fn store_sealed_never_writes_embedding_row() {
+async fn retired_store_sealed_never_writes_embedding_row() {
     let state = mock_state();
     let app = build_router(state.clone());
 
@@ -180,7 +180,7 @@ async fn store_sealed_never_writes_embedding_row() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::OK, "store-sealed should succeed: {body}");
+    assert_eq!(status, StatusCode::GONE, "hosted local store must fail: {body}");
 
     // Verify no embedding row was written.
     let store = state.store.lock().unwrap();
@@ -435,7 +435,7 @@ async fn recall_includes_sealed_hidden_count() {
 // Test 7: /api/grants round-trip (POST + GET + DELETE)
 // ────────────────────────────────────────────────────────────────────────────
 #[tokio::test]
-async fn grants_crud_roundtrip() {
+async fn retired_grant_write_preserves_existing_read_and_withdrawal() {
     let state = mock_state();
     let app = build_router(state.clone());
 
@@ -476,8 +476,10 @@ async fn grants_crud_roundtrip() {
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let created: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(status, StatusCode::CREATED, "POST /api/grants failed: {created}");
-    let grant_id = created["grant_id"].as_str().expect("grant_id missing").to_string();
+    assert_eq!(status, StatusCode::GONE, "POST /api/grants must be retired: {created}");
+    let grant_id = "legacy-grant".to_string();
+    // Existing receipts remain readable/withdrawable; migration never erases them.
+    state.store.lock().unwrap().save_grant(&grant_id, &"d".repeat(64), Some("did:sol:ReaderABC"), &cose_bytes, &author_pubkey, "2026-10-02T00:00:00Z").unwrap();
 
     // GET /api/grants?reader=did:sol:ReaderABC
     let req = Request::builder()

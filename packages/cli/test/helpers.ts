@@ -1,6 +1,7 @@
 // Shared test helpers: temp config dir + JWT fixture builders.
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -50,10 +51,24 @@ export function makeJwt(sub: string, expSecondsFromNow = 3600): string {
 /** Install the WASM mock from the SDK's test helpers. Returns spy handle. */
 export function installWasmMock(): ReturnType<typeof buildWasmMock> {
   const mock = buildWasmMock();
-  __setWasmForTesting(mock as never);
+  // Deterministic test hash only; real BLAKE3 round trips have separate coverage.
+  const hash = (bytes:Uint8Array) => createHash("sha256").update(bytes).digest();
+  const seal = mock.seal_memory;
+  mock.seal_memory = (...args) => {const row=seal(...args);return {...row,content_hash:new Uint8Array(hash(row.outer_cbor))};};
+  __setWasmForTesting({...mock,blake3_hash_hex:(bytes:Uint8Array)=>hash(bytes).toString("hex")} as never);
   return mock;
 }
 
 export function clearWasmMock(): void {
   __setWasmForTesting(null);
+}
+
+/** Mock gateway reads of exactly the signed bytes persisted before upload. */
+export function signedDeliveryResponse(url: string): Response | undefined {
+  const root = join(process.env.MNEMONIC_CONFIG_DIR!, "sealed");
+  if (!url.endsWith("/api/ingest-artifact") && !url.startsWith("https://gateway.irys.xyz/")) return undefined;
+  const author = readdirSync(root)[0]!;
+  const row = JSON.parse(readFileSync(join(root,author,readdirSync(join(root,author))[0]!),"utf8"));
+  if (url.endsWith("/api/ingest-artifact")) return new Response(JSON.stringify({delivery_status:"verified",locator:`ar://${"a".repeat(43)}`,content_hash:row.memoryHash,author}),{headers:{"content-type":"application/json"}});
+  return new Response(Buffer.from(row.signedBytes,"base64"));
 }

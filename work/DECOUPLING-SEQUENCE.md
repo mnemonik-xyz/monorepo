@@ -1,5 +1,17 @@
 # Decoupling sequence
 
+## Current evidence — 2026-10-02
+
+The original table below records intended ordering, not current implementation status.
+Enumeration code shipped, and `1edebe7` removed memo writes from ordinary memory helpers and the callback.
+The direct sealed anchor route still submits a memo.
+The live [enumeration parity gate](chain-agnostic/tasks/T2-stage1-gate.md) remains unclosed in the reviewed records.
+Mocked stage 2 tests do not satisfy this gate.
+See the [baseline audit](protocol-product/baseline-audit.md) for current paths and remaining acceptance.
+This update neither waives the gate nor changes runtime behavior.
+
+## Original sequence — 2026-09-28
+
 One page naming the order of the decoupling work and, more usefully, **why each step blocks the
 next**. Written 2026-09-28.
 

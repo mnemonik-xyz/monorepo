@@ -95,44 +95,37 @@ expires: 2026-04-29T18:32:11.000Z
 Save a memory. Content is read from the positional argument or — if
 absent and stdin is piped — from stdin. Tags are comma-separated.
 
-- **Default (sealed local write)**: the memory is encrypted client-side
-  before leaving the device (`sealMemory`, write mode `store`). The server
-  stores only ciphertext. The CLI reads your keypair from the file
-  (`~/.mnemonic/identity.json`) and does not read the OS keychain.
-- **`--anchor`** (seal + anchor, write mode `anchor`): same E2E
-  encryption, but also anchors the sealed blob on Arweave and Solana.
-  The CLI reads the private key (one keychain read). This write can be
-  paid.
-- **`--public`** (plaintext local, legacy write mode `local`): no
-  encryption. The server stores the plaintext. Does not read the private
-  key. Add `--public --anchor` for a plaintext on-chain anchor.
+- **Default** encrypts and signs locally, then atomically saves ciphertext and
+  original signed bytes in `~/.mnemonic/sealed/<author>/<hash>.json` (0600 on Unix).
+  It requires a file-backed identity; it does not open the OS keychain or require
+  a login token. Back up this folder and your identity separately.
+- **`--anchor`** saves the same local record before sending its signed bytes to
+  `/api/ingest-artifact`. The client checks the external bytes independently.
+  It may read the OS keychain and require payment. Failed delivery retains the
+  original bytes; retry them using SDK `ingestPreparedMemory`. Running `sign`
+  again creates a new artifact and is not a payment-resume operation.
+- **`--public --anchor`** explicitly selects the legacy plaintext preparation
+  flow and permanent public disclosure. `--public` alone fails before HTTP:
+  hosted local plaintext writes are no longer supported by this CLI.
 
 ```bash
-$ mnemonic sign "private note" --tags=demo
-memory_hash: 6c7f9b2a...
-
-$ mnemonic sign "sealed claim" --anchor
-memory_hash: cafebabe...
-
-$ mnemonic sign "public claim" --public
-attestation_id: 01HX9F2KQ7...
-write_mode:     local
-
-$ mnemonic sign "public anchor" --public --anchor
-status:         anchored
-write_mode:     anchored
+mnemonic sign "private note" --tags=demo
+mnemonic sign "sealed claim" --anchor
+mnemonic sign "public claim" --public --anchor
 ```
 
-An older server can ask for a signature on a plaintext local write
-(`--public`). Then the CLI uses a key stored in a file. It does not read
-the OS keychain; it stops with an error instead. Upgrade the server or
-use `--anchor`.
+These are source behavior changes, not a statement of hosted rollout.
+See [client-prepared memory migration](../../docs/client-prepared-memory.md).
 
 ### `mnemonic open <hash|link> [--base-url <url>]`
 
 Decrypt and print a sealed memory. Accepts either a content hash (hex)
-returned by `mnemonic sign`, or a share link (URL with `#k=<base64url>`
-fragment). Reads the private key.
+returned by `mnemonic sign` and available in your local ciphertext folder,
+or an existing legacy share link (URL with `#k=<base64url>`
+fragment). Reads the private key. Local hash opening requires no login token
+and checks the ciphertext BLAKE3 hash before decrypting. This raw ciphertext
+check is not an author-signature verification API. Legacy links still use
+the hosted reader while their existing blobs remain available.
 
 ```bash
 $ mnemonic open 6c7f9b2a...
@@ -144,22 +137,9 @@ private note
 
 ### `mnemonic share <hash> --link | --to <did|key> [--base-url <url>]`
 
-Grant access to a sealed memory.
-
-- **`--link`**: create an anonymous bearer link. Anyone with the URL can
-  decrypt the memory. The content key is encoded in the `#k=` fragment.
-- **`--to <did|key>`**: targeted grant for a specific reader DID or
-  X25519 public key.
-
-Reads the private key.
-
-```bash
-$ mnemonic share 6c7f9b2a... --link
-url: https://mcp.mnemonik.xyz/open/6c7f9b2a...#k=AAEC...
-
-$ mnemonic share 6c7f9b2a... --to did:sol:6ZsT...
-grant_cbor: 8201...
-```
+Hosted grant creation is retired. This command returns a migration error before
+network or key access. Distribute signed grants client-side or use the sealed
+A2A recipient-grant workflow. Existing grants remain readable.
 
 ### `mnemonic grants [--base-url <url>]`
 
@@ -177,19 +157,16 @@ $ mnemonic grants
 Semantic recall over your stored memories. Default `--top-k` is 5;
 `--tag` filters to a single tag. Uses only your public key.
 
-Add `--sealed` to also search sealed memories. The query is embedded
-locally and ranked by cosine similarity — the server never sees the
-plaintext query. Reads the private key.
+`--sealed` fails before any network call. This CLI does not yet supply a local
+sealed index and embedder. Use SDK `recallSealed` with an explicit caller-local
+embedder and locally prepared memories. The private query is never sent by
+this unsupported CLI path.
 
 ```bash
 $ mnemonic recall "hello" --top-k=3
 2 hit(s) of 14:
   01HX9F2KQ7  sim=0.987  [demo,test]  hello world
   01HX9F0YBZ  sim=0.812  [demo]       hello again
-
-$ mnemonic recall "private" --sealed
-1 sealed hit(s):
-  6c7f9b2a...       sim=0.923
 ```
 
 ### `mnemonic verify <attestation_id> [--base-url <url>]`
@@ -355,7 +332,7 @@ mode:   0600 (file permissions restricted to current user)
 
 ## Private key access
 
-The CLI reads your private key only when a command must make a signature.
+The CLI reads your private key for signing, encryption, or decryption.
 When the key is in the OS keychain, a read can show a system prompt. The
 public key in `~/.mnemonic/identity.json` is sufficient for all other
 commands.
@@ -365,10 +342,11 @@ commands.
 | `recall`, `verify`, `whoami` (also `--with-count`), `grants` | Never |
 | `sign` (default sealed local write) | From file only — never from keychain |
 | `sign --anchor` | Yes, to encrypt and anchor |
-| `sign --public` (plaintext local) | Never |
+| `sign --public` without `--anchor` | Rejected before key access |
 | `sign --public --anchor` | Yes, to sign the memory |
-| `open`, `share` | Yes, to decrypt / re-wrap |
-| `recall --sealed` | Yes, to open sealed memories |
+| `open` | Yes, to decrypt |
+| `share` | Retired; rejected before key access |
+| `recall --sealed` | Unsupported; rejected before network or key access |
 | `login` (browserless), `prove`, `identity export` | Yes, to sign or export |
 
 These rules also apply (available now, CLI 0.3.0):
@@ -377,8 +355,8 @@ These rules also apply (available now, CLI 0.3.0):
   With no identity, it tells you to run `mnemonic init`.
 - The CLI does not move a file-stored key into the OS keychain. It also
   does not check the keychain entry before each command.
-- The default `sign` uses E2E encryption: the server stores only
-  ciphertext. Use `--public` for the legacy plaintext path.
+- The default `sign` saves encrypted ciphertext on your device.
+  Use `--public --anchor` for the legacy plaintext path.
 
 ## Session renewal
 

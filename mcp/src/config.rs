@@ -51,6 +51,9 @@ pub struct Config {
     /// Irys read gateway. `IRYS_GATEWAY_URL` is the preferred name;
     /// `ARWEAVE_URL` remains a backwards-compatible fallback.
     pub arweave_url: String,
+    /// Optional configured object-storage origin for migrated A2A parent bytes.
+    /// Parent locators select only a digest, never an arbitrary URL.
+    pub parent_blob_origin: Option<String>,
     /// Raw environment value, parsed and validated at startup so invalid
     /// values fail closed rather than silently falling back to mainnet.
     pub anchoring_network: String,
@@ -295,6 +298,9 @@ impl Config {
                 "ARWEAVE_URL",
                 "http://localhost:1984",
             ),
+            parent_blob_origin: std::env::var("MNEMONIC_PARENT_BLOB_ORIGIN")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
             anchoring_network: env_or("ANCHORING_NETWORK", "mainnet"),
             database_path: expand_path(&env_or(
                 "DATABASE_PATH",
@@ -536,7 +542,11 @@ pub fn validate_staging_config(cfg: &Config) -> Result<(), Vec<String>> {
             "UNIVERSAL_PAYWALL_NETWORK must not be the Anvil development chain (31337)".to_string(),
         );
     }
-    if errors.is_empty() { Ok(()) } else { Err(errors) }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 /// True when `url` contains a loopback address. Used by
@@ -716,7 +726,8 @@ mod tests {
         cfg.universal_paywall_network = "eip155:84532".to_string();
         cfg.universal_paywall_asset = "0x036CbD53842c5426634e7929541eC2318f3dCF7e".to_string();
         cfg.universal_paywall_pay_to = "0xaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaA".to_string();
-        cfg.universal_paywall_approval_url_base = "https://staging.mnemonik.xyz/approve".to_string();
+        cfg.universal_paywall_approval_url_base =
+            "https://staging.mnemonik.xyz/approve".to_string();
         let result = validate_staging_config(&cfg);
         assert!(result.is_err());
         let errors = result.unwrap_err();

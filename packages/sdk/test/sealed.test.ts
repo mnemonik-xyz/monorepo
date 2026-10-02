@@ -358,34 +358,20 @@ describe("signMemory SEALED_V1 integrity guard", () => {
 // ── sealMemory ──────────────────────────────────────────────────────────────
 
 describe("sealMemory", () => {
-  it("posts to /api/store-sealed and returns memoryHash", async () => {
-    const { client, calls } = await makeClient({
-      responses: [
-        {
-          body: { memory_hash: "aabbcc112233" },
-        },
-      ],
-    });
-
-    const result = await client.sealMemory("hello sealed", { mode: "store", tags: ["private"] });
-    expect(result.memoryHash).toBe("aabbcc112233");
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toContain("/api/store-sealed");
-    expect(calls[0]!.method).toBe("POST");
-    const body = calls[0]!.body as Record<string, unknown>;
-    expect(typeof body.outer_cbor).toBe("string"); // base64
-    expect(typeof body.content_hash).toBe("string"); // hex
-    expect(body.tags).toEqual(["private"]);
+  it("stores signed bytes locally without a hosted request", async () => {
+    const {client,calls} = await makeClient();
+    const result=await client.sealMemory("hello sealed",{mode:"store",tags:["private"]});
+    expect(result.memoryHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.signedBytes?.[0]).toBe(0x84);
+    expect(calls).toHaveLength(0);
+    expect((await client.openMemory(result.memoryHash)).content).toBe("hello sealed");
   });
 
-  it("posts to /api/anchor-sealed when mode is 'anchor'", async () => {
-    const { client, calls } = await makeClient({
-      responses: [{ body: { memory_hash: "deadbeef" } }],
-    });
-
-    await client.sealMemory("anchor me", { mode: "anchor" });
-    expect(calls[0]!.url).toContain("/api/anchor-sealed");
+  it("rejects an unverified receipt and retains original bytes for retry", async () => {
+    const {client,calls}=await makeClient({responses:[{body:{memory_hash:"deadbeef"}}]});
+    await expect(client.sealMemory("anchor me",{mode:"anchor"})).rejects.toBeInstanceOf(IntegrityError);
+    expect(calls[0]!.url).toContain("/api/ingest-artifact");
+    expect(client.preparedSealedMemories()).toHaveLength(1);
   });
 
   it("falls back to local content_hash when server omits memory_hash", async () => {
@@ -398,6 +384,13 @@ describe("sealMemory", () => {
     expect(result.memoryHash.length).toBeGreaterThan(0);
   });
 
+  it("preserves structured payment challenges and operation identity",async()=>{
+    const {client,calls}=await makeClient({responses:[{status:428,body:{operation_id:"op-1",status:"awaiting_wallet_link",retry_action:"resubmit_same_operation_and_original_bytes"}}]});
+    try {await client.ingestPreparedMemory(new Uint8Array([0x84]),{operationId:"op-1"});throw new Error("expected challenge");}
+    catch(e) {expect(e).toBeInstanceOf(ServerError);expect((e as ServerError).status).toBe(428);expect((e as ServerError).cause).toMatchObject({response:{operation_id:"op-1"},operationId:"op-1"});}
+    expect(calls).toHaveLength(1);
+  });
+
   it("throws UserError on empty content", async () => {
     const { client } = await makeClient();
     await expect(client.sealMemory("", { mode: "store" })).rejects.toBeInstanceOf(UserError);
@@ -407,7 +400,7 @@ describe("sealMemory", () => {
     const { client } = await makeClient({
       responses: [{ status: 401, body: { error: "unauthorized" } }],
     });
-    await expect(client.sealMemory("secret", { mode: "store" })).rejects.toBeInstanceOf(
+    await expect(client.sealMemory("secret", { mode: "anchor" })).rejects.toBeInstanceOf(
       (await import("../src/errors.js")).AuthError
     );
   });
@@ -416,7 +409,7 @@ describe("sealMemory", () => {
 // ── openMemory ──────────────────────────────────────────────────────────────
 
 describe("openMemory", () => {
-  it("fetches sealed blob and decrypts with identity key", async () => {
+  it("opens restored bytes with identity key", async () => {
     // Build the fake sealed blob encoding "secret note".
     const innerJson = JSON.stringify({ type: "memory", content: "secret note" });
     const innerBytes = new TextEncoder().encode(innerJson);
@@ -434,7 +427,7 @@ describe("openMemory", () => {
       ],
     });
 
-    const result = await client.openMemory("aabbccdd");
+    const result = await client.openMemory(outerCbor);
     expect(result.content).toBe("secret note");
     expect(result.innerJson instanceof Uint8Array).toBe(true);
   });
@@ -463,7 +456,7 @@ describe("openMemory", () => {
         { body: garbage, headers: { "content-type": "application/cbor" } },
       ],
     });
-    await expect(client.openMemory("deadbeef")).rejects.toBeInstanceOf(IntegrityError);
+    await expect(client.openMemory(garbage)).rejects.toBeInstanceOf(IntegrityError);
   });
 });
 
@@ -516,7 +509,7 @@ describe("sealMemory + openMemory round-trip (mock WASM)", () => {
     roundTripClient.setKeypair(keypair);
 
     const { memoryHash } = await roundTripClient.sealMemory(content, { mode: "store" });
-    expect(memoryHash).toBe("cafebabe");
+    expect(memoryHash).toMatch(/^[a-f0-9]{64}$/);
 
     const opened = await roundTripClient.openMemory(memoryHash);
     expect(opened.content).toBe(content);
@@ -525,54 +518,13 @@ describe("sealMemory + openMemory round-trip (mock WASM)", () => {
 
 // ── share("link") ────────────────────────────────────────────────────────────
 
-describe("share (anonymous link)", () => {
-  it("returns URL with #k= fragment", async () => {
-    const { client } = await makeClient({
-      responses: [
-        // share → GET /api/sealed/{hash} (outer cbor)
-        {
-          body: new Uint8Array([0xaa, 0xbb, 0xcc]),
-          headers: { "content-type": "application/cbor" },
-        },
-        // share → POST /api/grants (link)
-        {
-          body: {
-            fragment: "k=VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVc",
-            url: "https://example.test/open/deadbeef#k=VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVc",
-          },
-        },
-      ],
-    });
-
-    const result = await client.share("deadbeef", "link");
-    expect(result.type).toBe("link");
-    if (result.type === "link") {
-      expect(result.url).toContain("#k=");
-    }
-  });
-
-  it("constructs a fallback URL from baseUrl + hash when server omits url", async () => {
-    const { client } = await makeClient({
-      responses: [
-        { body: new Uint8Array([0xa0]), headers: { "content-type": "application/cbor" } },
-        {
-          body: {
-            fragment: "k=AAAA",
-            // No `url` field — client should construct one.
-          },
-        },
-      ],
-    });
-
-    const result = await client.share("hash123", "link");
-    expect(result.type).toBe("link");
-    if (result.type === "link") {
-      expect(result.url).toMatch(/^https:\/\/example\.test\/open\/hash123#k=/);
-    }
+describe("share migration", () => {
+  it("rejects retired hosted grant creation before any request", async () => {
+    const {client,calls}=await makeClient();
+    await expect(client.share("deadbeef","link")).rejects.toThrow(/retired/);
+    expect(calls).toHaveLength(0);
   });
 });
-
-// ── importLink ───────────────────────────────────────────────────────────────
 
 describe("importLink", () => {
   it("parses #k= fragment and opens the memory", async () => {
@@ -678,96 +630,29 @@ describe("listGrants", () => {
 // ── recallSealed ─────────────────────────────────────────────────────────────
 
 describe("recallSealed", () => {
-  it("ranks items locally by cosine similarity (descending)", async () => {
-    const queryEmbedding = [1, 0, 0, 0];
-    const items = [
-      { memory_hash: "hash-low",  embedding: [0, 1, 0, 0] },  // similarity 0
-      { memory_hash: "hash-high", embedding: [1, 0, 0, 0] },  // similarity 1.0
-      { memory_hash: "hash-mid",  embedding: [0.7, 0.7, 0, 0] }, // ~0.7
-    ];
-
-    const { client } = await makeClient({
-      responses: [
-        // GET /api/sealed (fetched first)
-        { body: { items } },
-        // POST /api/embed (fetched second)
-        { body: { embedding: queryEmbedding } },
-      ],
-    });
-
-    const hits = await client.recallSealed("query text", { topK: 3 });
-    expect(hits).toHaveLength(3);
-    // Best match first.
-    expect(hits[0]!.memoryHash).toBe("hash-high");
-    expect(hits[0]!.similarity).toBeCloseTo(1.0, 2);
-    expect(hits[2]!.memoryHash).toBe("hash-low");
-    expect(hits[2]!.similarity).toBeCloseTo(0.0, 2);
+  const embedder={embed:async(text:string)=>new Float32Array(text==="low"?[0,1]:text==="mid"?[1,1]:[1,0])};
+  it("ranks locally opened memories without any hosted request",async()=>{
+    const {client,calls}=await makeClient();
+    const low=await client.sealMemory("low",{mode:"store"});
+    const high=await client.sealMemory("high",{mode:"store"});
+    await client.sealMemory("mid",{mode:"store"});
+    const hits=await client.recallSealed("query",{embedder,topK:3});
+    expect(hits.map(h=>h.memoryHash)).toEqual([high.memoryHash,expect.any(String),low.memoryHash]);
+    expect(hits[0]!.similarity).toBeCloseTo(1);expect(hits[2]!.similarity).toBe(0);
+    expect(calls).toHaveLength(0);
   });
-
-  it("respects topK limit", async () => {
-    const items = Array.from({ length: 20 }, (_, i) => ({
-      memory_hash: `hash-${i}`,
-      embedding: [Math.random(), Math.random()],
-    }));
-    const { client } = await makeClient({
-      responses: [
-        // GET /api/sealed first, then POST /api/embed
-        { body: { items } },
-        { body: { embedding: [1, 0] } },
-      ],
-    });
-    const hits = await client.recallSealed("query", { topK: 5 });
-    expect(hits).toHaveLength(5);
+  it("honors topK",async()=>{
+    const {client}=await makeClient();await client.sealMemory("low",{mode:"store"});await client.sealMemory("high",{mode:"store"});
+    expect(await client.recallSealed("q",{embedder,topK:1})).toHaveLength(1);
   });
-
-  it("uses pluggable Embedder instead of /api/embed", async () => {
-    let embedderCalled = 0;
-    const customEmbedder = {
-      async embed(_text: string): Promise<Float32Array> {
-        embedderCalled++;
-        return new Float32Array([1, 0, 0]);
-      },
-    };
-
-    const items = [
-      { memory_hash: "m1", embedding: [1, 0, 0] },
-      { memory_hash: "m2", embedding: [0, 1, 0] },
-    ];
-
-    const { client, calls } = await makeClient({
-      responses: [
-        // GET /api/sealed only (no POST /api/embed call expected)
-        { body: { items } },
-      ],
-    });
-
-    const hits = await client.recallSealed("query", { embedder: customEmbedder });
-    expect(embedderCalled).toBe(1);
-    expect(hits[0]!.memoryHash).toBe("m1"); // best match
-    // No /api/embed call in captured HTTP calls.
-    expect(calls.every(c => !c.url.includes("/api/embed"))).toBe(true);
+  it("requires an explicit embedder before touching the network",async()=>{
+    const {client,calls}=await makeClient();await expect(client.recallSealed("private query")).rejects.toThrow(/local embedder/);expect(calls).toHaveLength(0);
   });
-
-  it("returns empty array when index is empty", async () => {
-    const { client } = await makeClient({
-      responses: [
-        // GET /api/sealed first, then POST /api/embed (or skipped if no items)
-        { body: { items: [] } },
-        { body: { embedding: [1, 0] } },
-      ],
-    });
-    const hits = await client.recallSealed("anything");
-    expect(hits).toEqual([]);
+  it("empty local cache returns no hits",async()=>{
+    const {client}=await makeClient();expect(await client.recallSealed("q",{embedder})).toEqual([]);
   });
-
-  it("throws ServerError on 500 from /api/sealed", async () => {
-    const { client } = await makeClient({
-      responses: [
-        // GET /api/sealed fails with 500
-        { status: 500, body: "internal error" },
-      ],
-    });
-    await expect(client.recallSealed("q")).rejects.toBeInstanceOf(ServerError);
+  it("rejects invalid result bounds",async()=>{
+    const {client}=await makeClient();await expect(client.recallSealed("q",{embedder,topK:-1})).rejects.toBeInstanceOf(UserError);
   });
 });
 

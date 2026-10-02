@@ -771,7 +771,7 @@ async fn concurrent_duplicate_callbacks_anchor_once_and_consume_one_free_anchor(
 }
 
 #[tokio::test]
-async fn an_already_anchored_content_hash_is_not_anchored_again() {
+async fn a_sql_only_anchor_receipt_cannot_confirm_external_delivery() {
     let _env = env_lock(true).await;
     let server = paid_server(10, 1000);
     let kp = linked_key(&server.state);
@@ -802,11 +802,10 @@ async fn an_already_anchored_content_hash_is_not_anchored_again() {
             .unwrap();
     }
     let (status, body) = submit(&server.app, &kp, &parked).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["already_anchored"], true, "{body}");
-    assert_eq!(body["attestation_id"], "existing-row", "{body}");
-    assert_eq!(body["solana_tx"], "SOL_EXISTING", "{body}");
-    // No second row, no free anchor spent.
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["delivery_status"], "verification_pending", "{body}");
+    assert_eq!(body["payment_status"], "not_required", "{body}");
+    // SQL alone cannot prove external delivery. No second row or quota charge.
     assert_eq!(server.attestation_count(&kp.pubkey().to_string()), 1);
     assert_eq!(remaining_today(&server.state, &kp), (10, 1000));
 }

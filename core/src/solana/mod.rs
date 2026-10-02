@@ -174,40 +174,83 @@ impl SolanaClient {
     /// paginated RPC enumerates the full anchored ledger. Non-anchor memos
     /// and memo-less txs (funding, fees) are skipped.
     pub async fn list_memo_anchors(&self, wallet: &str) -> anyhow::Result<Vec<MemoAnchor>> {
-        let mut anchors = Vec::new();
+        let report = self.scan_memo_anchors(wallet, 1000).await;
+        anyhow::ensure!(
+            report.exhausted,
+            "{}",
+            report
+                .error
+                .unwrap_or_else(|| "memo discovery budget exhausted".into())
+        );
+        Ok(report.items)
+    }
+
+    /// Detailed bounded scan; previously fetched anchors survive source errors.
+    pub async fn scan_memo_anchors(
+        &self,
+        wallet: &str,
+        max_pages: usize,
+    ) -> crate::restore::SourceScan<MemoAnchor> {
+        let mut report = crate::restore::SourceScan::default();
         let mut before: Option<String> = None;
-        // 1000 sigs/page; 1000 pages is a backstop far above current scale.
-        for _ in 0..1000 {
+        let mut seen = std::collections::HashSet::new();
+        if !(1..=1000).contains(&max_pages) {
+            report.error = Some("invalid memo page budget".into());
+            return report;
+        }
+        for _ in 0..max_pages {
             let mut opts = serde_json::json!({"limit": 1000});
             if let Some(b) = &before {
                 opts["before"] = serde_json::Value::String(b.clone());
             }
-            let result = self
+            let result = match self
                 .rpc("getSignaturesForAddress", serde_json::json!([wallet, opts]))
-                .await?;
-            let entries = result.as_array().cloned().unwrap_or_default();
-            let page_len = entries.len();
-            for e in &entries {
+                .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    report.error = Some(e.to_string());
+                    break;
+                }
+            };
+            let Some(entries) = result.as_array() else {
+                report.error = Some("malformed memo response".into());
+                break;
+            };
+            let mut last = None;
+            for e in entries {
                 let Some(sig) = e["signature"].as_str() else {
-                    continue;
+                    report.error = Some("memo entry has no signature".into());
+                    break;
                 };
                 if let Some(anchor) = parse_anchor_memo(e["memo"].as_str()) {
-                    anchors.push(MemoAnchor {
+                    report.items.push(MemoAnchor {
                         solana_tx: sig.to_string(),
                         arweave_tx: anchor.0,
                         content_hash: anchor.1,
                         block_time: e["blockTime"].as_i64(),
                     });
                 }
-                before = Some(sig.to_string());
+                last = Some(sig.to_string());
             }
-            if page_len < 1000 {
+            if report.error.is_some() {
                 break;
             }
+            if entries.len() < 1000 {
+                report.exhausted = true;
+                break;
+            }
+            match last {
+                Some(last) if seen.insert(last.clone()) => before = Some(last),
+                _ => {
+                    report.error = Some("memo cursor loop".into());
+                    break;
+                }
+            }
         }
-        // RPC returns newest-first; recovery wants oldest-first.
-        anchors.reverse();
-        Ok(anchors)
+        report.budget_exhausted = !report.exhausted && report.error.is_none();
+        report.items.reverse();
+        report
     }
 
     pub async fn airdrop(&self, pubkey: &Pubkey, lamports: u64) -> anyhow::Result<String> {
@@ -313,7 +356,10 @@ impl SolanaClient {
                     continue;
                 }
                 let post_amount: u64 = post_entry["uiTokenAmount"]["amount"]
-                    .as_str().unwrap_or("0").parse().unwrap_or(0);
+                    .as_str()
+                    .unwrap_or("0")
+                    .parse()
+                    .unwrap_or(0);
                 let account_index = post_entry["accountIndex"].as_u64().unwrap_or(u64::MAX);
                 let pre_amount: u64 = pre_balances
                     .iter()
@@ -567,7 +613,10 @@ mod tests {
             ));
         });
         let client = SolanaClient::new(&server.base_url());
-        let delta = client.get_token_balance_delta("any_sig", recipient, usdc_mint).await.unwrap();
+        let delta = client
+            .get_token_balance_delta("any_sig", recipient, usdc_mint)
+            .await
+            .unwrap();
         assert_eq!(delta, Some(1_500_000));
     }
 
@@ -579,7 +628,10 @@ mod tests {
             then.status(200).body(r#"{"jsonrpc":"2.0","id":1,"result":{"meta":{"err":{"InstructionError":[0,"Custom"]}},"transaction":{},"slot":1}}"#);
         });
         let client = SolanaClient::new(&server.base_url());
-        let delta = client.get_token_balance_delta("fail_sig", "Recip", "Mint").await.unwrap();
+        let delta = client
+            .get_token_balance_delta("fail_sig", "Recip", "Mint")
+            .await
+            .unwrap();
         assert_eq!(delta, None);
     }
 
@@ -588,11 +640,14 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/").body_includes("getTransaction");
-            then.status(200).body(r#"{"jsonrpc":"2.0","id":1,"result":null}"#);
+            then.status(200)
+                .body(r#"{"jsonrpc":"2.0","id":1,"result":null}"#);
         });
         let client = SolanaClient::new(&server.base_url());
-        let delta = client.get_token_balance_delta("missing_sig", "Recip", "Mint").await.unwrap();
+        let delta = client
+            .get_token_balance_delta("missing_sig", "Recip", "Mint")
+            .await
+            .unwrap();
         assert_eq!(delta, None);
     }
-
 }

@@ -1502,6 +1502,7 @@ async fn sign_memory_inline(
     // 5. Store on-chain (or locally) — routed by per-request `write_mode`,
     //    not the operator's `STORAGE_MODE`. A `local` request against a
     //    `STORAGE_MODE=full` deploy stays free (no Arweave/Solana writes).
+    let mut original_bytes = Vec::new();
     let (solana_tx, arweave_tx) = match write_mode {
         WriteMode::Local => {
             let local_ar = format!("local:{}", &attestation_id[..8]);
@@ -1518,6 +1519,7 @@ async fn sign_memory_inline(
             let signed = sign_artifact(&artifact, &schema::MEMORY_V1, keypair)
                 .map_err(|e| anyhow::anyhow!("COSE signing failed: {e}"))?;
             debug_assert_eq!(signed.content_hash, content_hash);
+            original_bytes = signed.cose_bytes.clone();
             let producer_did = identity::did_sol(keypair);
             let ar_tx = arweave
                 .write_item(
@@ -1543,12 +1545,8 @@ async fn sign_memory_inline(
 
     // 6a. Save row immediately after chain anchor.
     //
-    // Two critical reasons for saving BEFORE the delivery check:
-    //   (1) The in-process recall stage of the delivery check reads from
-    //       SQLite — the row must exist by the time we query for it.
-    //   (2) On delivery failure we re-save with `WriteMode::Local`
-    //       (INSERT OR REPLACE) so the embed + signature aren't wasted
-    //       even though the chain anchor isn't proved retrievable.
+    // Receipt persistence is reported separately and cannot invalidate an
+    // independently verified external delivery.
     //
     // Owner decision D-8 (2026-09-27): an anchored anchored write is
     // plain text on Arweave, so it is stored and reported as `public` with
@@ -1560,7 +1558,7 @@ async fn sign_memory_inline(
 
     // ONE short critical section: take the SQLite mutex, write the
     // attestation row, drop the mutex. No `.await` while held (Decision 8).
-    {
+    let persistence = {
         let store = store.lock().unwrap();
         // T2: the persisted `write_mode` column is the SAME value the
         // paywall gate consulted (single source of truth — Decision 1).
@@ -1588,8 +1586,10 @@ async fn sign_memory_inline(
             write_mode,
             visibility,
             &embedding,
-        )?;
-    }
+        )
+    };
+    let receipt_persisted = persistence.is_ok();
+    if write_mode == WriteMode::Local { persistence?; }
 
     // 6b. Delivery confirmation — Anchored ONLY. T3 (modes-user-choice).
     //
@@ -1612,6 +1612,7 @@ async fn sign_memory_inline(
     let recall_verified_at: Option<String> = if write_mode == WriteMode::Anchored {
         let ctx = DeliveryContext {
             arweave,
+            original_bytes: &original_bytes,
             store,
             timeout: delivery_refetch_timeout,
             attestation_id: &attestation_id,
@@ -1680,6 +1681,7 @@ async fn sign_memory_inline(
         "arweave_tx": arweave_tx,
         "signer": owner_pubkey,
         "signature": signature,
+        "receipt_persisted": receipt_persisted,
         "did_sol": owner_did,
         "timestamp": now,
         "storage_mode": storage_mode,
@@ -1721,89 +1723,22 @@ async fn sign_memory_inline(
     Ok(out)
 }
 
-/// Run the post-anchor delivery-confirmation pipeline for an anchored
-/// write. Three sequential checks; the first failure short-circuits with
-/// the stage label suitable for the typed error envelope.
-///
-/// 1. **Refetch.** Pull the anchored COSE bytes back from Arweave with an
-///    exponential-backoff retry capped by `timeout`. Catches the "anchor
-///    accepted but bytes not retrievable" silent failure (Arweave's
-///    eventual-consistency window).
-/// 2. **Verify.** Run `verify_cose` over the re-fetched bytes with the
-///    expected hash + tx ids. Catches tampering between write and read
-///    (incl. operator-side adversary in shared-tenant deployments) and
-///    catches the case where some other key signed the bytes.
-/// 3. **Recall.** Confirm "we can read back the row we just wrote" via a
-///    primary-key existence check scoped to the owner pubkey. Catches DB
-///    write loss between `save_attestation` and the delivery check
-///    completing (rare but possible if a concurrent tx in another mcp
-///    process rolls back our write, or in the deferred-signing path if
-///    `set_correlation_id` somehow drops the row).
-///
-///    NB (round-2 fix): the round-1 implementation here ran a cosine
-///    similarity search using `embedder.embed(content_hash)` as the query
-///    vector. That worked under `StubEmbedder` (constant vector → all
-///    rows are neighbours) but produces no semantic match for real
-///    embedders like `FastEmbedder`/`OpenAIEmbedder` — recall would miss
-///    the target row in any non-trivial corpus. The check's *purpose* is
-///    "can we read it back", which is a database existence question, not
-///    a semantic-search question.
-///
-/// Pure async — no SQLite lock held across `.await`. The caller's lock
-/// scopes (save_attestation in the success/failure branches) sit OUTSIDE
-/// this function entirely.
-#[allow(clippy::too_many_arguments)]
+/// Verify fetched original bytes, signature, content hash and expected author.
+/// Receipt SQL availability is independent of this cryptographic observation.
 pub async fn perform_delivery_check(
     arweave: &ArweaveClient,
-    store: &std::sync::Mutex<SqliteStore>,
     arweave_tx: &str,
-    solana_tx: &str,
     content_hash: &str,
-    attestation_id: &str,
-    owner_pubkey: &str,
+    expected_author: &str,
+    original_bytes: &[u8],
     timeout: Duration,
 ) -> Result<(), &'static str> {
-    // Stage 1: refetch the anchored bytes within a wall-clock budget.
-    let refetched = match arweave_refetch_with_budget(arweave, arweave_tx, timeout).await {
-        Ok(bytes) => bytes,
-        Err(_) => return Err("refetch"),
-    };
-
-    // Stage 2: COSE-verify the re-fetched bytes against the expected content
-    // hash. The Arweave re-fetch + COSE verification is the stronger half of
-    // the delivery check; the Solana memo comparison is dropped (stage 2,
-    // chain-agnostic/decisions.md): new rows store solana_tx = '' so the
-    // comparison would always fail for them, and legacy rows can still be
-    // verified directly via `verify_anchored` → `read_memo`.
-    // `solana_tx` is retained in the function signature for the stage-3 recall
-    // label and for tracing; it is no longer passed into `verify_cose`.
-    let _ = solana_tx;
-    let verify_result = match verify_cose(&refetched, Some(content_hash), None, arweave_tx) {
-        Ok(v) => v,
-        Err(_) => return Err("verify"),
-    };
-    if verify_result["status"].as_str() != Some("verified") {
+    let refetched = arweave_refetch_with_budget(arweave, arweave_tx, timeout)
+        .await.map_err(|_| "refetch")?;
+    if refetched != original_bytes { return Err("verify"); }
+    let verified = cose_verify(&refetched, Some(content_hash)).map_err(|_| "verify")?;
+    if !verified.valid || !verified.algorithm_valid || !verified.cose_signature || verified.signer != expected_author {
         return Err("verify");
-    }
-
-    // Stage 3: primary-key existence check scoped to owner_pubkey. Brief
-    // SQLite lock; no `.await` while held. Owner scoping preserves the
-    // tenant-isolation invariant (Decision 9 / T4) — even though we are
-    // looking up by the row's own attestation_id, a future change that
-    // dropped owner from the predicate would let any caller probe rows
-    // by attestation_id; the explicit AND defends in depth.
-    let exists: bool = {
-        let store_g = store.lock().unwrap();
-        let conn = store_g.conn();
-        conn.query_row(
-            "SELECT 1 FROM attestations WHERE attestation_id = ? AND owner_pubkey = ?",
-            rusqlite::params![attestation_id, owner_pubkey],
-            |_| Ok(true),
-        )
-        .unwrap_or(false)
-    };
-    if !exists {
-        return Err("recall");
     }
     Ok(())
 }
@@ -1887,6 +1822,7 @@ async fn arweave_refetch_with_budget(
 /// reading like declarations rather than 11-argument soup.
 pub struct DeliveryContext<'a> {
     pub arweave: &'a ArweaveClient,
+    pub original_bytes: &'a [u8],
     pub store: &'a std::sync::Mutex<SqliteStore>,
     pub timeout: Duration,
     pub attestation_id: &'a str,
@@ -1913,36 +1849,14 @@ pub enum DeliveryOutcome {
     Demoted { stage: &'static str },
 }
 
-/// Single shared delivery-confirmation helper used by BOTH the inline
-/// `sign_memory_inline` path AND the deferred `sign_callback_handler`
-/// path. Performs the three-stage check (refetch → verify_cose →
-/// primary-key recall) and, on failure, demotes the row in place to
-/// `WriteMode::Local` so caller logic (refund / counter / typed-error
-/// emission) is identical across both code paths.
-///
-/// Critical-section discipline (Decision 8): the SQLite mutex is taken
-/// only inside `perform_delivery_check`'s primary-key existence check
-/// AND inside this function's failure-branch `save_attestation(Local)`
-/// call. Both are short, sync, and drop the lock before any `.await`.
-/// No mutex is held across the network calls.
-///
-/// **Pre-condition:** the caller MUST have already persisted the row with
-/// `WriteMode::Anchored` BEFORE calling this. The recall stage performs
-/// a primary-key existence check; if the row isn't there yet, the helper
-/// will report stage = "recall" and demote (which on a fresh-row scenario
-/// has no row to overwrite, leading to a confusing demotion-of-nothing).
+/// Legacy inline/callback delivery adapter. External verification is independent
+/// of receipt persistence; legacy failure demotion remains a migration behavior.
 pub async fn confirm_delivery_or_demote(
     ctx: DeliveryContext<'_>,
 ) -> anyhow::Result<DeliveryOutcome> {
     match perform_delivery_check(
-        ctx.arweave,
-        ctx.store,
-        ctx.arweave_tx,
-        ctx.solana_tx,
-        ctx.content_hash,
-        ctx.attestation_id,
-        ctx.owner_pubkey,
-        ctx.timeout,
+        ctx.arweave, ctx.arweave_tx, ctx.content_hash, ctx.signer_pubkey,
+        ctx.original_bytes, ctx.timeout,
     )
     .await
     {
@@ -3104,178 +3018,6 @@ pub(crate) fn try_write_sealed_index(
     }
     // Suppress the unused warning for rk_wrap_blob (we used it to gate the write).
     let _ = rk_wrap_blob;
-}
-
-// ── Task 13: hosted recall with RK ────────────────────────────────────────────
-
-/// HTTP `mnemonic_recall` with hosted recall session (Task 13).
-///
-/// Called when the authenticated owner has an active in-RAM recall session
-/// (i.e. the server holds their 32-byte recall key `rk` for this request).
-///
-/// Behaviour:
-/// 1. Run the standard non-sealed recall to collect plaintext rows.
-/// 2. Fetch `sealed_index` rows for this owner (up to `limit` entries).
-/// 3. For each sealed-index row, decrypt the embedding with `rk`
-///    (XChaCha20Poly1305), compute cosine similarity, open the sealed blob
-///    with `rk` (unwrap K from `k_wrap_rk`, then decrypt the content).
-/// 4. Merge opened sealed rows into results, sorted by score.
-/// 5. Return with `sealed: true` on opened rows; `sealed_hidden` is omitted
-///    (all sealed rows are visible while the session is active).
-///
-/// After session ends (DELETE or TTL), the standard `recall` path resumes
-/// and `sealed_hidden` reappears.
-#[allow(clippy::too_many_arguments)]
-pub async fn recall_with_hosted_rk(
-    keypair: &LazyKeypair,
-    store: &std::sync::Mutex<mnemonic_core::storage::SqliteStore>,
-    embedder: &dyn Embedder,
-    query: &str,
-    limit: usize,
-    owner_pubkey: &str,
-    rk: &zeroize::Zeroizing<[u8; 32]>,
-) -> serde_json::Value {
-    use mnemonic_core::sealed::content::decrypt_content;
-    use mnemonic_core::sealed::wrap::unwrap_key;
-    use mnemonic_core::storage::SealedIndexRow;
-
-    let signer_pubkey = keypair.pubkey_base58();
-    let query_emb = embedder.embed(query);
-
-    // 1. Standard (non-sealed) recall.
-    let (std_results, total, merkle_commitment) = {
-        let store_g = store.lock().unwrap();
-        let found = store_g
-            .search(&query_emb, Some(owner_pubkey), None, limit)
-            .unwrap_or_default();
-        let total = store_g.count(&signer_pubkey).unwrap_or(0);
-        let mc = build_merkle_commitment(&store_g, owner_pubkey, &found);
-        (found, total, mc)
-    };
-    let (mut labelled_results, _std_boundary) =
-        label_recall_results(std_results, Some(owner_pubkey));
-
-    // 2. Fetch sealed-index rows.
-    let index_rows: Vec<SealedIndexRow> = {
-        let store_g = store.lock().unwrap();
-        store_g
-            .list_sealed_index(owner_pubkey, limit)
-            .unwrap_or_default()
-    };
-
-    // 3. Decrypt embeddings, rank, open top-k.
-    let mut scored_rows: Vec<(f32, SealedIndexRow)> = Vec::new();
-    for row in index_rows {
-        // Decrypt embedding ciphertext.
-        let nonce: [u8; 24] = match row.emb_nonce.as_slice().try_into() {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-        let emb_pt = match decrypt_content(rk, &nonce, b"sealed-emb", &row.emb_ct) {
-            Ok(pt) => pt,
-            Err(_) => continue,
-        };
-        // Deserialise: raw f32 little-endian bytes.
-        if emb_pt.len() % 4 != 0 {
-            continue;
-        }
-        let row_emb: Vec<f32> = emb_pt
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| f32::from_le_bytes(*c))
-            .collect();
-
-        // Cosine similarity.
-        let score = cosine_similarity(&query_emb, &row_emb);
-        if score > 0.0 {
-            scored_rows.push((score, row));
-        }
-    }
-
-    // Sort descending by score, keep top `limit`.
-    scored_rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    scored_rows.truncate(limit);
-
-    // 4. Unwrap K and open sealed blob for each top row.
-    for (score, row) in scored_rows {
-        // `k_wrap_rk` = enc_len_byte(4) || enc || wk, but we serialised it as
-        // enc (32 bytes) || wk (48 bytes) = 80 bytes total.
-        if row.k_wrap_rk.len() < 80 {
-            continue;
-        }
-        let enc = &row.k_wrap_rk[..32];
-        let wk = &row.k_wrap_rk[32..];
-
-        // Unwrap K using the recall key as the recipient secret.
-        // The enc/wk was produced by wrap_key(k, owner_rk_x25519_pk, ct_hash, author_did).
-        // For hosted recall we simplified to use the RK directly as a symmetric
-        // key for enc+wk wrapping via XChaCha20 (see save_sealed_attestation hook).
-        // However to stay consistent with the existing HPKE infra, the sealed_index
-        // stores enc+wk produced by wrap_key(k, rk_x25519_pub, ct_hash, author_did).
-        // We need the rk as the X25519 secret to unwrap.
-        //
-        // In V1 we simplify: the RK is used directly as the X25519 secret (the
-        // Curve25519 library accepts any 32 bytes — the clamping is applied internally).
-        let content_hash_bytes: [u8; 32] = match blake3::Hash::from_hex(&row.content_hash) {
-            Ok(h) => *h.as_bytes(),
-            Err(_) => continue,
-        };
-        let author_did = format!("did:sol:{owner_pubkey}");
-        let k = match unwrap_key(enc, wk, rk, &content_hash_bytes, &author_did) {
-            Ok(k) => k,
-            Err(_) => continue,
-        };
-
-        // Open the sealed blob.
-        let inner_bytes = match mnemonic_core::sealed::open_with_key(&row.sealed_blob, &k) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        let inner_json = match mnemonic_core::codec::canonical::from_canonical_cbor(&inner_bytes) {
-            Ok(j) => j,
-            Err(_) => continue,
-        };
-        let content = inner_json["content"].as_str().unwrap_or("").to_string();
-        let author_did_field = format!("did:sol:{owner_pubkey}"); // owner is the author
-        labelled_results.push(serde_json::json!({
-            "attestation_id": row.attestation_id,
-            "content_hash": row.content_hash,
-            "content": content,
-            "created_at": row.created_at,
-            "source": "own",
-            "sealed": true,
-            "author_did": author_did_field,
-            "score": score,
-        }));
-    }
-
-    serde_json::json!({
-        "query": query,
-        "results": labelled_results,
-        "total_attestations": total,
-        "owner_pubkey": owner_pubkey,
-        "embed_provider": embedder.provider_name(),
-        "embed_model": embedder.model_id(),
-        "verifiable": embedder.is_open_weights(),
-        "merkle_commitment": merkle_commitment,
-        // When a session is active, all sealed rows are visible — no sealed_hidden notice.
-    })
-}
-
-/// Compute cosine similarity between two equal-length f32 vectors.
-/// Returns 0.0 if either vector is zero-length or their lengths differ.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let mag_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let mag_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if mag_a == 0.0 || mag_b == 0.0 {
-        return 0.0;
-    }
-    dot / (mag_a * mag_b)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -4661,10 +4403,9 @@ pub async fn ingest_a2a(
         .map_err(invalid)?;
     if prev.is_some() {
         let locator = prev_locator
-            .and_then(|s| s.strip_prefix("ar://"))
             .ok_or_else(|| JsonRpcError::simple(-32602, "ParentLocatorRequired"))?;
         let bytes = arweave
-            .read_a2a(locator)
+            .read_parent_locator(locator)
             .await
             .map_err(|_| JsonRpcError::simple(-32011, "ParentUnavailable"))?;
         let parent =
@@ -4676,49 +4417,18 @@ pub async fn ingest_a2a(
             "root cannot have parent locator",
         ));
     }
-    let kp = operator.keypair().map_err(invalid)?;
     let tags = [
         ("Mnemonic-Type", "a2a"),
         ("Producer", owner),
         ("Context-Id", context),
         ("Content-Hash", v.content_hash.as_str()),
     ];
-    let id = arweave.item_id(&signed, kp, &tags).map_err(invalid)?;
-    {
-        let guard = store
-            .lock()
-            .map_err(|_| JsonRpcError::simple(-32603, "store mutex poisoned"))?;
-        guard.record_a2a_receipt(&v, &id, false).map_err(invalid)?;
-    }
-    let delivered = arweave.read_a2a(&id).await;
-    if let Ok(bytes) = delivered {
-        if bytes != signed {
-            return Err(JsonRpcError::simple(-32011, "delivery bytes mismatch"));
-        }
-    } else {
-        let uploaded = arweave
-            .write_item(&signed, kp, &tags)
-            .await
-            .map_err(|_| JsonRpcError::simple(-32011, "upload unavailable"))?;
-        if uploaded != id {
-            return Err(JsonRpcError::simple(-32011, "upload locator mismatch"));
-        }
-        let bytes = arweave
-            .read_a2a(&id)
-            .await
-            .map_err(|_| JsonRpcError::simple(-32011, "delivery unavailable"))?;
-        if bytes != signed {
-            return Err(JsonRpcError::simple(-32011, "delivery bytes mismatch"));
-        }
-    }
-    {
-        let guard = store
-            .lock()
-            .map_err(|_| JsonRpcError::simple(-32603, "store mutex poisoned"))?;
-        guard.record_a2a_receipt(&v, &id, true).map_err(invalid)?;
-    }
+    let id = crate::ingestion::deliver_exact(arweave, operator, &signed, &tags)
+        .await.map_err(|_| JsonRpcError::simple(-32011, "delivery unavailable"))?;
+    let receipt_persisted = store.lock().ok()
+        .is_some_and(|guard| guard.record_a2a_receipt(&v, &id, true).is_ok());
     Ok(
-        serde_json::json!({"attestation_id":format!("a2a:{}",v.content_hash),"blake3":v.content_hash,"sealed":sealed,"arweave_tx":id,"locator":format!("ar://{id}"),"write_mode":"anchored"}),
+        serde_json::json!({"attestation_id":format!("a2a:{}",v.content_hash),"blake3":v.content_hash,"sealed":sealed,"arweave_tx":id,"locator":format!("ar://{id}"),"write_mode":"anchored","delivery_status":"verified","receipt_persisted":receipt_persisted}),
     )
 }
 

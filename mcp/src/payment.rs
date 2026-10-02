@@ -452,9 +452,16 @@ pub async fn check_universal_paywall(
         if operation.subject_hash != subject_hash || operation.artifact_hash != artifact_hash {
             return PaymentGate::Unauthorized("operation binding does not match request".into());
         }
-        if operation.state == PaidOperationState::PaymentReady {
-            return PaymentGate::Proceed;
+        match paid_operation::settled_receipt(&operation) {
+            Ok(Some(_)) => return PaymentGate::Proceed,
+            Ok(None) => {}
+            Err(_) => {
+                return PaymentGate::Unauthorized(
+                    "stored payment receipt requires reconciliation".into(),
+                )
+            }
         }
+
         let quote = match quotes.get(&op_id) {
             Some(q) => q.clone(),
             None => match client.get_quote_by_operation_id(&op_id).await {
@@ -473,6 +480,9 @@ pub async fn check_universal_paywall(
         };
         if quote.binding.artifact_hash != artifact_hash
             || quote.binding.payer_subject != payer_subject
+            || quote.binding.operation_id != op_id
+            || operation.binding_digest.as_deref() != Some(quote.binding_digest.as_str())
+            || operation.quote_id.as_deref() != Some(quote.quote_id.as_str())
         {
             return PaymentGate::Unauthorized("operation binding does not match request".into());
         }
@@ -486,7 +496,7 @@ pub async fn check_universal_paywall(
             return PaymentGate::Unauthorized("payment state unavailable".into());
         }
         let receipt = match client
-            .settle_exact(&quote.binding, &proof.authorization)
+            .settle_exact(&quote.binding, &quote.binding_digest, &proof.authorization)
             .await
         {
             Ok(r) => r,
@@ -541,8 +551,14 @@ pub async fn check_universal_paywall(
         },
         Err(_) => return PaymentGate::Unauthorized("payment state unavailable".into()),
     };
-    if operation.state == PaidOperationState::PaymentReady {
-        return PaymentGate::Proceed;
+    match paid_operation::settled_receipt(&operation) {
+        Ok(Some(_)) => return PaymentGate::Proceed,
+        Ok(None) => {}
+        Err(_) => {
+            return PaymentGate::Unauthorized(
+                "stored payment receipt requires reconciliation".into(),
+            )
+        }
     }
 
     // A browser may have settled while Mnemonic was restarting. Provider
@@ -550,7 +566,35 @@ pub async fn check_universal_paywall(
     if operation.quote_id.is_some() {
         if let Ok(status) = client.payment_status(&operation_id).await {
             if status.status == "settled" {
+                if status.operation_id != operation_id {
+                    return PaymentGate::Unauthorized("provider status operation mismatch".into());
+                }
                 if let Some(receipt) = status.receipt {
+                    let quote = match client.get_quote_by_operation_id(&operation_id).await {
+                        Ok(q) => q,
+                        Err(_) => {
+                            return PaymentGate::Unauthorized(
+                                "settled payment quote unavailable for verification".into(),
+                            )
+                        }
+                    };
+                    if quote.binding.operation_id != operation_id
+                        || quote.binding.artifact_hash != artifact_hash
+                        || quote.binding.payer_subject != payer_subject
+                        || operation.binding_digest.as_deref()
+                            != Some(quote.binding_digest.as_str())
+                        || operation.quote_id.as_deref() != Some(quote.quote_id.as_str())
+                        || crate::universal_paywall::validate_payment_receipt(
+                            &receipt,
+                            &quote.binding,
+                            &quote.binding_digest,
+                        )
+                        .is_err()
+                    {
+                        return PaymentGate::Unauthorized(
+                            "provider settled receipt binding mismatch".into(),
+                        );
+                    }
                     if let Ok(receipt_json) = serde_json::to_string(&receipt) {
                         if let Ok(store) = store.lock() {
                             if paid_operation::record_provider_receipt(
@@ -571,6 +615,9 @@ pub async fn check_universal_paywall(
         if let Ok(quote) = client.get_quote_by_operation_id(&operation_id).await {
             if quote.binding.artifact_hash != artifact_hash
                 || quote.binding.payer_subject != payer_subject
+                || quote.binding.operation_id != operation_id
+                || operation.binding_digest.as_deref() != Some(quote.binding_digest.as_str())
+                || operation.quote_id.as_deref() != Some(quote.quote_id.as_str())
             {
                 return PaymentGate::Unauthorized(
                     "operation binding does not match request".into(),
@@ -582,7 +629,7 @@ pub async fn check_universal_paywall(
                 StoredQuote {
                     operation_id: operation_id.clone(),
                     quote_id: quote.quote_id.clone(),
-                    binding: quote.binding,
+                    binding: quote.binding.clone(),
                     binding_digest: quote.binding_digest.clone(),
                     receipt: None,
                 },
@@ -596,11 +643,11 @@ pub async fn check_universal_paywall(
                     &quote_expires_at,
                 ),
                 scheme: "exact".into(),
-                network: config.network.clone(),
-                asset: config.asset.clone(),
-                pay_to: config.pay_to.clone(),
-                payer_wallet: payer_wallet.to_string(),
-                amount: cost.to_string(),
+                network: quote.binding.network.clone(),
+                asset: quote.binding.asset.clone(),
+                pay_to: quote.binding.pay_to.clone(),
+                payer_wallet: quote.binding.payer_wallet.clone(),
+                amount: quote.binding.amount.clone(),
                 binding_digest: quote.binding_digest,
             });
         }
@@ -923,7 +970,10 @@ pub async fn verify_usdc_transfer(
     usdc_mint: &str,
     min_amount: u64,
 ) -> anyhow::Result<Option<u64>> {
-    match client.get_token_balance_delta(tx_sig, recipient, usdc_mint).await? {
+    match client
+        .get_token_balance_delta(tx_sig, recipient, usdc_mint)
+        .await?
+    {
         Some(delta) if delta >= min_amount => Ok(Some(delta)),
         _ => Ok(None),
     }
@@ -2829,9 +2879,15 @@ mod tests {
         assert_eq!(a.max_timeout_seconds, 300);
         // No approval_url at top level — it goes in extensions for the UP rail.
         let json = serde_json::to_value(&body).unwrap();
-        assert!(json.get("approval_url").is_none(), "approval_url must not be top-level");
+        assert!(
+            json.get("approval_url").is_none(),
+            "approval_url must not be top-level"
+        );
         assert!(json.get("status").is_none(), "status must not be top-level");
-        assert!(json.get("correlation_id").is_none(), "correlation_id must not be top-level");
+        assert!(
+            json.get("correlation_id").is_none(),
+            "correlation_id must not be top-level"
+        );
     }
 
     #[test]
@@ -2846,7 +2902,10 @@ mod tests {
         assert_eq!(body.x402_version, 2);
         assert_eq!(body.accepts.len(), 2, "Solana + EVM entries");
         let evm_entry = &body.accepts[1];
-        assert_eq!(evm_entry.network, "eip155:84532", "EVM entry must use CAIP-2");
+        assert_eq!(
+            evm_entry.network, "eip155:84532",
+            "EVM entry must use CAIP-2"
+        );
         assert_eq!(evm_entry.amount, "500");
         assert_eq!(evm_entry.asset, "0xtoken");
         assert_eq!(evm_entry.pay_to, "0xtreasury");
@@ -2880,8 +2939,14 @@ mod tests {
         assert_eq!(ext["payer_wallet"], "0xpayer");
         // Top-level must have no unrecognised fields.
         let json = serde_json::to_value(&body).unwrap();
-        assert!(json.get("approval_url").is_none(), "approval_url must not be top-level");
-        assert!(json.get("operation_id").is_none(), "operation_id must not be top-level");
+        assert!(
+            json.get("approval_url").is_none(),
+            "approval_url must not be top-level"
+        );
+        assert!(
+            json.get("operation_id").is_none(),
+            "operation_id must not be top-level"
+        );
     }
 
     /// Serialised `PaymentRequired` has exactly the fields the spec expects:
@@ -2893,13 +2958,31 @@ mod tests {
         let obj = json.as_object().unwrap();
         let keys: Vec<_> = obj.keys().collect();
         // Only x402Version and accepts at the top level (free_anchors is absent).
-        assert!(keys.contains(&&"x402Version".to_string()), "x402Version key missing");
-        assert!(keys.contains(&&"accepts".to_string()), "accepts key missing");
+        assert!(
+            keys.contains(&&"x402Version".to_string()),
+            "x402Version key missing"
+        );
+        assert!(
+            keys.contains(&&"accepts".to_string()),
+            "accepts key missing"
+        );
         // maxAmountRequired must NOT appear (v1 field).
         let accepts = &json["accepts"][0];
-        assert!(accepts.get("maxAmountRequired").is_none(), "v1 field maxAmountRequired must be absent");
-        assert!(accepts.get("amount").is_some(), "v2 field amount must be present");
-        assert!(accepts.get("resource").is_some(), "resource object must be present");
-        assert!(accepts.get("maxTimeoutSeconds").is_some(), "maxTimeoutSeconds must be present");
+        assert!(
+            accepts.get("maxAmountRequired").is_none(),
+            "v1 field maxAmountRequired must be absent"
+        );
+        assert!(
+            accepts.get("amount").is_some(),
+            "v2 field amount must be present"
+        );
+        assert!(
+            accepts.get("resource").is_some(),
+            "resource object must be present"
+        );
+        assert!(
+            accepts.get("maxTimeoutSeconds").is_some(),
+            "maxTimeoutSeconds must be present"
+        );
     }
 }

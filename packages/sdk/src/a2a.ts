@@ -352,6 +352,8 @@ async function sendSignedA2A(this: WithCallTool, kind: string, payload: unknown,
   }
   const locator=opts.prevLocator??parent?.locator;
   if(opts.prevId&&!locator)throw new UserError('ParentLocatorRequired');
+  // Retain original signed bytes before a wallet/payment/network round trip.
+  await this._a2aIndexStore().put(row);
   const result=await this._callToolA2A("mnemonic_attest_a2a",{kind,context_id:context,signed,sealed:!!opts.sealed,mode:'anchored',...(opts.prevId?{prev_id:opts.prevId}:{}),...(locator?{prev_locator:locator}:{})});
   if(isRecord(result)&&typeof result.locator==='string'){
     if(result.attestation_id!==row.attestationId)throw new IntegrityError('upload receipt hash mismatch');

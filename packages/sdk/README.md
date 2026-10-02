@@ -8,6 +8,16 @@ canonical-CBOR signing through a WASM-compiled `mnemonic-core`. Pure ESM,
 no bundler required, no `node:*` imports — the same artifact loads under
 Node 20+, Bun, Deno, and modern browsers.
 
+## Recovery refactor in source
+
+The current source adds [client-prepared memory](../../docs/client-prepared-memory.md),
+[authenticated checkpoints and encrypted backups](../../docs/recovery-checkpoints.md), and
+[replaceable A2A discovery](../../docs/sealed-a2a.md).
+These interfaces require compatible client and operator builds; published-package and live-provider drills remain release gates.
+Private sealing, opening and ranking run locally. Persist returned signed bytes and back up keys before discarding the client instance.
+Hosted sealed storage, recall-key sessions and new general-memory grant writes are retired by this migration.
+Existing A2A recipient grants retain their separate signed-artifact path.
+
 ## Quick start
 
 ```typescript
@@ -15,13 +25,16 @@ import { MnemonicClient, LocalSigner, Keypair } from '@mnemonik-xyz/sdk';
 const kp = await Keypair.fromJSON(JSON.parse(localStorage.getItem('mnemonic.identity')!));
 const client = new MnemonicClient({ baseUrl: 'https://mcp.mnemonik.xyz', signer: new LocalSigner(kp), jwt });
 client.setKeypair(kp);
-const { attestationId } = await client.signMemory('hello', { tags: ['demo'] });
+const saved = await client.sealMemory('hello', { mode: 'store', tags: ['demo'] });
+// Persist saved.signedBytes and saved.outerCbor in your own durable store.
+const opened = await client.openMemory(saved.outerCbor!);
 ```
 
-`signMemory` accepts a write `mode` (available now):
+`signMemory` is the legacy server-prepared path: it sends plaintext to the
+operator before signing. Its write modes are:
 
-- `mode: "local"`: the server stores a hash-only row and returns it at
-  once (`status: "stored"`). The SDK needs no keypair for this call.
+- `mode: "local"`: HTTP operators reject this mode. Use agent-local storage;
+  `sealMemory` with `mode: "store"` retains encrypted bytes in the client session cache.
 - `mode: "anchored"`: the SDK uses the deferred pending-bundle /
   sign-callback flow. The server returns a `correlation_id`. The SDK gets
   the canonical-CBOR bundle, signs it locally (COSE_Sign1) and sends the
@@ -35,14 +48,14 @@ matches what the server stores.
 ### Load the private key only when a signature is necessary
 
 Use `setKeypairProvider` in place of `setKeypair`. The SDK calls the
-provider only when the server asks for a signature. A `local` write, a
-recall and a verify never call it. This keeps an OS-keychain prompt away
-from read-only agent flows.
+provider when an operation needs the identity key. Plain hosted `recall` and
+`verify` do not call it; sealed local writes and opening/recalling sealed data do.
+An explicit HTTP local write is rejected rather than stored on the operator.
 
 ```typescript
 const client = new MnemonicClient({ baseUrl, signer: pubkeyOnlySigner, jwt });
 client.setKeypairProvider(() => loadKeypairFromKeychain()); // called lazily, once
-await client.signMemory('private note', { mode: 'local' });   // no key access
+await client.recall('public research');                    // no private-key access
 await client.signMemory('public claim', { mode: 'anchored' }); // loads the key
 ```
 
@@ -223,32 +236,33 @@ All names below are re-exported from the package root.
 
 ### Client
 
-- **`MnemonicClient`** — stateless HTTP client for the hosted MCP server.
+- **`MnemonicClient`** — HTTP client with session-only default local caches.
 
-  **Available now (Phase 1 + T7 sealed):**
-  - `whoami()` — server identity check.
-  - `signMemory(content, opts?)` — save a verifiable memory via the
-    pending-bundle / sign-callback flow. When the bundle is a SEALED_V1
-    artifact the SDK decrypts it client-side and throws `IntegrityError`
-    on content mismatch before signing.
-  - `sealMemory(content, {mode, tags?, embedder?})` — E2E encrypt and
-    store a memory. `mode: "anchor"` posts to `/api/anchor-sealed`;
-    `mode: "store"` posts to `/api/store-sealed`. Returns `{memoryHash}`.
-  - `openMemory(hashOrBytes)` — fetch a sealed blob and decrypt with the
-    identity's X25519 key (derived from the bound Ed25519 keypair). Returns
-    `{content, innerJson}`.
-  - `share(memoryHash, target | "link")` — create a targeted grant
-    (`{kid, x25519Pub}`) or an anonymous bearer link (`"link"`). For
-    `"link"` returns `{type: "link", url}` with a `#k=<base64url>` fragment.
-  - `importLink(url)` — parse a `#k=` fragment URL, fetch the sealed blob,
-    and decrypt using the bearer key `K`. Returns `{content, innerJson}`.
-  - `listGrants()` — `GET /api/grants?reader=<kid>` — returns
-    `GrantEntry[]`.
-  - `recallSealed(query, opts?)` — fetch `GET /api/sealed`, embed the query
-    locally (pluggable `Embedder`; default posts to `POST /api/embed`), rank
-    by cosine similarity, return top-k `SealedHit[]`. The server never sees
-    the plaintext query.
-  - `recall(query, opts?)`, `verify(attestationId)`, `proveIdentity(challenge)`.
+  **Current source interfaces** (compatible builds required):
+  - `whoami()` — server identity/capability check.
+  - `signMemory(content, opts?)` — legacy server-prepared signing. The operator
+    receives plaintext. The client verifies a sealed pending bundle before signing;
+    that check does not remove the earlier plaintext disclosure.
+  - `sealMemory(content, {mode, tags?})` — locally encrypt and sign. `store`
+    retains a session cache without HTTP; `anchor` sends complete signed bytes
+    to `/api/ingest-artifact` and independently fetch-compares delivery.
+    Persist returned `signedBytes` and `outerCbor` for restart recovery.
+  - `preparePublicMemory(content, opts?)` — prepare signed public MEMORY_V1 locally.
+  - `ingestPreparedMemory(signedBytes, opts?)` — resubmit identical bytes with
+    optional operation/payment headers; public publication requires `publicConsent`.
+  - `openMemory(hashOrBytes)` — decrypt session-cached or restored outer bytes.
+    This is not an independent signature verification API.
+  - `share(...)` — explicit migration error before HTTP; new hosted general-memory
+    grant creation is retired. Sealed A2A recipient grants remain supported.
+  - `importLink(url)` and `listGrants()` — compatibility reads of existing material;
+    these do not establish a new grant delivery path.
+  - `recallSealed(query, {embedder, topK?})` — open and rank the local cache with
+    an explicitly supplied local embedder. No fallback to hosted query embedding.
+  - `retryA2ADelivery(id, opts?)` — resume a retained signed A2A artifact without
+    generating a new signature or encryption randomness.
+  - `recall(query, opts?)` — hosted searchable rows, preserving server evidence.
+    It does not decrypt sealed data or turn receipt-only rows into memory content.
+  - `verify(attestationId)` and `proveIdentity(challenge)`.
 
   **Setters:** `setJwt`, `setKeypair` or `setKeypairProvider` (necessary
   for signed writes and sealed operations), `setTokenRefresher`.
@@ -257,7 +271,7 @@ All names below are re-exported from the package root.
   `"local" | "anchored"`. **`SignMemoryResult.status`** — `stored`,
   `signed`, `pending` or `anchored`.
 - **`SealMemoryOptions`** — `{mode: SealMode, tags?, embedder?}`.
-  **`SealMode`** — `"anchor" | "store"`. **`SealMemoryResult`** — `{memoryHash}`.
+  **`SealMode`** — `"anchor" | "store"`. **`SealMemoryResult`** — memory hash, original signed/outer bytes, and optional locator/receipt.
 - **`OpenMemoryResult`** — `{content: string, innerJson: Uint8Array}`.
 - **`ShareTarget`** — `{kid: string, x25519Pub: Uint8Array} | "link"`.
 - **`ShareResult`** — `{type: "grant", grantCbor: Uint8Array} | {type: "link", url: string}`.
@@ -444,4 +458,5 @@ means verified ancestry to pinned heads, not exhaustive index enumeration.
 Local mode uses an agent-owned index; SDK defaults to session-only memory.
 CLI provides `a2a attest --mode local`, `a2a recall --mode local`, and
 `a2a restore --context ID --authors KEY --heads HEAD`. Anchored non-root writes
-accept `--prev-locator ar://ID`. See `docs/sealed-a2a.md` for limits and validation.
+accept `--prev-locator ar://ID`; configured operators also accept migrated
+`blob://sha256` parent hints. See [Sealed A2A](../../docs/sealed-a2a.md) for limits and validation.

@@ -7,7 +7,7 @@
 //   3. `mnemonic share <hash> --link` returns a URL containing `#k=`.
 //   4. `mnemonic grants` lists grants without reading the keychain.
 
-import { writeFileSync } from "node:fs";
+import { writeFileSync, readdirSync, readFileSync, rmSync } from "node:fs";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -46,8 +46,9 @@ import { runGrants } from "../src/commands/grants.js";
 import { runOpen } from "../src/commands/open.js";
 import { runShare } from "../src/commands/share.js";
 import { runSign } from "../src/commands/sign.js";
-import { identityPath, saveIdentityJson, saveToken } from "../src/config.js";
+import { configDir, identityPath, saveIdentityJson, saveToken, tokenPath } from "../src/config.js";
 import {
+  signedDeliveryResponse,
   clearWasmMock,
   installWasmMock,
   makeJwt,
@@ -142,7 +143,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("mnemonic sign (default sealed path)", () => {
-  it("posts to /api/store-sealed and returns memory_hash", async () => {
+  it("persists ciphertext locally without HTTP", async () => {
     saveValidToken();
     const calls = installFetch((c) => {
       if (c.url.endsWith("/api/store-sealed")) {
@@ -157,7 +158,8 @@ describe("mnemonic sign (default sealed path)", () => {
       json: true,
     });
 
-    expect(calls.some((c) => c.url.endsWith("/api/store-sealed"))).toBe(true);
+    expect(calls).toHaveLength(0);
+    expect(readdirSync(`${configDir()}/sealed/${pubkey}`)).toHaveLength(1);
     // Must NOT call /mcp tools/call (that's the plaintext path).
     expect(calls.some((c) => c.url.endsWith("/mcp"))).toBe(false);
     // Must NOT read the keychain.
@@ -175,7 +177,7 @@ describe("mnemonic sign (default sealed path)", () => {
     expect(ks.gets).toBe(0);
   });
 
-  it("--anchor sends to /api/anchor-sealed and reads keychain (keychain-backed stub)", async () => {
+  it("--anchor sends to /api/ingest-artifact and reads keychain (keychain-backed stub)", async () => {
     // Write a stub identity (keychain-backed) to test --anchor keychain read.
     const kp = mock.generate_keypair();
     pubkey = kp.pubkey_base58;
@@ -191,9 +193,8 @@ describe("mnemonic sign (default sealed path)", () => {
     saveValidToken();
 
     const calls = installFetch((c) => {
-      if (c.url.endsWith("/api/anchor-sealed")) {
-        return json({ memory_hash: "cafebabe" });
-      }
+      const delivered = signedDeliveryResponse(c.url);
+      if (delivered) return delivered;
       return json({}, 404);
     });
 
@@ -203,7 +204,7 @@ describe("mnemonic sign (default sealed path)", () => {
       anchor: true,
     });
 
-    expect(calls.some((c) => c.url.endsWith("/api/anchor-sealed"))).toBe(true);
+    expect(calls.some((c) => c.url.endsWith("/api/ingest-artifact"))).toBe(true);
     expect(ks.gets).toBe(1); // one keychain read for --anchor
   });
 
@@ -221,7 +222,7 @@ describe("mnemonic sign (default sealed path)", () => {
     await runSign("public note", {
       content: "public note",
       baseUrl: BASE,
-      public: true,
+      public: true, anchor: true,
       json: true,
     });
 
@@ -235,41 +236,28 @@ describe("mnemonic sign (default sealed path)", () => {
 // ---------------------------------------------------------------------------
 
 describe("mnemonic open", () => {
-  it("fetches sealed blob and returns decrypted content", async () => {
-    saveValidToken();
-    // The SDK openMemory calls /api/sealed/<hash> with GET, gets CBOR bytes,
-    // then calls WASM open_memory.  The mock WASM always returns the inner
-    // JSON bytes when open_memory is called.
-    const outerCbor = new Uint8Array([0x01, 0x02, 0x03]);
-    const calls = installFetch((c) => {
-      if (c.url.includes("/api/sealed/")) {
-        return new Response(outerCbor, {
-          status: 200,
-          headers: { "content-type": "application/cbor" },
-        });
-      }
-      return json({}, 404);
-    });
-
+  it("opens persisted ciphertext with a fresh client and no token or HTTP", async () => {
+    rmSync(tokenPath(),{force:true});
+    const calls = installFetch(() => json({}, 500));
+    await runSign("private round trip", {baseUrl:BASE});
+    const filename = readdirSync(`${configDir()}/sealed/${pubkey}`)[0]!;
+    const row = JSON.parse(readFileSync(`${configDir()}/sealed/${pubkey}/${filename}`,"utf8"));
+    expect(JSON.stringify(row)).not.toContain("private round trip");
     let printed = "";
-    vi.spyOn(process.stdout, "write").mockImplementation((s) => {
-      printed += String(s);
-      return true;
-    });
+    vi.spyOn(process.stdout,"write").mockImplementation(s => {printed+=String(s);return true;});
+    await runOpen(row.memoryHash,{baseUrl:BASE});
+    expect(printed).toContain("private round trip");
+    expect(calls).toHaveLength(0);
+  });
 
-    // The WASM mock's open_memory returns some fixed bytes — we just verify
-    // the command makes the right HTTP call and doesn't error.
-    // (The mock WASM returns empty bytes or stub content.)
-    await runOpen("abc123def456", {
-      baseUrl: BASE,
-    }).catch(() => {
-      // WASM open_memory may throw in mock if not set up for real crypto.
-      // Verify the HTTP call was made regardless.
-    });
-
-    expect(calls.some((c) => c.url.includes("/api/sealed/abc123def456"))).toBe(
-      true
-    );
+  it("retains original signed ciphertext when anchored delivery fails", async () => {
+    saveValidToken();
+    installFetch(() => json({error:"unavailable"},503));
+    await expect(runSign("recover after failed upload",{baseUrl:BASE,anchor:true})).rejects.toMatchObject({exitCode:2});
+    const filename = readdirSync(`${configDir()}/sealed/${pubkey}`)[0]!;
+    const row = JSON.parse(readFileSync(`${configDir()}/sealed/${pubkey}/${filename}`,"utf8"));
+    expect(Buffer.from(row.signedBytes,"base64").length).toBeGreaterThan(0);
+    await runOpen(row.memoryHash,{baseUrl:BASE});
   });
 
   it("uses importLink for https:// URLs", async () => {
@@ -313,36 +301,11 @@ describe("mnemonic open", () => {
 // ---------------------------------------------------------------------------
 
 describe("mnemonic share --link", () => {
-  it("posts to /api/grants and returns a URL with #k= fragment", async () => {
+  it("reports retired hosted sharing with migration guidance before HTTP", async () => {
     saveValidToken();
-    const shareUrl = `${BASE}/open/deadbeef1234#k=AAEC`;
-    const calls = installFetch((c) => {
-      if (c.url.endsWith("/api/sealed/deadbeef1234")) {
-        // Return outer CBOR to fetch the memory.
-        return new Response(new Uint8Array([0x01]), {
-          status: 200,
-          headers: { "content-type": "application/cbor" },
-        });
-      }
-      if (c.url.endsWith("/api/grants")) {
-        return json({ fragment: "k=AAEC", url: shareUrl });
-      }
-      return json({}, 404);
-    });
-
-    let printed = "";
-    vi.spyOn(process.stdout, "write").mockImplementation((s) => {
-      printed += String(s);
-      return true;
-    });
-
-    await runShare("deadbeef1234", {
-      baseUrl: BASE,
-      link: true,
-    });
-
-    expect(calls.some((c) => c.url.endsWith("/api/grants"))).toBe(true);
-    expect(printed).toContain("#k=");
+    const calls = installFetch(() => json({},500));
+    await expect(runShare("deadbeef1234",{baseUrl:BASE,link:true})).rejects.toThrow(/hosted grant creation is retired/);
+    expect(calls).toHaveLength(0);
   });
 
   it("throws UserError for missing hash", async () => {
