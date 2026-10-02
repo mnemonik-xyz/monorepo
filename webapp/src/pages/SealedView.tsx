@@ -52,9 +52,6 @@ interface SealedArtifact {
 
 const cborDecoder = new Decoder();
 
-/** Blake3 key-commitment label, must match §5.1 of the tech spec. */
-const KC_DERIVE_LABEL = "mnemonic sealed v1 key commitment";
-
 export default function SealedView() {
   const { hash } = useParams<{ hash: string }>();
   const [status, setStatus] = useState<Status>({ kind: "loading" });
@@ -128,28 +125,32 @@ export default function SealedView() {
           return;
         }
 
-        // Verify key commitment before attempting AEAD.
-        if (artifact.kc) {
-          const kcCheck = await deriveKeyCommitment(keyBytes);
-          if (!timingSafeEqual(kcCheck, artifact.kc)) {
-            setStatus({ kind: "kc-fail", artifact });
-            return;
-          }
-        }
-
         // Attempt decryption with WASM.
         let plaintext: string;
         try {
           const wasm = await loadWasm();
-          // open_with_key: takes (outer_cbor_bytes, key_32_bytes) → inner MEMORY_V1 content string.
-          // Falls back to a JS-only AEAD when the WASM export is unavailable
-          // (tasks 1-5 not yet merged).
-          if (typeof (wasm as Record<string, unknown>).open_with_key === "function") {
-            const openFn = (wasm as Record<string, unknown>).open_with_key as (
-              bytes: Uint8Array,
-              key: Uint8Array,
-            ) => string;
-            plaintext = openFn(artifact.rawBytes, keyBytes);
+          // The native opener validates the key commitment before AEAD
+          // (core/src/sealed/api.rs::open_with_key). Do not duplicate that KDF
+          // in JavaScript or treat unavailable crypto as a successful check.
+          const openFn = (wasm as unknown as {
+            open_with_key?: (bytes: Uint8Array, key: Uint8Array) => Uint8Array;
+          }).open_with_key;
+          if (typeof openFn === "function") {
+            const opened = openFn(artifact.rawBytes, keyBytes);
+            if (!(opened instanceof Uint8Array)) {
+              throw new Error("Unexpected sealed decryption result");
+            }
+            // The native API returns an inner memory JSON blob. Do not
+            // render malformed plaintext or include parser snippets in errors.
+            try {
+              const inner: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(opened));
+              if (!inner || typeof inner !== "object" || !("content" in inner) || typeof inner.content !== "string") {
+                throw new Error("invalid memory");
+              }
+              plaintext = inner.content;
+            } catch {
+              throw new Error("Invalid decrypted memory format");
+            }
           } else {
             // WASM sealed crypto not yet available — surface an informative error
             // rather than silently failing or using a fallback that may differ.
@@ -159,10 +160,13 @@ export default function SealedView() {
                 "Sealed memory decryption requires a newer version of the Mnemonic WASM module. " +
                 "The signature and metadata are displayed below.",
             });
-            setStatus({ kind: "no-key", artifact });
             return;
           }
         } catch (e) {
+          if (String(e).includes("key commitment mismatch")) {
+            setStatus({ kind: "kc-fail", artifact });
+            return;
+          }
           setStatus({
             kind: "error",
             message: `Decryption failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -410,32 +414,6 @@ function base64urlToBytes(b64url: string): Uint8Array | null {
   } catch {
     return null;
   }
-}
-
-/**
- * Derive the key commitment via the WASM `key_commitment` binding.
- *
- * The Rust side uses `blake3::derive_key("mnemonic sealed v1 key commitment", K)`,
- * which is a keyed BLAKE3 KDF — NOT a plain hash of (label || K). Using a plain
- * hash would produce a different output and cause every kc check to fail.
- * The WASM binding calls the identical Rust function, so this is byte-exact.
- */
-async function deriveKeyCommitment(key: Uint8Array): Promise<Uint8Array> {
-  try {
-    const wasm = await loadWasm();
-    return wasm.key_commitment(key);
-  } catch {
-    // WASM unavailable — return a dummy that won't match (kc check will fail safely).
-    return new Uint8Array(32);
-  }
-}
-
-/** Constant-time equality check for two Uint8Arrays. */
-function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a[i]! ^ b[i]!;
-  return diff === 0;
 }
 
 /**

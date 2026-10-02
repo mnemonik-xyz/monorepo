@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/li
 COPY Cargo.toml Cargo.lock* ./
 COPY core/ core/
 COPY mcp/ mcp/
+COPY mnemonic-a2a/ mnemonic-a2a/
+COPY bridge-a2a/ bridge-a2a/
 
 RUN cargo build --release -p mnemonic-mcp --features local-embed
 
