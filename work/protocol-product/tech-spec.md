@@ -167,3 +167,13 @@ Each capability MUST declare local, hosted, memory-kind and backend support.
 Do not infer production readiness from a unit test or a merged spec.
 Use [acceptance.md](acceptance.md) for release claims and [gaps.md](gaps.md) for closure evidence.
 Keep public tools, SDK documentation and discovery cards consistent with released behavior.
+
+## 10. Recovery and development follow-up
+
+The agreed goal includes independence from the operator and supported storage backend.
+Use [storage-portability-spec.md](storage-portability-spec.md) for conditions and migration acceptance.
+Use [indexer-spec.md](indexer-spec.md) for replaceable discovery.
+Use [flows.md](flows.md) for logical information and payment sequence.
+Use [shipping-plan.md](shipping-plan.md) for release gates.
+Repository extraction remains a proposal under [repository-plan.md](repository-plan.md).
+These contracts do not modify existing signed formats.

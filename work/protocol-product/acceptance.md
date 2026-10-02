@@ -36,3 +36,16 @@ Rust implementation checks use repository feature requirements in CLAUDE.md.
 SDK changes require real WebAssembly parity and SDK-to-MCP integration coverage.
 Documentation-only changes require link, status and claim consistency checks.
 No full Rust suite is required for this specification-only package.
+
+## Additional portability and shipping evidence
+
+| Test | Required observation | Blocks claim |
+|---|---|---|
+| A-15 Index replacement | Two discovery implementations; known-locator restore with both disabled; forged hints rejected | Indexer independence |
+| A-16 Backend migration | Copy exact bytes; disable source and original operator; recover expected heads through destination | Backend portability |
+| A-17 Release drill | Install pinned released artifacts; repeat save, restore, switch and continuation; preserve financial state on rollback | Pilot readiness |
+
+A-16 requires an authenticated locator manifest and preserved original signatures.
+Record which backends are supported and which results use mocks.
+A-17 requires a capability matrix and explicit operational limitations.
+Repository extraction alone satisfies none of these acceptance conditions.

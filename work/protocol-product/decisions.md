@@ -44,3 +44,28 @@ The claim is verifiable memory provenance and continuity, with client-held keys.
 It does not claim truthful reasoning, undisclosed-history completeness or provider-free availability.
 See [proof-of-concept.md](proof-of-concept.md) and [task 8](tasks/8.md).
 This is a proposed demonstration choice; no passing implementation is reported.
+
+## 2026-10-02 — Recovery goal and architecture follow-up
+
+**Agreed owner goal:** fully restore memory independently of the chosen operator and supported storage backend.
+Full recovery means verified required artifacts and ancestry up to an independently preserved checkpoint.
+It requires retained keys, trusted identities and accessible original bytes.
+Backend replacement requires migration or access to prior copies.
+
+**Proposed indexer boundary:** discovery is a separate logical role.
+The backend index may implement it first.
+Separate deployment is optional. Index results never establish artifact authority or completeness.
+
+**Proposed repository direction:** extract the canonical protocol contract first.
+Keep coupled implementation together initially.
+Other repository names and extraction actions remain proposals.
+
+The owner requested Markdown specifications and a GitHub push.
+This authorizes documentation work in the existing repository.
+It does not authorize creating repositories, changing runtime behavior or deploying services.
+
+New contracts: [indexer](indexer-spec.md), [portability](storage-portability-spec.md),
+[repository plan](repository-plan.md), [flows](flows.md) and [shipping](shipping-plan.md).
+Tasks 9–12 cover implementation and planning follow-up.
+Existing A2A tasks 18–21 remain authoritative for their signed bindings and recovery paths.
+No implementation gap or product-demand hypothesis closes from this documentation change.

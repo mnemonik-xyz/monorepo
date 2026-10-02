@@ -22,6 +22,11 @@ Product delivery does not depend on token issuance or a new blockchain.
 | [Decisions](decisions.md) | Owner inputs, recommendations and open choices |
 | [Proof of concept](proof-of-concept.md) | Research handoff roles, flow and failure demonstration |
 | [Acceptance plan](acceptance.md) | Evidence required before product claims |
+| [Indexer contract](indexer-spec.md) | Discovery role, interface and replacement |
+| [Storage portability](storage-portability-spec.md) | Recovery conditions and exact-byte migration |
+| [Repository plan](repository-plan.md) | Proposed extraction boundaries and versioning |
+| [Flows](flows.md) | Information, recovery and payment diagrams |
+| [Shipping plan](shipping-plan.md) | Implementation order, release evidence and customer pilots |
 | [Tasks](tasks/1.md) | Ordered implementation work |
 
 ## Existing contracts
