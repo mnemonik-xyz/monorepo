@@ -142,3 +142,53 @@ package publication, live payment, customer outreach or issue closure was
 performed by this preparation.
 
 Additional checks: failed package-probe and failed demo runs invalidate older passing JSON reports; the focused demo rerun passed. Chrome exercised all four views at mobile width without overflow or JavaScript errors. `git diff --check` passed. `cargo fmt --all -- --check` remains failing with formatting differences across existing workspace files (including untouched bridge/core files); no workspace-wide reformat was included.
+
+## Local failure matrix after PR #270 — 2026-10-02
+
+Baseline `66ce3af`; implementation and recorded report `ce05357`. The combined command `node scripts/run-protocol-demo.mjs`
+executes the real SDK/WASM handoff followed by two focused HTTP financial tests.
+It passed all three test invocations and requires observations for all ten
+scenario injections before emitting combined success. The
+[recorded report](evidence/research-failure-matrix-2026-10-02.json) contains 15
+failure/control observations and five separate payment/delivery observations.
+The original handoff-only report remains a historical record.
+
+| Scenario injection | Recorded observation |
+|---|---|
+| Changed signed bytes | `changed_artifact_bytes`: rejected without import |
+| Repaired public ciphertext hashes | `ciphertext_repaired_public_hashes`: fixture-author re-signing passes public verification; AEAD opening rejects |
+| Forged author/context tags | `forged_index_tags`: fetched signed bytes reject both metadata variants |
+| Outsider ciphertext fetch | `outsider_fetch_open`: exact public bytes fetched, plaintext opening denied |
+| Omitted required parent | `omitted_required_parent`: no complete-to-heads result |
+| Empty results during outage | `index_outage_vs_empty`: HTTP 503 differs from successful empty scan; neither completes pinned heads |
+| Index lag | `index_lag_known_locator_recovery`: later scan and known-locator recovery work; unavailable/disabled discovery remains explicit |
+| Valid fork | `valid_fork_preserved`: both signed branches retained, no invented canonical head |
+| Receipt write failure | `receipt_database_read_only`: verified delivery survives receipt persistence failure |
+| Settled payment, delivery failure | `settled_upload_failure`: retry uses the same seeded accepted payment receipt and durable operation |
+
+The cryptographic and discovery controls use actual R/S/V envelopes, real
+verification/decryption and local synthetic transports. The repaired-ciphertext
+control deliberately possesses the synthetic author's signing key to isolate
+AEAD; it does not demonstrate signature forgery. The financial tests run
+separately from the unpaid handoff. Accepted provider receipts are seeded; no
+live settlement, refund or provider-signature verification is inferred.
+Terminal remedy and lost-financial-metadata controls are additional evidence.
+
+Validation: the financial integration suite passed six tests (two unrelated
+SDK/WASM checks left ignored); the combined runner explicitly passed its
+handoff and both selected financial tests after final changes. Eight Node tests
+passed across viewer/composer, failure invalidation and real SDK/WASM discovery
+controls. Standalone crypto controls passed. Chrome exercised all four views at
+mobile width and the desktop billing view without overflow or JavaScript errors.
+`cargo fmt --all -- --check` and `git diff --check` pass.
+
+Both combined runner and standalone renderer invalidate previous output before
+replacement; failed phases, incomplete recovery or missing controls cannot form
+a passing combined report. Rendering a recorded report still does not verify
+original signatures. The HTML remains a recorded viewer, not live controls.
+
+This completes local coverage of the ten scenario injections, not task 5's live
+acceptance. Task 8 remains in progress under that dependency. Live pinned fixture
+recovery, submission lag, independent deployed operators and released-artifact
+A-17/rollback still require separate evidence. No deployment, npm publication,
+paid request or customer outreach occurred.

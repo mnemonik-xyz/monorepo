@@ -15,20 +15,30 @@ use sha2::{Digest, Sha256};
 use solana_sdk::signature::{Keypair, Signer};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 use tower::ServiceExt;
 #[derive(Clone, Default)]
 struct Remote {
     blobs: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+    fail_upload: Arc<AtomicBool>,
 }
-async fn upload(State(s): State<Remote>, bytes: Bytes) -> Json<Value> {
+async fn upload(
+    State(s): State<Remote>,
+    bytes: Bytes,
+) -> Result<Json<Value>, axum::http::StatusCode> {
+    if s.fail_upload.load(Ordering::SeqCst) {
+        return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
     let id = URL_SAFE_NO_PAD.encode(Sha256::digest(&bytes[2..66]));
     let tags = u64::from_le_bytes(bytes[108..116].try_into().unwrap()) as usize;
     let original = bytes[116 + tags..].to_vec();
     assert!(verify_artifact(&original, None).unwrap().valid);
     s.blobs.lock().unwrap().insert(id.clone(), original);
-    Json(json!({"id":id}))
+    Ok(Json(json!({"id":id})))
 }
 async fn read(
     State(s): State<Remote>,
@@ -96,8 +106,29 @@ fn assert_metadata_only(server: &TestServer) {
         assert_eq!(n, 0, "{table}");
     }
 }
+// Evidence is optional and contains only declared observations, never request bodies,
+// author keys, payment proofs or signed envelopes. Invalidate success before setup.
+fn evidence_path(name: &str) -> Option<std::path::PathBuf> {
+    let dir = std::env::var_os("MNEMONIC_DEMO_FINANCIAL_EVIDENCE_DIR")?;
+    let path = std::path::PathBuf::from(dir).join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => panic!("cannot invalidate financial evidence: {e}"),
+    }
+    Some(path)
+}
+fn write_evidence(path: Option<std::path::PathBuf>, evidence: Value) {
+    if let Some(path) = path {
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+        std::fs::rename(temporary, path).unwrap();
+    }
+}
 #[tokio::test]
 async fn exact_delivery_retry_and_receipt_failure_are_independent() {
+    let evidence = evidence_path("receipt-failure.json");
     let (url, s, task) = remote().await;
     let server = TestServer::builder()
         .storage_mode("full")
@@ -159,10 +190,19 @@ async fn exact_delivery_retry_and_receipt_failure_are_independent() {
     assert_eq!(status, 200, "{b}");
     assert_eq!(b["delivery_status"], "verified");
     assert_eq!(b["receipt_persisted"], false);
+    assert_eq!(b["payment_status"], "not_required");
     assert_eq!(a["locator"], b["locator"]);
     assert_eq!(s.blobs.lock().unwrap().len(), 1);
     assert_metadata_only(&server);
     task.abort();
+    write_evidence(
+        evidence,
+        json!({
+            "version":1,"environment":"local_mock_services","scenario":"receipt_failure",
+            "failures":[{"name":"receipt_database_read_only","status":"recovered","detail":"Exact external bytes remained verified while receipt persistence failed; same locator and one stored blob."}],
+            "billing":[{"scenario":"verified_delivery_receipt_write_failure","paymentStatus":"not_required","deliveryStatus":"verified","receiptPersisted":false,"detail":"Unpaid fixture; PRAGMA query_only rejects receipt writes after verified external delivery."}]
+        }),
+    );
 }
 #[tokio::test]
 async fn invalid_author_envelope_and_local_fail_before_upload_or_payment() {
@@ -482,6 +522,7 @@ async fn settled_crash_resubmission_is_byte_free_and_concurrent_retries_keep_one
 }
 #[tokio::test]
 async fn upload_crash_reuses_known_locator_and_terminal_paid_failure_exposes_remedy() {
+    let evidence = evidence_path("payment-failure.json");
     let (url, remote, task) = remote().await;
     let server = TestServer::builder()
         .storage_mode("full")
@@ -539,6 +580,22 @@ async fn upload_crash_reuses_known_locator_and_terminal_paid_failure_exposes_rem
     assert_eq!(lost["financial_reconciliation_required"], true);
     let failed = sealed(&kp);
     settled_operation(&server, &owner, &failed, "terminal");
+    // A seeded settled operation fails external upload, then resumes with the
+    // identical bytes and financial receipt. No payment provider is configured.
+    remote.fail_upload.store(true, Ordering::SeqCst);
+    let (status, pending) = submit_operation(&server, &owner, "terminal", failed.clone()).await;
+    assert_eq!(status, 503, "{pending}");
+    assert_eq!(pending["payment_status"], "settled");
+    assert_eq!(pending["delivery_status"], "failed_retryable");
+    assert!(pending.get("receipt_persisted").is_none());
+    remote.fail_upload.store(false, Ordering::SeqCst);
+    let (status, recovered) = submit_operation(&server, &owner, "terminal", failed.clone()).await;
+    assert_eq!(status, 200, "{recovered}");
+    assert_eq!(recovered["payment_status"], "settled");
+    assert_eq!(recovered["delivery_status"], "verified");
+    assert_eq!(recovered["receipt_persisted"], true);
+    // Remove only mocked remote bytes to exercise the terminal-delivery boundary.
+    remote.blobs.lock().unwrap().clear();
     server
         .state
         .store
@@ -551,13 +608,52 @@ async fn upload_crash_reuses_known_locator_and_terminal_paid_failure_exposes_rem
         )
         .unwrap();
     task.abort(); // storage is now unavailable
-    let (status, body) = submit_operation(&server, &owner, "terminal", failed).await;
+    let (status, body) = submit_operation(&server, &owner, "terminal", failed.clone()).await;
     assert_eq!(status, 503, "{body}");
     assert_eq!(body["payment_status"], "remedy_pending");
     assert_eq!(body["delivery_status"], "failed_terminal");
+    assert!(body.get("receipt_persisted").is_none());
     assert_eq!(
         body["retry_action"],
         "contact_operator_for_refund_or_credit"
+    );
+    let (status, repeated) = submit_operation(&server, &owner, "terminal", failed).await;
+    assert_eq!(status, 409, "{repeated}");
+    assert_eq!(repeated["payment_status"], "remedy_pending");
+    assert_eq!(repeated["delivery_status"], "failed_terminal");
+    let store = server.state.store.lock().unwrap();
+    let (count, receipt): (i64, String) = store
+        .conn()
+        .query_row(
+            "SELECT COUNT(*), provider_receipt_json FROM paid_operations",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(receipt, accepted_receipt("terminal"));
+    let op = mnemonic_mcp::delivery_operation::get(store.conn(), "terminal")
+        .unwrap()
+        .unwrap();
+    assert_eq!(op.attempts, 8); // Terminal resubmission did not start another upload.
+    drop(store);
+    assert_metadata_only(&server);
+    write_evidence(
+        evidence,
+        json!({
+            "version":1,"environment":"local_mock_services","scenario":"settled_delivery_failure",
+            "failures":[
+                {"name":"settled_upload_failure","status":"recovered","detail":"Mock upload returned 503; identical resubmission delivered with the original seeded receipt and one financial operation."},
+                {"name":"terminal_delivery_failure","status":"rejected","detail":"Attempt count seeded to seven, eighth failed upload entered remedy_pending; repeated request stayed terminal at eight."},
+                {"name":"lost_financial_metadata","status":"passed","detail":"Exact external delivery remained verified while payment was unknown and reconciliation required."}
+            ],
+            "billing":[
+                {"scenario":"settled_receipt_write_failure","paymentStatus":"settled","deliveryStatus":"verified","receiptPersisted":false,"detail":"Accepted payment receipt was seeded, not obtained from a live payment provider."},
+                {"scenario":"settled_upload_failed","paymentStatus":"settled","deliveryStatus":"failed_retryable","receiptPersisted":false,"detail":"HTTP 503 after mocked upload failure; no new verified delivery receipt returned. Payment receipt was seeded and remains retained."},
+            {"scenario":"settled_upload_retry","paymentStatus":"settled","deliveryStatus":"verified","receiptPersisted":true,"detail":"Mock storage failure recovered; one financial row and unchanged seeded receipt. No payment provider configured; no real settlement proven."},
+                {"scenario":"terminal_remedy","paymentStatus":"remedy_pending","deliveryStatus":"failed_terminal","receiptPersisted":false,"detail":"No new verified delivery receipt returned; historical receipt retained. Remedy request visible, no refund or credit executed."}
+            ]
+        }),
     );
 }
 

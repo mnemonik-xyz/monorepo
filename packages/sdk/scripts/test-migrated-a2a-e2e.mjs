@@ -1,6 +1,8 @@
 // Invoked by the Rust HTTP integration test. Uses the built SDK and real WASM.
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
+import {runResearchCryptoFailures} from './research-crypto-failures.mjs';
+import {runResearchDiscoveryFailures} from './research-discovery-failures.mjs';
 import {
   MnemonicClient, Keypair, LocalSigner, signRecoveryCheckpoint,
   ArweaveStorageAdapter, HttpObjectStorageAdapter, migrateA2AStorage,
@@ -68,11 +70,12 @@ if(process.argv[2]!=='restore'){
   assert.equal(rows.length,3);assert(rows.every(row=>row.sealedPayload.grants.length>0));
   assert(rows.find(row=>labels[row.attestationId]==='S').stream.chunks.length>1);
   assert.equal(rows.find(row=>row.attestationId===head).signerPubkey,owner);
+  const cryptoFailures=await runResearchCryptoFailures({streamRow:rows.find(row=>labels[row.attestationId]==='S'),readerIdentity:new Keypair(v.reader),authorIdentity:v.author,outsiderIdentity:v.outsider,outsiderFetchClient:client(v.outsider,fresh())});
   const checkpoint=await signRecoveryCheckpoint({version:1,artifactKind:'a2a',scope:context,expectedAuthors:[collector,owner],heads:[head],locators:rows.map(row=>({artifactId:row.attestationId,author:row.signerPubkey,locator:row.locator})),backendHints:['arweave'],createdAt:new Date().toISOString()},new LocalSigner(new Keypair(v.reader)));
   const manifest=await migrateA2AStorage(checkpoint,owner,context,[new ArweaveStorageAdapter(source,request)],new HttpObjectStorageAdapter(destination,request),new LocalSigner(new Keypair(v.reader)));
   await verifyLocatorManifest(manifest,checkpoint,owner,context);
   const backup=await createRecoveryBackup(checkpoint,new Keypair(v.reader),process.env.A2A_BACKUP_PASSPHRASE);
-  console.log(JSON.stringify({checkpoint,manifest,backup,payloads,labels,authors:Object.fromEntries(rows.map(row=>[row.attestationId,row.signerPubkey])),originals:Object.fromEntries(rows.map(row=>[row.attestationId,row.coseEnvelopeHex]))}));
+  console.log(JSON.stringify({checkpoint,manifest,backup,payloads,labels,cryptoFailures,authors:Object.fromEntries(rows.map(row=>[row.attestationId,row.signerPubkey])),originals:Object.fromEntries(rows.map(row=>[row.attestationId,row.coseEnvelopeHex]))}));
 }else{
   const saved=JSON.parse(process.env.A2A_RECOVERY_PACKET);
   // A new Node runtime reconstructs B from an authenticated encrypted backup.
@@ -96,6 +99,7 @@ if(process.argv[2]!=='restore'){
   assert(artifacts[1].streamChunks>1);
   const parent=restored.checkpoint.heads[0],parentRow=store.rows.get(parent);
   assert.equal(saved.labels[parent],'V');assert(parentRow.locator.startsWith('blob://'));
+  const discoveryFailures=await runResearchDiscoveryFailures({context,rows:report.attestations,identity:restored.identity,head:parent,expectedAuthors:[collector,owner]});
   const outsider=client(v.outsider,fresh());
   await assert.rejects(()=>outsider.openA2AAttestation(store.rows.get(artifacts[1].artifactId),collector));
   const followup={...v.payload,messageId:'W',contextId:context,parts:[{kind:'text',text:'Follow-up after restoring reviewer B: request a replicated measurement; preserve the uncertainty from V.'}]};
@@ -107,7 +111,7 @@ if(process.argv[2]!=='restore'){
   const evidence={version:1,environment:'local_mock_services_real_sdk_wasm',artifacts,recoveredHeads:[parent],
     phases:[{name:'collector_authored_R_S',status:'passed'},{name:'reviewer_discovered_opened_and_authored_V',status:'passed'},{name:'exact_byte_storage_migration',status:'passed'},{name:'fresh_B_encrypted_identity_restore',status:'passed'},{name:'recipient_recovered_R_S_V',status:'passed'},{name:'W_delivered_through_O2',status:'passed'}],
     checks:{checkpointAuthenticated:true,manifestAuthenticated:true,exactOriginalBytes:true,completeToHeads:true,restoredIdentity:true,privateKeysPublished:false},
-    failures:[{name:'outsider_open_S',status:'rejected',detail:'Real SDK/WASM rejects outsider access to the recovered sealed source stream.'}],
-    limitations:['Synthetic local storage and operators; no live-provider durability claim.','B uses its restored identity; this does not provision a new independently trusted identity.','Full task8 failure matrix and live task5 prerequisites remain open.']};
+    failures:[...saved.cryptoFailures,...discoveryFailures,{name:'outsider_open_S',status:'rejected',detail:'Real SDK/WASM rejects outsider access to the recovered sealed source stream.'}],
+    limitations:['Synthetic local storage and operators; no live-provider durability claim.','B uses its restored identity; this does not provision a new independently trusted identity.','This unpaid handoff excludes financial controls; the combined runner records them separately. Live task5 prerequisites remain open.']};
   console.log(JSON.stringify({child,parent,parentLocator:parentRow.locator,locator:row.locator,original:row.coseEnvelopeHex,restored:report.attestations.length,completeToHeads:report.completeToHeads,evidence}));
 }
