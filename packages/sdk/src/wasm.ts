@@ -52,6 +52,7 @@ export interface MnemonicCoreModule {
   export_keypair_json: (kp: unknown) => string;
   prepare_a2a?: (kp: unknown, kind: string, payload: string, context: string, prev: string | undefined, createdAt: string, recipients: string | undefined, chunkSize: number | undefined) => Uint8Array;
   open_a2a?: (kp: unknown, signed: Uint8Array, author: string, encryptionSecret: Uint8Array | undefined) => string;
+  verify_a2a_parent?: (childHex:string,parentHex:string)=>void;
   verify_a2a?: (signed: Uint8Array, author: string) => string;
   x25519_secret_from_seed?: (seed: Uint8Array) => Uint8Array;
   // T5: sealed-memory bindings

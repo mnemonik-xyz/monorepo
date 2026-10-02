@@ -150,7 +150,7 @@ describe("attestA2ATask", () => {
     const { client, calls } = await makeClient([
       { body: mcpResult({ attestation_id: "att-2" }) },
     ]);
-    await client.attestA2ATask(TASK, "ctx-abc", { prevId: "att-prev" });
+    await client.attestA2ATask(TASK, "ctx-abc", { prevId: "att-prev",prevLocator:"ar://"+"A".repeat(43) });
     const args = (calls[0]!.body as { params: { arguments: Record<string, unknown> } }).params.arguments;
     expect(args.prev_id).toBe("att-prev");
   });

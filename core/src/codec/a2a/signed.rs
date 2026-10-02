@@ -433,6 +433,28 @@ pub fn verify_signed_a2a(bytes: &[u8], expected_author: Option<&str>) -> Result<
     })
 }
 
+/// A signed parent reference is not a general context write capability.
+pub fn verify_parent_link(child: &VerifiedBinding, parent: &VerifiedBinding) -> Result<()> {
+    ensure!(
+        child.binding.prev_id.as_deref() == Some(format!("a2a:{}", parent.content_hash).as_str()),
+        "parent hash mismatch"
+    );
+    ensure!(child.content_hash != parent.content_hash, "self link");
+    ensure!(
+        child.binding.context_id == parent.binding.context_id,
+        "parent context mismatch"
+    );
+    ensure!(
+        child.signer == parent.signer
+            || parent
+                .grants
+                .iter()
+                .any(|(reader, _, _)| reader == &child.signer),
+        "parent link not eligible"
+    );
+    Ok(())
+}
+
 /// Verify then decrypt locally. A trusted author is mandatory at the client.
 pub fn open_signed_a2a(
     bytes: &[u8],

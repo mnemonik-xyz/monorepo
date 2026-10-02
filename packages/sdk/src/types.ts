@@ -46,6 +46,10 @@ export interface SignerInterface {
  * is required: `signMemory` always needs it for the COSE step.
  */
 export interface MnemonicClientConfig {
+  a2aGatewayUrl?: string;
+  a2aIndexUrl?: string;
+  a2aIndexFlavour?: "irys" | "arweave";
+  a2aIndex?: A2AIndexStore;
   baseUrl: string;
   signer: SignerInterface;
   jwt?: string;
@@ -368,6 +372,8 @@ export interface A2ARecipientCard {
 }
 
 export interface AttestA2AOptions {
+  mode?: "local" | "anchored";
+  prevLocator?: string;
   /** Seal in the client for these recipients. Omit for a plain signed binding. */
   sealed?: { recipients: A2ARecipientCard[]; chunkSize?: number };
   /** Link to a prior attestation in the same context. */
@@ -387,6 +393,7 @@ export interface SealedA2AStream {
 }
 
 export interface Attestation {
+  locator?: string;
   attestationId: string;
   contextId?: string;
   prevId?: string | null;
@@ -406,10 +413,25 @@ export interface Attestation {
 
 /** Options for `recallA2AContext`. */
 export interface RecallA2AContextOptions {
+  mode?: "local" | "anchored";
   /** Filter sealed or plaintext records. Omit to retrieve both. */
   sealed?: boolean;
   /** Max number of attestations to return. Default: server-side. */
   limit?: number;
   /** Filter by object kind. Defaults to `"all"`. */
   kind?: "task" | "message" | "artifact" | "all";
+}
+
+/** Agent-owned cache of original signed artifacts. Default implementation is session-only. */
+export interface A2AIndexStore { list(): Promise<Attestation[]>; put(row:Attestation): Promise<void>; }
+export interface A2ARestoreOptions {
+ expectedAuthors:string[]; heads?:string[]; maxPages?:number; maxCandidates?:number;
+ checkpoint?:{scope:string;cursor?:string;staged?:Attestation[]}; signal?:AbortSignal;
+ parentLocators?:Record<string,{locator:string;author:string}>;
+}
+export interface A2ARestoreReport {
+ attestations:Attestation[]; scanExhausted:boolean; budgetExhausted:boolean;
+ missingParents:string[]; invalidCandidates:{locator:string;reason:string}[];
+ completeToHeads:boolean; completeness:'unknown'|'complete_to_heads';
+ checkpoint?:{scope:string;cursor?:string;staged?:Attestation[]}; error?:string;
 }

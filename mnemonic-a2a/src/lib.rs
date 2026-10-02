@@ -176,4 +176,4 @@ pub fn verify_a2a_attestation(
 #[cfg(not(target_arch = "wasm32"))]
 mod signed;
 #[cfg(not(target_arch = "wasm32"))]
-pub use signed::{ingest_signed_a2a, recall_signed_a2a, validate_signed_a2a};
+pub use signed::validate_signed_a2a;

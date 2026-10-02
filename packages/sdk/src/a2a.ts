@@ -1,3 +1,5 @@
+import {decodeAttestation,envelopeHex,fetchAttestation,verifyParent} from "./a2a-recovery.js";
+import type {RecoveryHost} from "./a2a-recovery.js";
 // A2A attestation helpers — mixin methods attached to MnemonicClient.
 //
 // All four methods wrap `callTool("mnemonic_attest_a2a" | "mnemonic_recall_a2a", ...)`
@@ -41,7 +43,7 @@ import type {
  * Minimal interface that the A2A mixin requires from its host class.
  * `MnemonicClient` satisfies this contract.
  */
-export interface WithCallTool {
+export interface WithCallTool extends RecoveryHost {
   _resolveA2AKeypair(): Promise<KeypairJson>;
   /** Exposed as a protected-by-convention underscore method for mixin access. */
   _callToolA2A(name: string, args: Record<string, unknown>): Promise<unknown>;
@@ -181,11 +183,24 @@ export async function recallA2AContext(
       "recallA2AContext: contextId must be a non-empty string"
     );
   }
+  if(opts.mode!==undefined&&!['local','anchored'].includes(opts.mode))throw new UserError('invalid A2A mode');
+  const filter=(rows:Attestation[])=>rows.filter(r=>r.contextId===contextId&&(!opts.kind||opts.kind==='all'||r.kind===opts.kind)&&(opts.sealed===undefined||r.sealed===opts.sealed)).sort((a,b)=>Date.parse(b.signedAt)-Date.parse(a.signedAt)||b.attestationId.localeCompare(a.attestationId)).slice(0,opts.limit??100);
+  if(opts.limit!==undefined&&(!Number.isInteger(opts.limit)||opts.limit<1||opts.limit>1000))throw new UserError('limit must be 1..1000');
+  if(opts.mode==='local')return filter(await this._a2aIndexStore().list());
   const args: Record<string, unknown> = { context_id: contextId };
   if (typeof opts.sealed === "boolean") args.sealed = opts.sealed;
   if (typeof opts.limit === "number") args.limit = opts.limit;
   if (opts.kind && opts.kind !== "all") args.kind = opts.kind;
   const result = await this._callToolA2A("mnemonic_recall_a2a", args);
+  if(isRecord(result)&&Array.isArray(result.receipts)){
+    const rows:Attestation[]=[];
+    for(const receipt of result.receipts){
+      if(!isRecord(receipt)||typeof receipt.locator!=='string'||typeof receipt.signer_pubkey!=='string')throw new IntegrityError('invalid receipt');
+      const row=await fetchAttestation.call(this,receipt.locator,receipt.signer_pubkey);
+      if(row.attestationId!==receipt.attestation_id||row.contentHash!==receipt.content_hash||row.contextId!==contextId||row.kind!==receipt.kind||row.signedAt!==receipt.signed_at||row.prevId!==receipt.prev_id||row.sealed!==receipt.sealed)throw new IntegrityError('receipt binding mismatch');
+      await this._a2aIndexStore().put(row);rows.push(row);
+    }return filter(rows);
+  }
   return parseAttestations(result);
 }
 
@@ -315,17 +330,35 @@ function fromHex(hex: string): Uint8Array {
 }
 
 async function sendSignedA2A(this: WithCallTool, kind: string, payload: unknown, context: string, opts: AttestA2AOptions): Promise<unknown> {
+  if(opts.mode!==undefined&&!['local','anchored'].includes(opts.mode))throw new UserError('invalid A2A mode');
+  if(opts.prevLocator&&!opts.prevId)throw new UserError('root cannot have parent locator');
   const wasm = await loadWasm();
   if (!wasm.prepare_a2a) throw new ServerError("A2A WASM bindings are unavailable; rebuild the SDK");
   const recipients = opts.sealed?.recipients.map((r) => ({card:r.card,trusted_card_signer:r.trustedCardSigner}));
   const kp = await this._resolveA2AKeypair();
+  const author=kp.pubkey_base58;
   let bytes: Uint8Array;
   try {
     bytes = wasm.prepare_a2a(kp,kind,JSON.stringify(payload),context,opts.prevId,new Date().toISOString(),
       recipients ? JSON.stringify(recipients):undefined,opts.sealed?.chunkSize);
   } finally { kp.secret.fill(0); }
   const signed = Array.from(bytes,(b)=>b.toString(16).padStart(2,"0")).join("");
-  return this._callToolA2A("mnemonic_attest_a2a", {kind,context_id:context,signed,sealed:!!opts.sealed,...(opts.prevId?{prev_id:opts.prevId}:{})});
+  const row=await decodeAttestation(bytes,author);
+  const parent=opts.prevId?(await this._a2aIndexStore().list()).find(r=>r.attestationId===opts.prevId):undefined;
+  if(parent)await verifyParent(row,parent);
+  if(opts.mode==='local'){
+    if(opts.prevId&&!parent)throw new UserError('local parent missing');
+    await this._a2aIndexStore().put(row);return {attestation_id:row.attestationId};
+  }
+  const locator=opts.prevLocator??parent?.locator;
+  if(opts.prevId&&!locator)throw new UserError('ParentLocatorRequired');
+  const result=await this._callToolA2A("mnemonic_attest_a2a",{kind,context_id:context,signed,sealed:!!opts.sealed,mode:'anchored',...(opts.prevId?{prev_id:opts.prevId}:{}),...(locator?{prev_locator:locator}:{})});
+  if(isRecord(result)&&typeof result.locator==='string'){
+    if(result.attestation_id!==row.attestationId)throw new IntegrityError('upload receipt hash mismatch');
+    const delivered=await fetchAttestation.call(this,result.locator,author);
+    if(delivered.coseEnvelopeHex!==signed)throw new IntegrityError('upload delivery mismatch');
+    await this._a2aIndexStore().put(delivered);
+  }return result;
 }
 
 /** Verify author and the complete sealed chain, then decrypt locally. */

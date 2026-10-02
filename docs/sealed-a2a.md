@@ -2,8 +2,9 @@
 
 The SDK creates the ciphertext, author wrap, recipient grants and every COSE
 signature locally. HTTP MCP accepts only authenticated client-signed writes.
-The server verifies signatures and bindings, then stores the original bytes in
-SQLite. It never opens the ciphertext or signs for a remote identity.
+The server verifies signatures and bindings, then delivers original bytes to
+Arweave/Irys. Hosted SQLite holds routing receipts only. The client signs artifacts;
+the operator signs the ANS-104 transport upload. Decryption stays on the client.
 
 ```ts
 const id = await sender.attestA2AMessage(message, contextId, {
@@ -51,13 +52,39 @@ recipient identity and wrapped key. Raw unsigned CBOR from low-level pack
 helpers is insufficient for ingestion. Task objects support client signatures
 but cannot be sealed by this API.
 
-Sealed storage has empty `content`, `privacy=sealed`, no embeddings, and retains
-original signed bytes plus grant indexes atomically. Replay returns the same
-ID. `prev_id` must exist in the same context; forks are allowed. Recall applies
-author/active-grant, kind and sealed filters before LIMIT. Anonymous and
-unrelated callers receive no rows. Legacy server-signed A2A rows are not
-migrated into this signed-binding index. Stdio also requires a client-signed binding; no transport signs A2A
-artifacts inside MCP.
+Hosted A2A writes store no artifact, ciphertext, grant blob or embedding in SQL.
+Receipts may hold hashes, locators, author/reader identities and signed routing
+metadata. Recall returns `{receipts:[...]}`; the SDK fetches original bytes and
+checks them against receipt metadata. SQL receipt loss cannot invalidate parents:
+non-root writes pass `prev_locator` alongside the existing signed `prev_id`.
+The server verifies the fetched parent hash, context and author/named-reader link
+eligibility. This link is not a general context write capability. Format-2 arlocal
+uploads are explicitly unsupported for this ANS-104 A2A ingestion path.
+
+### Recovery without MCP
+
+```ts
+await client.importA2AAttestation("ar://...", independentlyTrustedAuthor);
+const report = await client.restoreA2AContext(contextId, {
+  expectedAuthors: [independentlyTrustedAuthor],
+  heads: [pinnedHeadId],
+});
+const localRows = await client.recallA2AContext(contextId, {mode: "local"});
+```
+
+Configure `a2aGatewayUrl`, `a2aIndexUrl`, and `a2aIndexFlavour` separately.
+The external index is an unsigned discovery hint; signatures establish trust.
+Requests carry no MCP JWT. Known-locator import works before index visibility.
+Discovery retains verified forks and reports budgets, errors and missing parents.
+Completeness is only ancestry to caller-pinned heads, never proof that every
+artifact or newer head was indexed. The Irys provider remains an availability
+dependency. Live production enumeration has not been demonstrated by this draft.
+
+`mode: "local"` signs and stores on the agent's device without network. Supply
+`a2aIndex` or `setA2AIndexStore` for persistence; the SDK default is session-only.
+The CLI uses identity-scoped private JSON files and atomic replacement/locking.
+A crash can leave a `.lock` file; remove it only after confirming no writer runs.
+No automated migration of the rejected draft SQL artifacts is performed.
 
 ## Sealed chunk chain
 
@@ -93,8 +120,10 @@ outsider, signed grant substitution, invalid wrap, distinct encryption keys,
 card substitution and sealed stream mutations. SDK real-WASM tests open native
 fixtures and reproduce exact signed bytes from their canonical payloads. Fresh
 sealing uses randomness and is not expected to reproduce the same ciphertext.
-The HTTP test runs the actual SDK/WASM through MCP, SQLite, recipient recall
-and local open for messages/artifacts with and without chunks.
+The HTTP test uses actual SDK/WASM and a separate remote artifact/index service.
+It deletes all MCP A2A receipts, disables MCP, restores a three-artifact sealed
+chain as author/recipient, rejects outsider open, then restarts MCP with empty
+receipts and extends the chain. The remote service is mocked; cryptography is real.
 
 ```sh
 cargo test -p mnemonic-core --features a2a-experimental
@@ -109,3 +138,13 @@ and sealed chunks are connected to and tested in the actual #61 chain.
 #242 additionally needs the stated recipient-discovery scope (#74), or an
 explicitly agreed AgentCard-only V1 scope. #233 is an umbrella; this patch does
 not complete its conformance publication, sidecar or use-case tasks.
+
+## Draft implementation validation
+
+SDK: 343 tests passed. CLI: 187 passed, 2 skipped (including concurrent durable
+index writers). MCP: five targeted tests plus the explicitly enabled real HTTP/WASM
+recovery test passed. TypeScript build passed after index locking. Strict production clippy (`--workspace --lib --bins -D warnings`) passes. The
+workspace run passed 1,265 tests; sequential doctest rerun resolved concurrent
+build crate-version mismatches. The live Irys query returned HTTP
+403 in this environment; production index recovery remains unverified. Tasks 18–21 and task 14/#242 are not closed by
+publishing this draft. Review against the merged recovery specification.

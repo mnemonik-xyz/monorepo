@@ -115,3 +115,5 @@ export type {
   RefreshAccessTokenInput,
   RefreshAccessTokenResult,
 } from "./oauth.js";
+
+export type { A2AIndexStore, A2ARestoreOptions, A2ARestoreReport } from "./types.js";

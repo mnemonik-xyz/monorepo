@@ -1,3 +1,11 @@
+# Review status: superseded storage draft
+
+The earlier review below describes the rejected SQL artifact-storage draft.
+Its storage assertions and test totals are historical, not current evidence.
+See [current contract and validation](../../docs/sealed-a2a.md) and the merged
+[A2A recovery spec](a2a-recovery-spec.md). Tasks 18–21 remain in progress pending
+review and complete acceptance; #61/#74 obligations remain open.
+
 # Sealed A2A implementation review
 
 Base: main `a8f34fcce514ad3da5ef78113f0bc274768a7369`.

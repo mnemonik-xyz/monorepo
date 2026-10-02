@@ -967,3 +967,15 @@ pub fn x25519_secret_from_seed(seed: &[u8]) -> Result<Vec<u8>, JsValue> {
     let key = ed25519_dalek::SigningKey::from_bytes(&bytes);
     Ok(crate::sealed::x25519_secret_from_ed25519(&key).to_vec())
 }
+
+/// Check signed lineage without decrypting or trusting local metadata.
+#[cfg(feature = "a2a-experimental")]
+#[wasm_bindgen]
+pub fn verify_a2a_parent(child_hex: &str, parent_hex: &str) -> Result<(), JsValue> {
+    use crate::codec::a2a::signed::{verify_parent_link, verify_signed_a2a};
+    let child = hex::decode(child_hex).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let parent = hex::decode(parent_hex).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let child = verify_signed_a2a(&child, None).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let parent = verify_signed_a2a(&parent, None).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    verify_parent_link(&child, &parent).map_err(|e| JsValue::from_str(&e.to_string()))
+}

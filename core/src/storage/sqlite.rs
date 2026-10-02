@@ -8,9 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
 use super::mode::{Visibility, WriteMode};
-use super::traits::{
-    AttestationRow, AttestationStore, ReconstructionInputs, SearchResult,
-};
+use super::traits::{AttestationRow, AttestationStore, ReconstructionInputs, SearchResult};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS attestations (
@@ -93,14 +91,15 @@ CREATE TABLE IF NOT EXISTS blog_posts (
     visibility TEXT NOT NULL DEFAULT 'public'
 );
 CREATE INDEX IF NOT EXISTS idx_blog_posts_published_at ON blog_posts(published_at);
-CREATE TABLE IF NOT EXISTS a2a_bindings (
-    attestation_id TEXT PRIMARY KEY REFERENCES attestations(attestation_id),
-    kind TEXT NOT NULL,
-    memory_hash TEXT,
-    prev_id TEXT,
-    signed_at TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS a2a_anchor_receipts (
+ attestation_id TEXT PRIMARY KEY, content_hash TEXT NOT NULL, owner_pubkey TEXT NOT NULL,
+ context_id TEXT NOT NULL, kind TEXT NOT NULL, sealed INTEGER NOT NULL,
+ prev_id TEXT, signed_at TEXT NOT NULL, arweave_tx TEXT NOT NULL, ready INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_a2a_memory_hash ON a2a_bindings(memory_hash);
+CREATE TABLE IF NOT EXISTS a2a_anchor_readers (
+ attestation_id TEXT NOT NULL REFERENCES a2a_anchor_receipts(attestation_id), reader_pubkey TEXT NOT NULL,
+ PRIMARY KEY(attestation_id,reader_pubkey)
+);
 "#;
 
 /// SQL backing `AttestationStore::search` when the caller passes a
@@ -803,11 +802,8 @@ fn migrate_write_mode_anchored_rename(conn: &Connection) -> anyhow::Result<()> {
 /// EXISTS` is idempotent.
 fn migrate_context_id_column(conn: &Connection) -> anyhow::Result<()> {
     if !attestations_has_column(conn, "context_id")? {
-        conn.execute(
-            "ALTER TABLE attestations ADD COLUMN context_id TEXT",
-            [],
-        )
-        .context("adding attestations.context_id")?;
+        conn.execute("ALTER TABLE attestations ADD COLUMN context_id TEXT", [])
+            .context("adding attestations.context_id")?;
     }
     // Always attempt; `IF NOT EXISTS` makes it idempotent.
     conn.execute(
@@ -846,11 +842,8 @@ fn migrate_sealed_columns(conn: &Connection) -> anyhow::Result<()> {
             .context("creating idx_attestations_privacy")?;
         }
         if need_sealed_blob {
-            conn.execute(
-                "ALTER TABLE attestations ADD COLUMN sealed_blob BLOB",
-                [],
-            )
-            .context("adding attestations.sealed_blob")?;
+            conn.execute("ALTER TABLE attestations ADD COLUMN sealed_blob BLOB", [])
+                .context("adding attestations.sealed_blob")?;
         }
         Ok(())
     };
@@ -1470,7 +1463,7 @@ impl SqliteStore {
              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             params![
                 attestation_id,
-                "",          // content — empty for sealed rows
+                "", // content — empty for sealed rows
                 content_hash,
                 tags_json,
                 solana_tx,
@@ -1509,21 +1502,18 @@ impl SqliteStore {
              ORDER BY created_at DESC
              LIMIT ?3",
         )?;
-        let rows = stmt.query_map(
-            params![owner, since.unwrap_or(""), limit as i64],
-            |row| {
-                Ok(SealedRow {
-                    attestation_id: row.get(0)?,
-                    content_hash: row.get(1)?,
-                    solana_tx: row.get(2)?,
-                    arweave_tx: row.get(3)?,
-                    signer_pubkey: row.get(4)?,
-                    owner_pubkey: row.get(5)?,
-                    created_at: row.get(6)?,
-                    sealed_blob: row.get::<_, Option<Vec<u8>>>(7)?.unwrap_or_default(),
-                })
-            },
-        )?;
+        let rows = stmt.query_map(params![owner, since.unwrap_or(""), limit as i64], |row| {
+            Ok(SealedRow {
+                attestation_id: row.get(0)?,
+                content_hash: row.get(1)?,
+                solana_tx: row.get(2)?,
+                arweave_tx: row.get(3)?,
+                signer_pubkey: row.get(4)?,
+                owner_pubkey: row.get(5)?,
+                created_at: row.get(6)?,
+                sealed_blob: row.get::<_, Option<Vec<u8>>>(7)?.unwrap_or_default(),
+            })
+        })?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -1560,7 +1550,14 @@ impl SqliteStore {
             "INSERT OR REPLACE INTO grants
                  (id, memory_hash, reader_kid, grant_cose, author_pubkey, created_at)
              VALUES (?,?,?,?,?,?)",
-            params![id, memory_hash, reader_kid, grant_cose, author_pubkey, created_at],
+            params![
+                id,
+                memory_hash,
+                reader_kid,
+                grant_cose,
+                author_pubkey,
+                created_at
+            ],
         )?;
         Ok(())
     }
@@ -1658,11 +1655,14 @@ impl SqliteStore {
     /// Fetch the wrapped recall key blob for `owner_pubkey`, or `None` if the
     /// owner has not yet enabled hosted recall.
     pub fn get_recall_key_wrap(&self, owner_pubkey: &str) -> anyhow::Result<Option<Vec<u8>>> {
-        let res = self.conn.query_row(
-            "SELECT rk_wrap FROM owner_recall_keys WHERE owner_pubkey = ?1",
-            params![owner_pubkey],
-            |row| row.get::<_, Vec<u8>>(0),
-        ).optional()?;
+        let res = self
+            .conn
+            .query_row(
+                "SELECT rk_wrap FROM owner_recall_keys WHERE owner_pubkey = ?1",
+                params![owner_pubkey],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
         Ok(res)
     }
 
@@ -2167,7 +2167,6 @@ fn sort_and_truncate(results: &mut Vec<SearchResult>, limit: usize) {
     results.truncate(limit);
 }
 
-
 fn floats_to_bytes(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
@@ -2186,46 +2185,25 @@ fn l2_norm(v: &[f32]) -> f32 {
 
 #[cfg(feature = "a2a-experimental")]
 impl SqliteStore {
-    /// Save verified client bytes and their indexes in one transaction.
-    pub fn save_signed_a2a(
+    pub fn record_a2a_receipt(
         &self,
-        signed: &[u8],
         v: &crate::codec::a2a::signed::VerifiedBinding,
-    ) -> anyhow::Result<serde_json::Value> {
-        use base64::Engine as _;
+        locator: &str,
+        ready: bool,
+    ) -> anyhow::Result<()> {
         let id = format!("a2a:{}", v.content_hash);
         let b = &v.binding;
         let tx = self.conn.unchecked_transaction()?;
-        if let Some(parent) = &b.prev_id {
-            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM attestations a JOIN a2a_bindings b ON b.attestation_id=a.attestation_id WHERE a.attestation_id=?1 AND a.context_id=?2 AND (a.owner_pubkey=?3 OR EXISTS(SELECT 1 FROM grants g WHERE g.memory_hash=b.memory_hash AND g.reader_kid=?3 AND g.author_pubkey=a.signer_pubkey AND g.withdrawn_at IS NULL)))", params![parent,b.context_id,v.signer], |r| r.get(0))?;
-            anyhow::ensure!(exists, "parent not found in signed context");
-        }
-        let tags = serde_json::to_string(&vec!["a2a".to_string(), format!("a2a-{}", b.kind)])?;
-        let content = if b.sealed {
-            String::new()
-        } else {
-            serde_json::to_string(&b.payload)?
-        };
-        let envelope = hex::encode(signed);
-        tx.execute("INSERT OR IGNORE INTO attestations
-            (attestation_id, content, content_hash, tags, solana_tx, arweave_tx, signer_pubkey, created_at, owner_pubkey, write_mode, visibility, plaintext_on_arweave, privacy, sealed_blob, context_id)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?7,'local','private',0,?9,?10,?11)",
-            params![id,content,v.content_hash,tags,format!("local:{id}"),envelope,v.signer,b.created_at,if b.sealed { "sealed" } else { "plaintext" },v.sealed_cose,b.context_id])?;
-        let memory_hash = v.grants.first().map(|g| g.2.as_str());
-        tx.execute("INSERT OR IGNORE INTO a2a_bindings(attestation_id,kind,memory_hash,prev_id,signed_at) VALUES (?1,?2,?3,?4,?5)", params![id,b.kind,memory_hash,b.prev_id,b.created_at])?;
-        for (reader, grant, hash) in &v.grants {
-            let grant_id = blake3::hash(grant).to_hex().to_string();
-            tx.execute("INSERT OR IGNORE INTO grants(id,memory_hash,reader_kid,grant_cose,author_pubkey,created_at) VALUES (?1,?2,?3,?4,?5,?6)",params![grant_id,hash,reader,grant,v.signer,b.created_at])?;
+        tx.execute("INSERT INTO a2a_anchor_receipts(attestation_id,content_hash,owner_pubkey,context_id,kind,sealed,prev_id,signed_at,arweave_tx,ready) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(attestation_id) DO UPDATE SET arweave_tx=excluded.arweave_tx,ready=excluded.ready",params![id,v.content_hash,v.signer,b.context_id,b.kind,b.sealed,b.prev_id,b.created_at,locator,ready])?;
+        for (reader, _, _) in &v.grants {
+            tx.execute(
+                "INSERT OR IGNORE INTO a2a_anchor_readers VALUES (?1,?2)",
+                params![id, reader],
+            )?;
         }
         tx.commit()?;
-        Ok(
-            serde_json::json!({"attestation_id":id,"blake3":v.content_hash,"cose_envelope_hex":envelope,"sealed":b.sealed,
-            "sealed_payload": b.sealed.then(|| b.payload["parts"][0]["data"].clone()),
-            "sealed_cose":v.sealed_cose.as_ref().map(|s|base64::engine::general_purpose::STANDARD.encode(s))}),
-        )
+        Ok(())
     }
-
-    /// Return only the author or a signed grant recipient's records.
     pub fn recall_signed_a2a(
         &self,
         owner: &str,
@@ -2234,40 +2212,15 @@ impl SqliteStore {
         sealed: Option<bool>,
         limit: usize,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
-        use crate::codec::a2a::signed::verify_signed_a2a;
         let kind = match kind {
             None | Some("all") => None,
             Some(k @ ("task" | "message" | "artifact")) => Some(k),
             _ => anyhow::bail!("invalid kind"),
         };
         anyhow::ensure!((1..=1000).contains(&limit), "limit must be 1..1000");
-        let mut stmt = self.conn.prepare("SELECT a.attestation_id,a.arweave_tx,a.content_hash,a.signer_pubkey FROM attestations a
-            JOIN a2a_bindings b ON b.attestation_id=a.attestation_id
-            WHERE a.context_id=?1 AND (?2 IS NULL OR b.kind=?2) AND (?3 IS NULL OR (a.privacy='sealed')=?3)
-            AND (a.owner_pubkey=?4 OR EXISTS(SELECT 1 FROM grants g WHERE g.memory_hash=b.memory_hash AND g.reader_kid=?4 AND g.author_pubkey=a.signer_pubkey AND g.withdrawn_at IS NULL))
-            ORDER BY a.created_at DESC,a.attestation_id DESC LIMIT ?5")?;
-        let rows = stmt.query_map(params![context, kind, sealed, owner, limit as i64], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-            ))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (id, cose, hash, signer) = row?;
-            let verified = verify_signed_a2a(&hex::decode(&cose)?, Some(&signer))?;
-            anyhow::ensure!(
-                verified.content_hash == hash && verified.binding.context_id == context,
-                "stored binding mismatch"
-            );
-            let b = verified.binding;
-            out.push(serde_json::json!({"attestation_id":id,"content_hash":hash,"signer_pubkey":signer,"cose_envelope_hex":cose,
-                "kind":b.kind,"signed_at":b.created_at,"context_id":b.context_id,"prev_id":b.prev_id,"sealed":b.sealed,
-                "payload":b.payload,"sealed_payload":b.sealed.then(||b.payload["parts"][0]["data"].clone()),"stream":b.stream}));
-        }
-        Ok(out)
+        let mut q=self.conn.prepare("SELECT r.attestation_id,r.content_hash,r.owner_pubkey,r.kind,r.signed_at,r.context_id,r.prev_id,r.sealed,r.arweave_tx FROM a2a_anchor_receipts r WHERE r.ready=1 AND r.context_id=?1 AND (?2 IS NULL OR r.kind=?2) AND (?3 IS NULL OR r.sealed=?3) AND (r.owner_pubkey=?4 OR EXISTS(SELECT 1 FROM a2a_anchor_readers a WHERE a.attestation_id=r.attestation_id AND a.reader_pubkey=?4)) ORDER BY julianday(r.signed_at) DESC,r.attestation_id DESC LIMIT ?5")?;
+        let rows=q.query_map(params![context,kind,sealed,owner,limit as i64],|r|Ok(serde_json::json!({"attestation_id":r.get::<_,String>(0)?,"content_hash":r.get::<_,String>(1)?,"signer_pubkey":r.get::<_,String>(2)?,"kind":r.get::<_,String>(3)?,"signed_at":r.get::<_,String>(4)?,"context_id":r.get::<_,String>(5)?,"prev_id":r.get::<_,Option<String>>(6)?,"sealed":r.get::<_,bool>(7)?,"locator":format!("ar://{}",r.get::<_,String>(8)?)})))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }
 
@@ -2314,11 +2267,12 @@ mod tests {
         let miss = store
             .find_by_tx("sol-contract", "wrong-owner")
             .expect("find_by_tx wrong-tenant via trait ref");
-        assert!(miss.is_none(), "wrong-tenant must be indistinguishable from miss");
+        assert!(
+            miss.is_none(),
+            "wrong-tenant must be indistinguishable from miss"
+        );
 
-        let n = store
-            .count("signer-contract")
-            .expect("count via trait ref");
+        let n = store.count("signer-contract").expect("count via trait ref");
         assert!(n >= 1, "count must be >= 1 after save");
 
         let results = store
@@ -2603,7 +2557,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(type_name, "integer", "embedding must be integer type to trigger rusqlite decode error");
+        assert_eq!(
+            type_name, "integer",
+            "embedding must be integer type to trigger rusqlite decode error"
+        );
 
         // Debug: check if the JOIN query returns any rows
         let join_count: i64 = store
@@ -2614,7 +2571,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(join_count, 1, "JOIN must return exactly 1 row before search");
+        assert_eq!(
+            join_count, 1,
+            "JOIN must return exactly 1 row before search"
+        );
 
         // Now search: the new collect::<rusqlite::Result<Vec<_>>>()? propagates
         // the InvalidType error instead of silently dropping the row.
@@ -3864,7 +3824,11 @@ mod tests {
 
         let active = store.grants_for_reader("reader-kid-1").unwrap();
         let ids: Vec<&str> = active.iter().map(|g| g.id.as_str()).collect();
-        assert_eq!(ids, vec!["grant-active"], "only non-withdrawn grant returned");
+        assert_eq!(
+            ids,
+            vec!["grant-active"],
+            "only non-withdrawn grant returned"
+        );
 
         // grants_for_memory returns both (including withdrawn).
         let all = store.grants_for_memory("mem-hash-1").unwrap();
@@ -4035,15 +3999,20 @@ mod tests {
     fn test_rusqlite_integer_blob_type_check() {
         use rusqlite::Connection;
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE t (data BLOB NOT NULL)").unwrap();
-        conn.execute("INSERT INTO t (data) VALUES (999)", []).unwrap();
+        conn.execute_batch("CREATE TABLE t (data BLOB NOT NULL)")
+            .unwrap();
+        conn.execute("INSERT INTO t (data) VALUES (999)", [])
+            .unwrap();
 
-        let type_name: String = conn.query_row("SELECT TYPEOF(data) FROM t", [], |r| r.get(0)).unwrap();
+        let type_name: String = conn
+            .query_row("SELECT TYPEOF(data) FROM t", [], |r| r.get(0))
+            .unwrap();
         // This should be "integer" because 999 is stored as integer.
         assert_eq!(type_name, "integer");
 
         // rusqlite should return InvalidColumnType for Vec<u8> on integer column.
-        let result: rusqlite::Result<Vec<u8>> = conn.query_row("SELECT data FROM t", [], |r| r.get(0));
+        let result: rusqlite::Result<Vec<u8>> =
+            conn.query_row("SELECT data FROM t", [], |r| r.get(0));
         assert!(result.is_err(), "expected Err but got: {:?}", result);
     }
 
@@ -4182,9 +4151,7 @@ mod tests {
             )
             .unwrap();
         // context_id stays NULL — no set_context_id call.
-        let rows = store
-            .recall_by_context("ctx-anything", None)
-            .unwrap();
+        let rows = store.recall_by_context("ctx-anything", None).unwrap();
         assert!(
             rows.is_empty(),
             "legacy NULL context_id rows must be invisible to recall_by_context"
@@ -4198,5 +4165,4 @@ mod tests {
         let rows = store.recall_by_context("no-such-ctx", None).unwrap();
         assert!(rows.is_empty());
     }
-
 }

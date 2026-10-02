@@ -1,18 +1,82 @@
-//! Client signatures, sealed storage, recipient recall and real SDK HTTP tests.
+//! Remote artifacts survive complete removal of MCP routing receipts.
 mod _helpers;
 use _helpers::TestServer;
-use mnemonic_core::codec::a2a::signed::prepare_signed_a2a;
+use axum::{
+    body::Bytes,
+    extract::{Path, State},
+    routing::{get, post},
+    Json, Router,
+};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use mnemonic_core::codec::a2a::signed::{prepare_signed_a2a, verify_signed_a2a};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use solana_sdk::signature::{Keypair, Signer};
-
-fn result(resp: &_helpers::CallResult) -> Value {
-    assert!(resp.envelope["error"].is_null(), "{:?}", resp.envelope);
-    serde_json::from_str(
-        resp.envelope["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap()
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
+#[derive(Clone, Default)]
+struct Remote {
+    blobs: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+    unavailable: Arc<std::sync::atomic::AtomicBool>,
+}
+async fn upload(State(s): State<Remote>, bytes: Bytes) -> Json<Value> {
+    assert_eq!(&bytes[..2], &2u16.to_le_bytes());
+    let id = URL_SAFE_NO_PAD.encode(Sha256::digest(&bytes[2..66]));
+    let tags = u64::from_le_bytes(bytes[108..116].try_into().unwrap()) as usize;
+    let original = bytes[116 + tags..].to_vec();
+    verify_signed_a2a(&original, None).unwrap();
+    s.blobs.lock().unwrap().insert(id.clone(), original);
+    Json(json!({"id":id}))
+}
+async fn read(
+    State(s): State<Remote>,
+    Path(id): Path<String>,
+) -> Result<Vec<u8>, axum::http::StatusCode> {
+    if s.unavailable.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+    s.blobs
+        .lock()
+        .unwrap()
+        .get(&id)
+        .cloned()
+        .ok_or(axum::http::StatusCode::NOT_FOUND)
+}
+async fn query(State(s): State<Remote>, Json(req): Json<Value>) -> Json<Value> {
+    let filter = req["variables"]["tags"].as_array().unwrap();
+    let mut edges = Vec::new();
+    for (id, bytes) in s.blobs.lock().unwrap().iter() {
+        let v = verify_signed_a2a(bytes, None).unwrap();
+        let tags = json!([{"name":"App-Name","value":"mnemonic-protocol"},{"name":"Mnemonic-Type","value":"a2a"},{"name":"Producer","value":v.signer},{"name":"Context-Id","value":v.binding.context_id},{"name":"Content-Hash","value":v.content_hash}]);
+        if filter.iter().all(|f| {
+            tags.as_array().unwrap().iter().any(|t| {
+                t["name"] == f["name"] && f["values"].as_array().unwrap().contains(&t["value"])
+            })
+        }) {
+            edges.push(json!({"cursor":id,"node":{"id":id,"tags":tags}}));
+        }
+    }
+    Json(json!({"data":{"transactions":{"edges":edges,"pageInfo":{"hasNextPage":false}}}}))
+}
+async fn remote() -> (String, Remote, tokio::task::JoinHandle<()>) {
+    let s = Remote::default();
+    let app = Router::new()
+        .route("/upload", post(upload))
+        .route("/graphql", post(query))
+        .route("/{id}", get(read))
+        .with_state(s.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (url, s, task)
+}
+fn result(r: &_helpers::CallResult) -> Value {
+    assert!(r.envelope["error"].is_null(), "{:?}", r.envelope);
+    serde_json::from_str(r.envelope["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
 }
 fn vectors() -> Value {
     serde_json::from_str(include_str!(
@@ -20,372 +84,253 @@ fn vectors() -> Value {
     ))
     .unwrap()
 }
-fn signed_args(v: &Value, key: &str) -> Value {
-    json!({"kind":"message","context_id":"fixture-ctx","signed":v[key],"sealed":key!="plain"})
+fn no_memories(server: &TestServer) {
+    let g = server.state.store.lock().unwrap();
+    for table in ["attestations", "attestation_embeddings", "grants"] {
+        let n: i64 = g
+            .conn()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "{table}");
+    }
 }
-
 #[tokio::test]
-async fn sealed_a2a_ingest_recall_is_non_custodial_and_recipient_scoped() {
-    let server = TestServer::builder().build();
+async fn original_bytes_remote_metadata_only_and_retry() {
+    let (url, s, task) = remote().await;
+    let server = TestServer::builder().arweave_gateway(url).build();
     let v = vectors();
     let author = v["author"]["pubkey_base58"].as_str().unwrap();
     let reader = v["reader"]["pubkey_base58"].as_str().unwrap();
-    let outsider = v["outsider"]["pubkey_base58"].as_str().unwrap();
-    assert_ne!(author, server.server_pubkey());
-    let resp = server
-        .call_tool(
-            Some(author),
-            "mnemonic_attest_a2a",
-            signed_args(&v, "sealed"),
-        )
-        .await;
-    let stored = result(&resp);
-    let replay = result(
-        &server
-            .call_tool(
-                Some(author),
-                "mnemonic_attest_a2a",
-                signed_args(&v, "sealed"),
-            )
-            .await,
-    );
-    assert_eq!(stored["attestation_id"], replay["attestation_id"]);
-    for identity in [author, reader] {
-        let rows = result(
+    for key in ["plain", "sealed", "stream"] {
+        let args = json!({"kind":"message","context_id":"fixture-ctx","sealed":key!="plain","signed":v[key]});
+        let a = result(
             &server
-                .call_tool(
-                    Some(identity),
-                    "mnemonic_recall_a2a",
-                    json!({"context_id":"fixture-ctx","sealed":true}),
-                )
+                .call_tool(Some(author), "mnemonic_attest_a2a", args.clone())
                 .await,
         );
-        assert_eq!(rows["attestations"].as_array().unwrap().len(), 1);
-        assert_eq!(rows["attestations"][0]["cose_envelope_hex"], v["sealed"]);
-        assert_eq!(rows["attestations"][0]["signer_pubkey"], author);
-    }
-    for identity in [None, Some(outsider)] {
-        let rows = result(
+        let b = result(
             &server
-                .call_tool(
-                    identity,
-                    "mnemonic_recall_a2a",
-                    json!({"context_id":"fixture-ctx","sealed":true}),
-                )
+                .call_tool(Some(author), "mnemonic_attest_a2a", args)
                 .await,
         );
-        assert!(rows["attestations"].as_array().unwrap().is_empty());
+        assert_eq!(a, b);
+        assert_eq!(
+            hex::encode(&s.blobs.lock().unwrap()[a["arweave_tx"].as_str().unwrap()]),
+            v[key]
+        );
     }
-    let guard = server.state.store.lock().unwrap();
-    let (content, privacy, blob): (String, String, Vec<u8>) = guard
-        .conn()
-        .query_row(
-            "SELECT content,privacy,sealed_blob FROM attestations WHERE attestation_id=?1",
-            [stored["attestation_id"].as_str().unwrap()],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    assert!(content.is_empty());
-    assert_eq!(privacy, "sealed");
-    assert!(!blob.is_empty());
-    let count: i64 = guard
-        .conn()
-        .query_row("SELECT COUNT(*) FROM attestation_embeddings", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(count, 0);
-}
-
-#[tokio::test]
-async fn a2a_rejects_wrong_signer_unsigned_and_tool_binding_mismatch() {
-    let server = TestServer::builder().build();
-    let v = vectors();
-    let author = v["author"]["pubkey_base58"].as_str().unwrap();
-    let outsider = v["outsider"]["pubkey_base58"].as_str().unwrap();
-    for args in [
-        json!({"kind":"message","context_id":"fixture-ctx","payload":v["payload"]}),
-        {
-            let mut a = signed_args(&v, "sealed");
-            a["sealed"] = json!(false);
-            a
-        },
-        {
-            let mut a = signed_args(&v, "sealed");
-            a["context_id"] = json!("wrong");
-            a
-        },
-        {
-            let mut a = signed_args(&v, "sealed");
-            a["kind"] = json!("artifact");
-            a
-        },
-        {
-            let mut a = signed_args(&v, "sealed");
-            a["prev_id"] = json!("forged-parent");
-            a
-        },
-    ] {
-        let resp = server
-            .call_tool(Some(author), "mnemonic_attest_a2a", args)
-            .await;
-        assert!(resp.envelope["error"].is_object());
-    }
-    assert!(server
-        .call_tool(
-            Some(outsider),
-            "mnemonic_attest_a2a",
-            signed_args(&v, "sealed")
-        )
-        .await
-        .envelope["error"]
-        .is_object());
-    assert_eq!(
-        server
-            .state
-            .store
-            .lock()
-            .unwrap()
-            .conn()
-            .query_row("SELECT COUNT(*) FROM attestations", [], |r| r
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-}
-
-#[tokio::test]
-async fn filters_apply_before_limit_and_parent_is_signed_and_context_bound() {
-    let server = TestServer::builder().build();
-    let v = vectors();
-    let author = Keypair::new_from_array([1; 32]);
-    let sub = author.pubkey().to_string();
-    let parent = result(
-        &server
-            .call_tool(Some(&sub), "mnemonic_attest_a2a", signed_args(&v, "sealed"))
-            .await,
-    );
-    let parent_id = parent["attestation_id"].as_str().unwrap();
-    let payload = json!({"artifactId":"art","parts":[]});
-    let signed = prepare_signed_a2a(
-        &author,
-        "artifact",
-        payload,
-        "fixture-ctx",
-        Some(parent_id.into()),
-        "2026-10-01T00:00:01Z",
-        None,
-    )
-    .unwrap();
-    result(&server.call_tool(Some(&sub),"mnemonic_attest_a2a",json!({"kind":"artifact","context_id":"fixture-ctx","prev_id":parent_id,"signed":hex::encode(signed),"sealed":false})).await);
+    no_memories(&server);
+    assert_eq!(s.blobs.lock().unwrap().len(), 3);
     let rows = result(
         &server
             .call_tool(
-                Some(&sub),
+                Some(reader),
                 "mnemonic_recall_a2a",
-                json!({"context_id":"fixture-ctx","kind":"message","limit":1,"sealed":true}),
+                json!({"context_id":"fixture-ctx","sealed":true}),
             )
             .await,
     );
-    assert_eq!(rows["attestations"][0]["attestation_id"], parent_id);
-    let rows = result(
-        &server
-            .call_tool(
-                Some(&sub),
-                "mnemonic_recall_a2a",
-                json!({"context_id":"fixture-ctx","sealed":false}),
-            )
-            .await,
-    );
-    assert_eq!(rows["attestations"][0]["prev_id"], parent_id);
-}
-
-#[tokio::test]
-async fn sealed_a2a_store_survives_reopen_and_parent_failure_is_atomic() {
-    let temp = tempfile::NamedTempFile::new().unwrap();
-    let v = vectors();
-    let bytes = hex::decode(v["stream"].as_str().unwrap()).unwrap();
-    let verified = mnemonic_core::codec::a2a::signed::verify_signed_a2a(&bytes, None).unwrap();
-    {
-        let store = mnemonic_core::storage::SqliteStore::open(temp.path()).unwrap();
-        store.save_signed_a2a(&bytes, &verified).unwrap();
-    }
-    let store = mnemonic_core::storage::SqliteStore::open(temp.path()).unwrap();
-    assert_eq!(
-        store
-            .recall_signed_a2a(
-                v["reader"]["pubkey_base58"].as_str().unwrap(),
-                "fixture-ctx",
-                None,
-                Some(true),
-                100
-            )
-            .unwrap()
-            .len(),
-        1
-    );
-    let author = Keypair::new_from_array([1; 32]);
-    let signed = prepare_signed_a2a(
-        &author,
-        "message",
-        v["payload"].clone(),
-        "fixture-ctx",
-        Some("missing-parent".into()),
-        "2026-10-01T00:00:00Z",
-        None,
-    )
-    .unwrap();
-    let failed = mnemonic_core::codec::a2a::signed::verify_signed_a2a(&signed, None).unwrap();
-    assert!(store.save_signed_a2a(&signed, &failed).is_err());
-    assert_eq!(
-        store
-            .conn()
-            .query_row("SELECT COUNT(*) FROM attestations", [], |r| r
-                .get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires built SDK and real WASM; run after building packages/sdk"]
-async fn sdk_http_sealed_end_to_end() {
-    let server = TestServer::builder().build();
-    let v = vectors();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let router = server.app.clone();
-    let task = tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap();
-    let output = tokio::process::Command::new("node")
-        .arg(root.join("packages/sdk/scripts/test-sealed-a2a-e2e.mjs"))
-        .env("A2A_TEST_URL", format!("http://{address}"))
-        .env(
-            "A2A_AUTHOR_JWT",
-            server.mint_jwt(v["author"]["pubkey_base58"].as_str().unwrap()),
-        )
-        .env(
-            "A2A_READER_JWT",
-            server.mint_jwt(v["reader"]["pubkey_base58"].as_str().unwrap()),
-        )
-        .env(
-            "A2A_OUTSIDER_JWT",
-            server.mint_jwt(v["outsider"]["pubkey_base58"].as_str().unwrap()),
-        )
-        .output()
-        .await
-        .unwrap();
+    assert_eq!(rows["receipts"].as_array().unwrap().len(), 2);
     task.abort();
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let guard = server.state.store.lock().unwrap();
-    let count: i64 = guard
-        .conn()
-        .query_row(
-            "SELECT COUNT(*) FROM attestations WHERE privacy='sealed' AND content=''",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(count, 4);
-    let embeddings: i64 = guard
-        .conn()
-        .query_row("SELECT COUNT(*) FROM attestation_embeddings", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(embeddings, 0);
 }
-
 #[tokio::test]
-async fn valid_client_signature_reaches_paywall_and_invalid_never_does() {
-    let server = TestServer::builder().payment_mode("x402").build();
-    let v = vectors();
-    let author = v["author"]["pubkey_base58"].as_str().unwrap();
-    let valid = server
-        .call_tool(
-            Some(author),
-            "mnemonic_attest_a2a",
-            signed_args(&v, "sealed"),
-        )
-        .await;
-    assert_eq!(valid.status, axum::http::StatusCode::PAYMENT_REQUIRED);
-    let mut args = signed_args(&v, "sealed");
-    args["signed"] = json!("00");
-    let invalid = server
-        .call_tool(Some(author), "mnemonic_attest_a2a", args)
-        .await;
-    assert_eq!(invalid.status, axum::http::StatusCode::BAD_REQUEST);
-    assert_eq!(server.attestation_count(author), 0);
-    result(
-        &server
-            .call_tool(
-                Some(author),
-                "mnemonic_recall_a2a",
-                json!({"context_id":"fixture-ctx"}),
-            )
-            .await,
-    );
-}
-
-#[tokio::test]
-async fn withdrawn_recipient_loses_recall_and_unrelated_parent_cannot_be_linked() {
-    let server = TestServer::builder().build();
-    let v = vectors();
-    let author = v["author"]["pubkey_base58"].as_str().unwrap();
-    let reader = v["reader"]["pubkey_base58"].as_str().unwrap();
-    let parent = result(
-        &server
-            .call_tool(
-                Some(author),
-                "mnemonic_attest_a2a",
-                signed_args(&v, "sealed"),
-            )
-            .await,
-    );
-    let outsider = Keypair::new_from_array([3; 32]);
-    let signed = prepare_signed_a2a(
-        &outsider,
+async fn parent_validation_survives_receipt_loss() {
+    let (url, _, task) = remote().await;
+    let server = TestServer::builder().arweave_gateway(url).build();
+    let kp = Keypair::new();
+    let owner = kp.pubkey().to_string();
+    let payload = json!({"messageId":"root","role":"agent","contextId":"ctx","parts":[{"kind":"text","text":"root"}]});
+    let root = prepare_signed_a2a(
+        &kp,
         "message",
-        v["payload"].clone(),
-        "fixture-ctx",
-        Some(parent["attestation_id"].as_str().unwrap().into()),
+        payload.clone(),
+        "ctx",
+        None,
         "2026-10-01T00:00:00Z",
         None,
     )
     .unwrap();
-    let response=server.call_tool(Some(&outsider.pubkey().to_string()),"mnemonic_attest_a2a",json!({"kind":"message","context_id":"fixture-ctx","signed":hex::encode(signed),"prev_id":parent["attestation_id"]})).await;
-    assert!(response.envelope["error"].is_object());
+    let receipt = result(
+        &server
+            .call_tool(
+                Some(&owner),
+                "mnemonic_attest_a2a",
+                json!({"kind":"message","context_id":"ctx","signed":hex::encode(root)}),
+            )
+            .await,
+    );
     server
         .state
         .store
         .lock()
         .unwrap()
         .conn()
-        .execute(
-            "UPDATE grants SET withdrawn_at='2026-10-01T00:00:01Z' WHERE reader_kid=?1",
-            [reader],
-        )
+        .execute_batch("DELETE FROM a2a_anchor_readers; DELETE FROM a2a_anchor_receipts;")
         .unwrap();
-    let rows = result(
+    let id = receipt["attestation_id"].as_str().unwrap();
+    let child = prepare_signed_a2a(
+        &kp,
+        "message",
+        payload.clone(),
+        "ctx",
+        Some(id.to_string()),
+        "2026-10-01T00:00:01Z",
+        None,
+    )
+    .unwrap();
+    let mut args =
+        json!({"kind":"message","context_id":"ctx","prev_id":id,"signed":hex::encode(child)});
+    let missing = server
+        .call_tool(Some(&owner), "mnemonic_attest_a2a", args.clone())
+        .await;
+    assert!(missing.envelope["error"].is_object());
+    args["prev_locator"] = receipt["locator"].clone();
+    result(
         &server
-            .call_tool(
-                Some(reader),
-                "mnemonic_recall_a2a",
-                json!({"context_id":"fixture-ctx"}),
-            )
+            .call_tool(Some(&owner), "mnemonic_attest_a2a", args.clone())
             .await,
     );
-    assert!(rows["attestations"].as_array().unwrap().is_empty());
-    let own = result(
+    args["prev_locator"] = json!("ar://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    assert!(server
+        .call_tool(Some(&owner), "mnemonic_attest_a2a", args)
+        .await
+        .envelope["error"]
+        .is_object());
+    no_memories(&server);
+    task.abort();
+}
+#[tokio::test]
+async fn invalid_client_and_local_mode_never_upload() {
+    let (url, s, task) = remote().await;
+    let server = TestServer::builder().arweave_gateway(url).build();
+    let v = vectors();
+    let author = v["author"]["pubkey_base58"].as_str().unwrap();
+    for args in [
+        json!({"kind":"message","context_id":"other","signed":v["sealed"],"sealed":true}),
+        json!({"kind":"message","context_id":"fixture-ctx","signed":v["plain"],"mode":"local"}),
+    ] {
+        assert!(server
+            .call_tool(Some(author), "mnemonic_attest_a2a", args)
+            .await
+            .envelope["error"]
+            .is_object());
+    }
+    assert!(s.blobs.lock().unwrap().is_empty());
+    task.abort();
+}
+#[tokio::test]
+#[ignore = "requires built SDK and real WASM"]
+async fn sdk_http_sealed_end_to_end() {
+    let (url, _, remote_task) = remote().await;
+    let server = TestServer::builder().arweave_gateway(url.clone()).build();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let router = server.app.clone();
+    let mcp = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let v = vectors();
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../packages/sdk/scripts/test-sealed-a2a-e2e.mjs");
+    let mut command = tokio::process::Command::new("node");
+    command
+        .arg(&script)
+        .env("A2A_TEST_URL", &base)
+        .env("A2A_GATEWAY_URL", &url)
+        .env(
+            "A2A_AUTHOR_JWT",
+            server.mint_jwt(v["author"]["pubkey_base58"].as_str().unwrap()),
+        );
+    let write = command.output().await.unwrap();
+    assert!(
+        write.status.success(),
+        "{}",
+        String::from_utf8_lossy(&write.stderr)
+    );
+    let expected = String::from_utf8(write.stdout).unwrap();
+    server
+        .state
+        .store
+        .lock()
+        .unwrap()
+        .conn()
+        .execute_batch("DELETE FROM a2a_anchor_readers; DELETE FROM a2a_anchor_receipts;")
+        .unwrap();
+    mcp.abort();
+    let restored = tokio::process::Command::new("node")
+        .arg(&script)
+        .arg("restore")
+        .env("A2A_TEST_URL", &base)
+        .env("A2A_GATEWAY_URL", &url)
+        .env("A2A_EXPECTED", expected.trim())
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        restored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let restarted_url = format!("http://{}", listener.local_addr().unwrap());
+    let router = server.app.clone();
+    let restarted = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let appended = tokio::process::Command::new("node")
+        .arg(&script)
+        .arg("append")
+        .env("A2A_TEST_URL", restarted_url)
+        .env("A2A_GATEWAY_URL", &url)
+        .env("A2A_EXPECTED", expected.trim())
+        .env(
+            "A2A_AUTHOR_JWT",
+            server.mint_jwt(v["author"]["pubkey_base58"].as_str().unwrap()),
+        )
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        appended.status.success(),
+        "{}",
+        String::from_utf8_lossy(&appended.stderr)
+    );
+    no_memories(&server);
+    restarted.abort();
+    remote_task.abort();
+}
+
+#[tokio::test]
+async fn paid_invalid_local_never_reaches_paywall() {
+    let server = TestServer::builder().payment_mode("x402").build();
+    let v = vectors();
+    let author = v["author"]["pubkey_base58"].as_str().unwrap();
+    let r = server
+        .call_tool(
+            Some(author),
+            "mnemonic_attest_a2a",
+            json!({"kind":"message","context_id":"fixture-ctx","signed":v["plain"],"mode":"local"}),
+        )
+        .await;
+    assert_eq!(r.status, axum::http::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn failed_delivery_is_pending_and_retry_uses_existing_remote_bytes() {
+    let (url, s, task) = remote().await;
+    let server = TestServer::builder().arweave_gateway(url).build();
+    let v = vectors();
+    let author = v["author"]["pubkey_base58"].as_str().unwrap();
+    let args =
+        json!({"kind":"message","context_id":"fixture-ctx","sealed":true,"signed":v["stream"]});
+    s.unavailable
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(server
+        .call_tool(Some(author), "mnemonic_attest_a2a", args.clone())
+        .await
+        .envelope["error"]
+        .is_object());
+    let rows = result(
         &server
             .call_tool(
                 Some(author),
@@ -394,5 +339,16 @@ async fn withdrawn_recipient_loses_recall_and_unrelated_parent_cannot_be_linked(
             )
             .await,
     );
-    assert_eq!(own["attestations"].as_array().unwrap().len(), 1);
+    assert!(rows["receipts"].as_array().unwrap().is_empty());
+    assert_eq!(s.blobs.lock().unwrap().len(), 1);
+    s.unavailable
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    result(
+        &server
+            .call_tool(Some(author), "mnemonic_attest_a2a", args)
+            .await,
+    );
+    assert_eq!(s.blobs.lock().unwrap().len(), 1);
+    no_memories(&server);
+    task.abort();
 }

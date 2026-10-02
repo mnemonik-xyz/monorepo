@@ -76,6 +76,7 @@ pub const TEST_REFRESH_SALT: [u8; 32] = [0xABu8; 32];
 /// `with_oauth_token(true)` is called — existing callers that never
 /// touched the OAuth surface keep getting 404 on those paths.
 pub struct TestServerBuilder {
+    arweave_gateway: Option<String>,
     storage_mode: String,
     payment_mode: String,
     sign_memory_cost_micro_usdc: i64,
@@ -89,6 +90,7 @@ pub struct TestServerBuilder {
 impl Default for TestServerBuilder {
     fn default() -> Self {
         Self {
+            arweave_gateway: None,
             storage_mode: "local".into(),
             payment_mode: "none".into(),
             sign_memory_cost_micro_usdc: 0,
@@ -102,6 +104,11 @@ impl Default for TestServerBuilder {
 }
 
 impl TestServerBuilder {
+    pub fn arweave_gateway(mut self, url: String) -> Self {
+        self.arweave_gateway = Some(url);
+        self
+    }
+
     /// `"local"` (default) or `"full"`. Mirrors the env-var of the same name.
     pub fn storage_mode(mut self, s: &str) -> Self {
         self.storage_mode = s.to_string();
@@ -197,6 +204,9 @@ impl TestServerBuilder {
         {
             // The state was just built, so this is its only owner.
             let inner = Arc::get_mut(&mut state).expect("fresh McpState has one owner");
+            if let Some(url) = self.arweave_gateway {
+                inner.arweave = mnemonic_core::arweave::ArweaveClient::new_for_test(url);
+            }
             if let Some(limits) = self.free_anchors {
                 inner.free_anchors = limits;
             }

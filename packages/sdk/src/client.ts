@@ -1,3 +1,4 @@
+import { importA2AAttestation, restoreA2AContext } from "./a2a-recovery.js";
 // MnemonicClient — stateless wrapper over the hosted MCP HTTP surface.
 //
 // 5 tool methods (whoami, signMemory, recall, verify, proveIdentity) plus
@@ -115,6 +116,18 @@ export class MnemonicClient {
   /** Single in-flight refresh, shared by concurrent tool calls. */
   private refreshInFlight: Promise<string | undefined> | null = null;
 
+  private a2aIndex!: import("./types.js").A2AIndexStore;
+  private a2aGatewayUrl!: string;
+  private a2aDiscoveryConfig!: {url:string;flavour:'irys'|'arweave'};
+  setA2AIndexStore(store:import("./types.js").A2AIndexStore):void {this.a2aIndex=store;}
+  _a2aIndexStore(){return this.a2aIndex;}
+  _a2aGateway(){return this.a2aGatewayUrl;}
+  _a2aDiscovery(){return this.a2aDiscoveryConfig;}
+  async _a2aExternal(url:string,init:RequestInit={}):Promise<Response>{
+    return this.fetchImpl(url,{...init,redirect:'error',credentials:'omit',signal:init.signal?AbortSignal.any([init.signal,AbortSignal.timeout(10000)]):AbortSignal.timeout(10000)});
+  }
+  importA2AAttestation(locator:string,author:string){return importA2AAttestation.call(this,locator,author);}
+  restoreA2AContext(context:string,opts:import("./types.js").A2ARestoreOptions){return restoreA2AContext.call(this,context,opts);}
   constructor(config: MnemonicClientConfig) {
     if (!config.baseUrl || !/^https?:\/\//.test(config.baseUrl)) {
       throw new UserError(
@@ -128,6 +141,12 @@ export class MnemonicClient {
     // `https://host/mcp` not `https://host//mcp`.
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
     this.signer = config.signer;
+    const rows=new Map<string,Attestation>();
+    this.a2aIndex=config.a2aIndex??{list:async()=>[...rows.values()].map(r=>structuredClone(r)),put:async row=>{rows.set(row.attestationId,structuredClone(row));}};
+    this.a2aGatewayUrl=(config.a2aGatewayUrl??'https://gateway.irys.xyz').replace(/\/+$/,'');
+    if(config.a2aIndexFlavour!==undefined&&!['irys','arweave'].includes(config.a2aIndexFlavour))throw new UserError('invalid A2A index flavour');
+    this.a2aDiscoveryConfig={url:config.a2aIndexUrl??'https://uploader.irys.xyz/graphql',flavour:config.a2aIndexFlavour??'irys'};
+    for(const url of [this.a2aGatewayUrl,this.a2aDiscoveryConfig.url])if(!/^https?:\/\//.test(url))throw new UserError('invalid external A2A endpoint');
     if (config.jwt !== undefined) this.jwt = config.jwt;
     this.fetchImpl = config.fetch ?? globalThis.fetch.bind(globalThis);
     if (config.keypairProvider) this.keypairProvider = config.keypairProvider;

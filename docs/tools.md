@@ -726,6 +726,12 @@ To pay, call `mnemonic_sign_memory` again with `X-Payment`.
 ## Client-signed A2A tools
 
 `mnemonic_attest_a2a` accepts signed client envelopes and an optional `sealed`
-flag. `mnemonic_recall_a2a` returns original signatures and sealed payloads to
+flag. `mnemonic_recall_a2a` returns external delivery receipt metadata to
 the author or a named grant recipient. See [Sealed A2A](./sealed-a2a.md) for the
 complete input/output contract, SDK/CLI usage and streaming limits.
+
+
+A2A anchored artifacts live on Arweave/Irys; hosted SQL keeps metadata receipts
+only. Clients fetch and verify original signatures and open sealed data locally.
+Use `prev_locator: "ar://..."` for external parent verification. Explicit hosted
+`mode: "local"` is rejected; SDK/CLI local mode uses agent-owned storage.
