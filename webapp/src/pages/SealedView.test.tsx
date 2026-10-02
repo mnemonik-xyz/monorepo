@@ -14,6 +14,7 @@ import SealedView, {
   __test__parseSealedArtifact,
 } from "./SealedView";
 import { Encoder } from "cbor-x";
+import { loadWasm } from "../lib/wasm";
 
 vi.mock("../lib/wasm", () => ({
   loadWasm: vi.fn(async () => ({
@@ -139,6 +140,45 @@ describe("SealedView — network fragment security", () => {
     globalThis.fetch = originalFetch;
     localStorage.clear();
   });
+
+  it("fails closed when the installed WASM cannot open sealed memories", async () => {
+    renderSealedView(VALID_HASH, "#k=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+    expect(await screen.findByRole("alert")).toHaveTextContent("requires a newer version");
+    expect(screen.queryByTestId("sealed-open")).not.toBeInTheDocument();
+  });
+
+  it("preserves native key commitment rejection", async () => {
+    vi.mocked(loadWasm).mockResolvedValueOnce({
+      open_with_key: () => { throw new Error("key commitment mismatch"); },
+    } as unknown as Awaited<ReturnType<typeof loadWasm>>);
+    renderSealedView(VALID_HASH, "#k=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+    expect(await screen.findByTestId("sealed-kc-fail")).toHaveTextContent("Key commitment check failed");
+    expect(screen.queryByTestId("sealed-open")).not.toBeInTheDocument();
+  });
+
+  it("decodes the byte result only after the native opener succeeds", async () => {
+    const open = vi.fn(() => Uint8Array.from(new TextEncoder().encode(JSON.stringify({ content: "verified plaintext" }))));
+    vi.mocked(loadWasm).mockResolvedValueOnce({
+      open_with_key: open,
+    } as unknown as Awaited<ReturnType<typeof loadWasm>>);
+    renderSealedView(VALID_HASH, "#k=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+    expect(await screen.findByTestId("sealed-plaintext")).toHaveTextContent("verified plaintext");
+    expect(open).toHaveBeenCalledOnce();
+    expect(open.mock.calls[0]).toHaveLength(2);
+  });
+
+  it.each([new Uint8Array(), Uint8Array.from(new TextEncoder().encode("sensitive malformed plaintext"))])(
+    "rejects malformed decrypted memory without displaying its bytes",
+    async (bytes) => {
+      vi.mocked(loadWasm).mockResolvedValueOnce({
+        open_with_key: () => bytes,
+      } as unknown as Awaited<ReturnType<typeof loadWasm>>);
+      renderSealedView(VALID_HASH, "#k=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+      expect(await screen.findByRole("alert")).toHaveTextContent("Invalid decrypted memory format");
+      expect(screen.queryByText(/sensitive malformed plaintext/)).not.toBeInTheDocument();
+      expect(screen.queryByTestId("sealed-open")).not.toBeInTheDocument();
+    },
+  );
 
   it("fragment_K_is_never_sent_in_any_network_request", async () => {
     const fakeKey = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";

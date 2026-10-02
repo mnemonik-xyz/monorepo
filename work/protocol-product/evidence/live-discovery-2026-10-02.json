@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "started_at": "2026-10-02T12:14:32.826Z",
+  "endpoints": {
+    "irys": "https://uploader.irys.xyz/graphql",
+    "arweave": "https://arweave.net/graphql",
+    "gateway": "https://gateway.irys.xyz"
+  },
+  "mode": "read_only_no_credentials",
+  "pinned_fixture": null,
+  "observations": [
+    {
+      "started_at": "2026-10-02T12:14:32.826Z",
+      "finished_at": "2026-10-02T12:14:33.430Z",
+      "inventory": {
+        "irys": {
+          "status": "exhausted",
+          "candidates": 24,
+          "has_more": false,
+          "sample_index_ids": [
+            "E24mfQ2EgnTz7gmkQLJoy3b9TNPVSHdts5rr2oiiZuFg",
+            "27jTqNxC5cyigfqrtM5xjas68Qq2nADc6jcvuvtTDSWQ",
+            "Bwpkr43MfMEpqevj6yuLvKJxLXXBPFNAQ385ADVia41t"
+          ],
+          "current_ar_locator_shape": 3,
+          "other_id_shapes": 21,
+          "elapsed_ms": 463
+        },
+        "arweave": {
+          "status": "exhausted",
+          "candidates": 0,
+          "has_more": false,
+          "sample_index_ids": [],
+          "current_ar_locator_shape": 0,
+          "other_id_shapes": 0,
+          "elapsed_ms": 589
+        },
+        "a2a_irys": {
+          "status": "exhausted",
+          "candidates": 0,
+          "has_more": false,
+          "sample_index_ids": [],
+          "current_ar_locator_shape": 0,
+          "other_id_shapes": 0,
+          "elapsed_ms": 354
+        },
+        "a2a_arweave": {
+          "status": "exhausted",
+          "candidates": 0,
+          "has_more": false,
+          "sample_index_ids": [],
+          "current_ar_locator_shape": 0,
+          "other_id_shapes": 0,
+          "elapsed_ms": 593
+        }
+      },
+      "fixture": {
+        "status": "not_run",
+        "reason": "independently pinned synthetic A2A fixture required"
+      }
+    },
+    {
+      "started_at": "2026-10-02T12:14:34.430Z",
+      "finished_at": "2026-10-02T12:14:34.840Z",
+      "inventory": {
+        "irys": {
+          "status": "exhausted",
+          "candidates": 24,
+          "has_more": false,
+          "sample_index_ids": [
+            "E24mfQ2EgnTz7gmkQLJoy3b9TNPVSHdts5rr2oiiZuFg",
+            "27jTqNxC5cyigfqrtM5xjas68Qq2nADc6jcvuvtTDSWQ",
+            "Bwpkr43MfMEpqevj6yuLvKJxLXXBPFNAQ385ADVia41t"
+          ],
+          "current_ar_locator_shape": 3,
+          "other_id_shapes": 21,
+          "elapsed_ms": 188
+        },
+        "arweave": {
+          "status": "exhausted",
+          "candidates": 0,
+          "has_more": false,
+          "sample_index_ids": [],
+          "current_ar_locator_shape": 0,
+          "other_id_shapes": 0,
+          "elapsed_ms": 358
+        },
+        "a2a_irys": {
+          "status": "exhausted",
+          "candidates": 0,
+          "has_more": false,
+          "sample_index_ids": [],
+          "current_ar_locator_shape": 0,
+          "other_id_shapes": 0,
+          "elapsed_ms": 199
+        },
+        "a2a_arweave": {
+          "status": "exhausted",
+          "candidates": 0,
+          "has_more": false,
+          "sample_index_ids": [],
+          "current_ar_locator_shape": 0,
+          "other_id_shapes": 0,
+          "elapsed_ms": 409
+        }
+      },
+      "fixture": {
+        "status": "not_run",
+        "reason": "independently pinned synthetic A2A fixture required"
+      }
+    }
+  ],
+  "limits": [
+    "Inventory capped at one page of 100; scoped fixture scans capped at three pages.",
+    "Public inventory IDs are untrusted hints; non-current locator shapes are counted, not silently converted.",
+    "No artifact was uploaded, no payment was submitted, no private content is emitted.",
+    "Repeated visibility is not ingestion lag: a separately recorded submission time is required.",
+    "No claim of newest heads, full history, sustained availability, recipient decryption or Solana memo parity."
+  ],
+  "finished_at": "2026-10-02T12:14:34.840Z",
+  "positive_fixture_observed": false,
+  "release_gate": "not_established"
+}

@@ -20,6 +20,8 @@ on:
     paths:
       - "core/**"
       - "mcp/**"
+      - "mnemonic-a2a/**"
+      - "bridge-a2a/**"
       - "docs/**"
       - "Cargo.toml"
       - "Cargo.lock"

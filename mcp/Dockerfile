@@ -2,7 +2,7 @@
 #
 # Production image for `mnemonic-mcp` (HTTP transport, fastembed/local-embed).
 #
-# Build context is the REPO ROOT (needs core/, mcp/, docs/):
+# Build context is the REPO ROOT (all Cargo workspace members and docs/):
 #   docker build -f mcp/Dockerfile -t ghcr.io/mnemonik-xyz/mnemonic-mcp:latest .
 #
 # Design notes:
@@ -36,6 +36,8 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock* ./
 COPY core/ core/
 COPY mcp/ mcp/
+COPY mnemonic-a2a/ mnemonic-a2a/
+COPY bridge-a2a/ bridge-a2a/
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \

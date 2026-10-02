@@ -12,7 +12,7 @@
 //!   0 — Irys is a superset of memos (gate PASSES)
 //!   1 — Irys is missing items that memos have (gate FAILS)
 //!   2 — Irys-only mode (no Solana comparison performed)
-//!   3 — error
+//!   3 — error or inconclusive (no historical memo sample)
 
 use mnemonic_core::{
     arweave::graphql::{solana_pubkey_to_arweave_address, GatewayFlavour, GraphQlClient},
@@ -100,7 +100,11 @@ async fn main() -> anyhow::Result<()> {
     println!("  In both                : {}", memo_txs.intersection(&irys_txs).count());
     println!();
 
-    if missing.is_empty() {
+    if memo_txs.is_empty() {
+        println!("GATE: INCONCLUSIVE — no historical memo anchors were found for this wallet.");
+        println!("An empty comparison cannot establish replacement-index parity.");
+        std::process::exit(3);
+    } else if missing.is_empty() {
         println!("GATE: PASS ✓ — Irys enumeration is a superset of memo enumeration.");
         println!("Stage 2 (stop writing memos) is safe to proceed.");
         std::process::exit(0);
