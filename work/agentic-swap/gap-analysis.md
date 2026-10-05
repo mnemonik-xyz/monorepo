@@ -121,7 +121,9 @@ demonstration. It is not a control, because a manipulated agent can skip it.
 - Identity strings differ: ingestion uses `did:sol:<key>`, A2A `SEALED_V1` uses
   the bare base58 key. The swap negotiation uses the bare base58 key and compares
   raw 32-byte keys (tech-spec, "Identity encoding").
-- Key rotation is not implemented. `work/dual-key-identity/` is still to do.
+- Key rotation is not implemented and has no design yet (gap G13). The
+  Ed25519-to-EVM key binding (`KEY_BINDING_V1`, `work/dual-key-identity/`) that
+  the Warrant swap specification, section 4.3, needs is also still to do.
 
 ## 6. Corrections to the draft specification
 
