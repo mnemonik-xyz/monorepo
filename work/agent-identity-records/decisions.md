@@ -28,3 +28,28 @@ MCP surface is read-only.
 Downstream: closes gap M4 (key rotation) and the recipient discovery gap in
 `work/agentic-swap/`; `docs/sealed-a2a.md` recipient discovery (#74) is
 superseded by resolution by `id` once shipped.
+
+---
+
+## 2026-10-05 — Revisions after the adversarial review
+
+Author: claude, from a review workflow with a skeptic per lens (21 confirmed
+findings on this folder).
+
+- `id` is the blake3 of the seq 0 JCS without `id`, so it commits to the first
+  key and the first `next_key_hash`. A second seq 0 is a different identity.
+- `prev` hashes the signed payload, not the COSE bytes, because unprotected
+  header labels are not signed. Extra unprotected labels are rejected.
+- Records use a distinct protected content type, so a signature from another
+  Mnemonik flow (legacy HTTP signing) never verifies as a record.
+- Fork rules work on branches: a branch with a rotation beats branches without
+  one; two rotation branches mean `conflicted`. Update revocations are
+  provisional; rotation revocations are final.
+- New status `incomplete` for hidden records and discovery limits. The SDK keeps
+  the highest verified head (rollback guard). `valid_until` is at most 90 days.
+- The server checks authorization against a known parent, does not require the
+  JWT subject to equal the signer, and charges the JWT subject.
+- AgentCards in records carry a JWS by the record key and must match `key` and
+  `enc_key`. `accounts` stays planned until `KEY_BINDING_V1` ships.
+- Old signatures are judged by Arweave anchor time, not `created_at`.
+- Stdio publish is out of version 1. Tool docs and counts move to task 2.
