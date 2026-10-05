@@ -1200,7 +1200,7 @@ fn tool_definitions() -> Value {
                 "properties": {
                     "kind": {"type":"string","enum":["task","message","artifact"]},
                     "context_id": {"type":"string"},
-                    "signed": {"type":"string","description":"Hex COSE_Sign1 over mnemonic.a2a.signed.v1; signed in the client"},
+                    "signed": {"type":"string","description":"Hex COSE_Sign1 over mnemonic.a2a.signed.v1 (plain) or .v2 (sealed, sign-encrypt-sign); signed in the client"},
                     "sealed": {"type":"boolean","default":false},
                     "prev_locator": {"type":"string","description":"External parent locator ar://id"},
                 "mode": {"type":"string","enum":["anchored"]},

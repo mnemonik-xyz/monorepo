@@ -113,6 +113,7 @@ Recipient wraps allow approved keys to recover that key.
 A recipient who receives plaintext or a usable key can keep it; later revocation cannot undo that access.
 
 Sealed A2A supports signed recipient grants and completed encrypted streams.
+The author signs the plaintext and its recipients before encryption, and signs the ciphertext after it.
 Reader identity and encryption-key bindings must be verified against independently trusted signing keys.
 
 General-memory grant formats and existing grant reads remain, but new hosted grant publication is retired.

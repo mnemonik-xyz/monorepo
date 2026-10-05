@@ -39,6 +39,41 @@ pub struct A2aBinding {
     pub stream: Option<crate::sealed::stream::SealedStream>,
 }
 
+/// Outer binding protocol for plain payloads and legacy sealed payloads.
+pub const PROTOCOL_V1: &str = "mnemonic.a2a.signed.v1";
+/// Outer binding protocol for sealed payloads whose plaintext is signed first.
+pub const PROTOCOL_V2: &str = "mnemonic.a2a.signed.v2";
+/// Protocol of the inner, encrypted, author-signed plaintext binding.
+pub const INNER_PROTOCOL_V1: &str = "mnemonic.a2a.inner.v1";
+
+/// Sign-encrypt-sign: the author signs this binding, then encrypts the COSE
+/// bytes, then signs the ciphertext. The inner signature binds the plaintext
+/// to the author and to the named recipients, so a recipient can neither
+/// re-encrypt it to a third party as if addressed to them nor claim authorship.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct A2aInnerBinding {
+    pub protocol: String,
+    pub author: String,
+    /// Sorted, de-duplicated base58 identities of the intended readers.
+    pub recipients: Vec<String>,
+    pub kind: String,
+    pub context_id: String,
+    pub prev_id: Option<String>,
+    pub created_at: String,
+    pub payload: Value,
+}
+
+/// Result of opening a sealed or plain A2A envelope.
+#[derive(Debug)]
+pub struct OpenedA2a {
+    pub payload: Value,
+    /// COSE_Sign1 over the [`A2aInnerBinding`]. `None` for plain and legacy
+    /// V1 sealed envelopes. A reader can show these bytes to a third party as
+    /// proof that the author sent this plaintext to these recipients.
+    pub inner_signed: Option<Vec<u8>>,
+}
+
 #[derive(Debug)]
 pub struct VerifiedBinding {
     pub binding: A2aBinding,
@@ -223,9 +258,7 @@ fn prepare_signed_a2a_impl(
 ) -> Result<Vec<u8>> {
     ensure!(!context_id.is_empty(), "empty context");
     validate_object(kind, &payload, context_id)?;
-    let sealed = recipients.is_some();
-    let mut stream = None;
-    let payload = if let Some(recipients) = recipients {
+    if let Some(recipients) = recipients {
         ensure!(
             kind != "task",
             "sealed payloads support message and artifact"
@@ -238,78 +271,134 @@ fn prepare_signed_a2a_impl(
             .iter()
             .map(recipient_from_verified_card)
             .collect::<Result<Vec<_>>>()?;
-        let inner = zeroize::Zeroizing::new(serde_jcs::to_vec(&payload)?);
-        ensure!(inner.len() <= MAX_A2A_BYTES / 2, "payload too large");
-        let author = keypair.pubkey().to_string();
-        let descriptor = serde_json::to_vec(
-            &json!({"stream":true,"payload_hash":blake3::hash(&inner).to_hex().to_string()}),
-        )?;
-        let encrypted = if chunk_size.is_some() {
-            descriptor.as_slice()
-        } else {
-            inner.as_slice()
+        let mut readers: Vec<String> = keys.iter().map(|(id, _)| id.clone()).collect();
+        readers.sort();
+        readers.dedup();
+        ensure!(readers.len() == keys.len(), "duplicate recipient identity");
+        // Step 1 of sign-encrypt-sign: sign the plaintext and its recipients.
+        let inner_binding = A2aInnerBinding {
+            protocol: INNER_PROTOCOL_V1.into(),
+            author: keypair.pubkey().to_string(),
+            recipients: readers,
+            kind: kind.into(),
+            context_id: context_id.into(),
+            prev_id: prev_id.clone(),
+            created_at: created_at.into(),
+            payload: payload.clone(),
         };
-        let artifact = crate::sealed::seal_memory(
-            encrypted,
-            &keypair.pubkey().to_bytes(),
-            &format!("art:{}", uuid::Uuid::new_v4()),
-            &author,
-            created_at,
-            &mut rand_core::OsRng,
-        )?;
-        if let Some(size) = chunk_size {
-            let chunks =
-                zeroize::Zeroizing::new(inner.chunks(size).map(|c| c.to_vec()).collect::<Vec<_>>());
-            stream = Some(crate::sealed::stream::seal_stream(
-                &chunks,
-                &artifact.k,
-                &uuid::Uuid::new_v4().to_string(),
-                &hex::encode(&artifact.content_hash),
-                &mut rand_core::OsRng,
-            )?);
-        }
-        let sealed_cose = sign_cose(&artifact.outer_cbor, keypair).map_err(anyhow::Error::msg)?;
-        let memory_hash: [u8; 32] = artifact.content_hash.as_slice().try_into()?;
-        let mut grants = Vec::new();
-        for (reader, public) in keys {
-            let grant = crate::sealed::make_grant(
-                &memory_hash,
-                &artifact.outer_cbor,
-                &artifact.k,
-                Some(&public),
-                &author,
-                None,
-                created_at,
-            )?;
-            let mut g = from_canonical_cbor(&grant).map_err(anyhow::Error::msg)?;
-            g["reader"] = Value::String(reader);
-            let cbor = to_canonical_cbor(&g, &GRANT_V1).map_err(anyhow::Error::msg)?;
-            grants.push(sign_cose(&cbor, keypair).map_err(anyhow::Error::msg)?);
-        }
-        let part = build_sealed_data_part(&sealed_cose, &grants);
-        // No names, plaintext parts, or other private fields survive in the carrier.
-        match kind {
-            "message" => {
-                json!({"messageId":payload["messageId"], "role":payload["role"], "contextId":context_id, "parts":[part]})
-            }
-            _ => json!({"artifactId":payload["artifactId"], "parts":[part]}),
-        }
+        let inner_jcs = zeroize::Zeroizing::new(serde_jcs::to_vec(&inner_binding)?);
+        let inner =
+            zeroize::Zeroizing::new(sign_cose(&inner_jcs, keypair).map_err(anyhow::Error::msg)?);
+        seal_inner(
+            keypair, kind, &payload, context_id, prev_id, created_at, &keys, &inner, chunk_size,
+        )
     } else {
-        payload
-    };
-    let binding = A2aBinding {
-        protocol: "mnemonic.a2a.signed.v1".into(),
-        kind: kind.into(),
-        context_id: context_id.into(),
-        prev_id,
-        created_at: created_at.into(),
-        sealed,
-        payload,
-        stream,
-    };
+        sign_binding(
+            keypair,
+            A2aBinding {
+                protocol: PROTOCOL_V1.into(),
+                kind: kind.into(),
+                context_id: context_id.into(),
+                prev_id,
+                created_at: created_at.into(),
+                sealed: false,
+                payload,
+                stream: None,
+            },
+        )
+    }
+}
+
+fn sign_binding(keypair: &Keypair, binding: A2aBinding) -> Result<Vec<u8>> {
     let jcs = serde_jcs::to_vec(&binding)?;
     ensure!(jcs.len() <= MAX_A2A_BYTES - 256, "A2A envelope too large");
     sign_cose(&jcs, keypair).map_err(anyhow::Error::msg)
+}
+
+/// Steps 2 and 3 of sign-encrypt-sign: encrypt the signed inner bytes, wrap
+/// the key for each reader, then sign ciphertext, grants and carrier.
+#[allow(clippy::too_many_arguments)]
+fn seal_inner(
+    keypair: &Keypair,
+    kind: &str,
+    payload: &Value,
+    context_id: &str,
+    prev_id: Option<String>,
+    created_at: &str,
+    keys: &[(String, [u8; 32])],
+    inner: &[u8],
+    chunk_size: Option<usize>,
+) -> Result<Vec<u8>> {
+    ensure!(inner.len() <= MAX_A2A_BYTES / 2, "payload too large");
+    let author = keypair.pubkey().to_string();
+    let mut stream = None;
+    let descriptor = serde_json::to_vec(
+        &json!({"stream":true,"payload_hash":blake3::hash(inner).to_hex().to_string()}),
+    )?;
+    let encrypted = if chunk_size.is_some() {
+        descriptor.as_slice()
+    } else {
+        inner
+    };
+    let artifact = crate::sealed::seal_memory(
+        encrypted,
+        &keypair.pubkey().to_bytes(),
+        &format!("art:{}", uuid::Uuid::new_v4()),
+        &author,
+        created_at,
+        &mut rand_core::OsRng,
+    )?;
+    if let Some(size) = chunk_size {
+        let chunks =
+            zeroize::Zeroizing::new(inner.chunks(size).map(|c| c.to_vec()).collect::<Vec<_>>());
+        stream = Some(crate::sealed::stream::seal_stream(
+            &chunks,
+            &artifact.k,
+            &uuid::Uuid::new_v4().to_string(),
+            &hex::encode(&artifact.content_hash),
+            &mut rand_core::OsRng,
+        )?);
+    }
+    let sealed_cose = sign_cose(&artifact.outer_cbor, keypair).map_err(anyhow::Error::msg)?;
+    let memory_hash: [u8; 32] = artifact.content_hash.as_slice().try_into()?;
+    let mut grants = Vec::new();
+    for (reader, public) in keys {
+        let reader = reader.clone();
+        let grant = crate::sealed::make_grant(
+            &memory_hash,
+            &artifact.outer_cbor,
+            &artifact.k,
+            Some(public),
+            &author,
+            None,
+            created_at,
+        )?;
+        let mut g = from_canonical_cbor(&grant).map_err(anyhow::Error::msg)?;
+        g["reader"] = Value::String(reader);
+        let cbor = to_canonical_cbor(&g, &GRANT_V1).map_err(anyhow::Error::msg)?;
+        grants.push(sign_cose(&cbor, keypair).map_err(anyhow::Error::msg)?);
+    }
+    let part = build_sealed_data_part(&sealed_cose, &grants);
+    // No names, plaintext parts, or other private fields survive in the carrier.
+    let carrier = match kind {
+        "message" => {
+            json!({"messageId":payload["messageId"], "role":payload["role"], "contextId":context_id, "parts":[part]})
+        }
+        _ => json!({"artifactId":payload["artifactId"], "parts":[part]}),
+    };
+    sign_binding(
+        keypair,
+        A2aBinding {
+            protocol: PROTOCOL_V2.into(),
+            kind: kind.into(),
+            context_id: context_id.into(),
+            prev_id,
+            created_at: created_at.into(),
+            sealed: true,
+            payload: carrier,
+            stream,
+        },
+    )
 }
 
 /// Verify authorship, canonical bytes, context, and signed sealed/grant binding.
@@ -321,7 +410,7 @@ pub fn verify_signed_a2a(bytes: &[u8], expected_author: Option<&str>) -> Result<
         "noncanonical A2A binding"
     );
     ensure!(
-        binding.protocol == "mnemonic.a2a.signed.v1",
+        binding.protocol == PROTOCOL_V1 || (binding.protocol == PROTOCOL_V2 && binding.sealed),
         "unsupported binding"
     );
     ensure!(!binding.context_id.is_empty(), "empty context");
@@ -462,10 +551,49 @@ pub fn open_signed_a2a(
     expected_author: &str,
     encryption_secret: Option<&[u8; 32]>,
 ) -> Result<Value> {
+    Ok(open_signed_a2a_full(bytes, keypair, expected_author, encryption_secret)?.payload)
+}
+
+/// Verify the inner sign-encrypt-sign binding without the outer envelope.
+/// A third party uses this to check what a reader presents as received.
+pub fn verify_a2a_inner(inner_signed: &[u8], expected_author: &str) -> Result<A2aInnerBinding> {
+    let (jcs, signer) = signed_payload(inner_signed, Some(expected_author))?;
+    let inner: A2aInnerBinding = serde_json::from_slice(&jcs)?;
+    ensure!(
+        serde_jcs::to_vec(&inner)? == jcs,
+        "noncanonical inner binding"
+    );
+    ensure!(
+        inner.protocol == INNER_PROTOCOL_V1,
+        "unsupported inner binding"
+    );
+    ensure!(inner.author == signer, "inner author is not the signer");
+    ensure!(
+        !inner.recipients.is_empty()
+            && inner.recipients.len() <= 64
+            && inner.recipients.windows(2).all(|w| w[0] < w[1]),
+        "inner recipients must be sorted and unique"
+    );
+    validate_object(&inner.kind, &inner.payload, &inner.context_id)?;
+    Ok(inner)
+}
+
+/// Like [`open_signed_a2a`], and also return the inner signed binding.
+pub fn open_signed_a2a_full(
+    bytes: &[u8],
+    keypair: &Keypair,
+    expected_author: &str,
+    encryption_secret: Option<&[u8; 32]>,
+) -> Result<OpenedA2a> {
     let v = verify_signed_a2a(bytes, Some(expected_author))?;
     if !v.binding.sealed {
-        return Ok(v.binding.payload);
+        return Ok(OpenedA2a {
+            payload: v.binding.payload,
+            inner_signed: None,
+        });
     }
+    let mut grant_readers: Vec<String> = v.grants.iter().map(|(r, _, _)| r.clone()).collect();
+    grant_readers.sort();
     let sealed = v.sealed_cose.context("missing sealed envelope")?;
     let (outer, _) = signed_payload(&sealed, Some(expected_author))?;
     let derived = crate::sealed::x25519_secret_from_solana_keypair(keypair);
@@ -524,7 +652,27 @@ pub fn open_signed_a2a(
         opened.context("not a recipient or invalid wrapped key")?
     };
     let inner = zeroize::Zeroizing::new(inner);
-    let payload: Value = serde_json::from_slice(&inner)?;
+    let (payload, inner_signed) = if v.binding.protocol == PROTOCOL_V2 {
+        let b = verify_a2a_inner(&inner, expected_author)?;
+        ensure!(
+            b.kind == v.binding.kind
+                && b.context_id == v.binding.context_id
+                && b.prev_id == v.binding.prev_id
+                && b.created_at == v.binding.created_at,
+            "inner/outer binding mismatch"
+        );
+        ensure!(
+            b.recipients == grant_readers,
+            "inner recipients do not match signed grants"
+        );
+        ensure!(
+            reader == v.signer || b.recipients.contains(&reader),
+            "reader is not a signed recipient"
+        );
+        (b.payload, Some(inner.to_vec()))
+    } else {
+        (serde_json::from_slice(&inner)?, None)
+    };
     validate_object(&v.binding.kind, &payload, &v.binding.context_id)?;
     let id = if v.binding.kind == "message" {
         "messageId"
@@ -535,7 +683,10 @@ pub fn open_signed_a2a(
         payload[id] == v.binding.payload[id],
         "inner/outer object id mismatch"
     );
-    Ok(payload)
+    Ok(OpenedA2a {
+        payload,
+        inner_signed,
+    })
 }
 
 #[cfg(test)]
@@ -764,5 +915,152 @@ mod tests {
                 open_signed_a2a(&resigned, &reader, &author.pubkey().to_string(), None).is_err()
             );
         }
+    }
+
+    fn sign_inner(author: &Keypair, recipients: &[&Keypair], context: &str) -> Vec<u8> {
+        let mut recipients: Vec<String> =
+            recipients.iter().map(|k| k.pubkey().to_string()).collect();
+        recipients.sort();
+        let inner = A2aInnerBinding {
+            protocol: INNER_PROTOCOL_V1.into(),
+            author: author.pubkey().to_string(),
+            recipients,
+            kind: "message".into(),
+            context_id: context.into(),
+            prev_id: None,
+            created_at: "2026-10-01T00:00:00Z".into(),
+            payload: payload("message"),
+        };
+        sign_cose(&serde_jcs::to_vec(&inner).unwrap(), author).unwrap()
+    }
+
+    #[test]
+    fn inner_signature_binds_plaintext_author_and_recipients() {
+        let author = Keypair::new_from_array([1; 32]);
+        let (reader, card) = recipient(2);
+        let a = author.pubkey().to_string();
+        let signed = prepare_signed_a2a(
+            &author,
+            "message",
+            payload("message"),
+            "ctx",
+            None,
+            "2026-10-01T00:00:00Z",
+            Some(std::slice::from_ref(&card)),
+        )
+        .unwrap();
+        let v = verify_signed_a2a(&signed, Some(&a)).unwrap();
+        assert_eq!(v.binding.protocol, PROTOCOL_V2);
+        let opened = open_signed_a2a_full(&signed, &reader, &a, None).unwrap();
+        assert_eq!(opened.payload, payload("message"));
+        let inner_signed = opened.inner_signed.expect("V2 carries a signed inner");
+        // A third party verifies what the reader presents, without the envelope.
+        let inner = verify_a2a_inner(&inner_signed, &a).unwrap();
+        assert_eq!(inner.author, a);
+        assert_eq!(inner.recipients, vec![reader.pubkey().to_string()]);
+        assert_eq!(inner.payload, payload("message"));
+        assert!(verify_a2a_inner(&inner_signed, &reader.pubkey().to_string()).is_err());
+        let mut tampered = inner_signed.clone();
+        let n = tampered.len();
+        tampered[n - 1] ^= 1;
+        assert!(verify_a2a_inner(&tampered, &a).is_err());
+        // The author also opens its own envelope and gets the same inner binding.
+        let own = open_signed_a2a_full(&signed, &author, &a, None).unwrap();
+        assert_eq!(own.inner_signed.as_deref(), Some(inner_signed.as_slice()));
+        // Plain envelopes are signed directly over the plaintext; no inner layer.
+        let plain = prepare_signed_a2a(
+            &author,
+            "message",
+            payload("message"),
+            "ctx",
+            None,
+            "2026-10-01T00:00:00Z",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_signed_a2a(&plain, None).unwrap().binding.protocol,
+            PROTOCOL_V1
+        );
+        assert!(open_signed_a2a_full(&plain, &reader, &a, None)
+            .unwrap()
+            .inner_signed
+            .is_none());
+    }
+
+    #[test]
+    fn recipient_cannot_forward_author_plaintext_in_its_own_envelope() {
+        let author = Keypair::new_from_array([1; 32]);
+        let (bob, _) = recipient(2);
+        let (carol, carol_card) = recipient(4);
+        // Bob holds Alice's signed inner (addressed to Bob) and re-seals it to Carol.
+        let inner = sign_inner(&author, &[&bob], "ctx");
+        let keys = vec![recipient_from_verified_card(&carol_card).unwrap()];
+        let forwarded = seal_inner(
+            &bob,
+            "message",
+            &payload("message"),
+            "ctx",
+            None,
+            "2026-10-01T00:00:00Z",
+            &keys,
+            &inner,
+            None,
+        )
+        .unwrap();
+        // The outer layer verifies as Bob's, but Carol cannot open it as Bob's
+        // message (inner author is Alice) nor as Alice's (outer signer is Bob).
+        assert!(verify_signed_a2a(&forwarded, Some(&bob.pubkey().to_string())).is_ok());
+        let err = open_signed_a2a(&forwarded, &carol, &bob.pubkey().to_string(), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unexpected signer"), "{err}");
+        assert!(open_signed_a2a(&forwarded, &carol, &author.pubkey().to_string(), None).is_err());
+        // Alice's inner names Bob only, so it proves nothing about Carol.
+        let shown = verify_a2a_inner(&inner, &author.pubkey().to_string()).unwrap();
+        assert!(!shown.recipients.contains(&carol.pubkey().to_string()));
+    }
+
+    #[test]
+    fn inner_recipients_and_context_must_match_outer_layer() {
+        let author = Keypair::new_from_array([1; 32]);
+        let a = author.pubkey().to_string();
+        let (bob, bob_card) = recipient(2);
+        let (carol, carol_card) = recipient(4);
+        let keys = vec![
+            recipient_from_verified_card(&bob_card).unwrap(),
+            recipient_from_verified_card(&carol_card).unwrap(),
+        ];
+        let seal = |inner: &[u8], keys: &[(String, [u8; 32])]| {
+            seal_inner(
+                &author,
+                "message",
+                &payload("message"),
+                "ctx",
+                None,
+                "2026-10-01T00:00:00Z",
+                keys,
+                inner,
+                None,
+            )
+            .unwrap()
+        };
+        // Grants name Carol, but the signed plaintext was addressed to Bob only.
+        let widened = seal(&sign_inner(&author, &[&bob], "ctx"), &keys);
+        for reader in [&bob, &carol] {
+            let err = open_signed_a2a(&widened, reader, &a, None)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("do not match signed grants"), "{err}");
+        }
+        // Inner context differs from the signed carrier context.
+        let moved = seal(&sign_inner(&author, &[&bob], "other"), &keys[..1]);
+        let err = open_signed_a2a(&moved, &bob, &a, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mismatch"), "{err}");
+        // Unsigned plaintext inside a V2 envelope is rejected, not opened as V1.
+        let raw = serde_jcs::to_vec(&payload("message")).unwrap();
+        assert!(open_signed_a2a(&seal(&raw, &keys[..1]), &bob, &a, None).is_err());
     }
 }
