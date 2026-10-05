@@ -44,7 +44,7 @@ describe('authenticated recovery checkpoints',()=>{
   client.setKeypair(restored.identity);
   const report=await client.restoreA2AContext(v.context_id,await checkpointA2ARestoreOptions(restored.signedCheckpoint,kp.pubkey,v.context_id));
   expect(report.completeToHeads).toBe(true);expect(report.error).toContain('unavailable');
-  expect(await client.openA2AAttestation(report.attestations[0]!,kp.pubkey)).toEqual(v.payload);
+  expect((await client.openA2AAttestation(report.attestations[0]!,kp.pubkey)).payload).toEqual(v.payload);
   await expect(openRecoveryBackup(backup,'wrong-but-long-passphrase',kp.pubkey,{artifactKind:'a2a',scope:v.context_id})).rejects.toThrow();
   await expect(openRecoveryBackup({...backup,ciphertext:backup.ciphertext.slice(0,-2)+(parseInt(backup.ciphertext.slice(-2),16)^1).toString(16).padStart(2,'0')},'independently-kept-long-passphrase',kp.pubkey,{artifactKind:'a2a',scope:v.context_id})).rejects.toThrow();
   await expect(openRecoveryBackup(backup,'independently-kept-long-passphrase',v.outsider.pubkey_base58,{artifactKind:'a2a',scope:v.context_id})).rejects.toThrow();

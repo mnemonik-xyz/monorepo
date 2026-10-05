@@ -15,7 +15,9 @@ const id = await sender.attestA2AMessage(message, contextId, {
   },
 });
 const rows = await recipient.recallA2AContext(contextId, { sealed: true });
-const messageAgain = await recipient.openA2AAttestation(rows[0], trustedAuthorKey);
+const {payload, innerSigned} = await recipient.openA2AAttestation(rows[0], trustedAuthorKey);
+// innerSigned: author's signature over plaintext + recipients (null for plain/V1).
+const proof = await verifyA2AInner(innerSigned!, trustedAuthorKey);
 ```
 
 Bind a local keypair or keypair provider to both clients. `trustedCardSigner`
@@ -38,8 +40,10 @@ It does not prove that the sender encrypted useful or truthful content.
 | `mnemonic_attest_a2a` | `kind`, `context_id`, `signed` (hex COSE), optional `sealed` (default false), `prev_id`, `prev_locator` | `attestation_id`, `blake3`, `sealed`, `arweave_tx`, `locator`, delivery status and receipt persistence result |
 | `mnemonic_recall_a2a` | `context_id`, optional `kind`, `limit` (1–1000), `sealed` | `receipts[]`; the SDK fetches and verifies original artifacts before returning attestations |
 
-The COSE payload is JCS of `mnemonic.a2a.signed.v1`: `kind`, `context_id`,
-`prev_id`, `created_at`, `sealed`, `payload`, and optional `stream`. Every tool
+The COSE payload is JCS of the outer binding: `protocol`, `kind`, `context_id`,
+`prev_id`, `created_at`, `sealed`, `payload`, and optional `stream`. Plain
+envelopes use `mnemonic.a2a.signed.v1`. New sealed envelopes use
+`mnemonic.a2a.signed.v2` (see [Sign-encrypt-sign](#sign-encrypt-sign)). Every tool
 argument must agree with the signed binding. The JWT subject must equal the
 signer. Invalid signatures and mismatched bindings fail before payment.
 Writes remain paid on x402 deployments; recall remains free.
@@ -86,6 +90,42 @@ The CLI uses identity-scoped private JSON files and atomic replacement/locking.
 A crash can leave a `.lock` file; remove it only after confirming no writer runs.
 No automated migration of the rejected draft SQL artifacts is performed.
 
+## Sign-encrypt-sign
+
+Available now: sealed envelopes use sign-encrypt-sign. A ciphertext signature
+alone does not show that the author signed the plaintext for a given reader.
+The author therefore signs three layers:
+
+1. **Inner signature.** The author signs JCS of `mnemonic.a2a.inner.v1` as
+   COSE_Sign1. This binding holds `author`, sorted unique `recipients`,
+   `kind`, `context_id`, `prev_id`, `created_at` and the plaintext `payload`.
+2. **Encryption.** The client encrypts the inner COSE bytes with K. It wraps K
+   for the author and for each recipient's X25519 key.
+3. **Outer signatures.** The author signs the SEALED_V1 ciphertext, each
+   GRANT_V1 and the `mnemonic.a2a.signed.v2` carrier binding.
+
+After decryption, the reader checks these conditions:
+
+- The inner signer is the expected author and the outer signer.
+- `kind`, `context_id`, `prev_id` and `created_at` agree with the outer binding.
+- The inner recipient list equals the set of signed grant readers.
+- The reader is the author or a member of the inner recipient list.
+
+A V2 envelope that holds unsigned plaintext fails. These checks stop two
+attacks. A recipient cannot re-encrypt the author's signed plaintext to a third
+party as its own message. A forwarder also cannot widen the reader set.
+
+In Rust, `open_signed_a2a_full` returns the payload and the inner COSE bytes.
+A reader can give the inner bytes to a third party. `verify_a2a_inner` then
+proves that the author sent this plaintext to the named recipients. Showing the
+inner bytes discloses the plaintext. In the SDK, `openA2AAttestation` returns
+`{payload, innerSigned}` and `verifyA2AInner(innerSigned, author)` checks the proof.
+
+Legacy `mnemonic.a2a.signed.v1` sealed envelopes still verify and open. They
+carry no inner signature, so they give no plaintext-to-recipient proof.
+`open_signed_a2a_full` returns `inner_signed: None` for them. The fixture
+`sealed-a2a-v1-legacy.json` keeps V1 coverage.
+
 ## Sealed chunk chain
 
 This implementation seals a **completed** payload with one K and a fresh
@@ -117,7 +157,8 @@ by this patch; callers supply verified cards and trusted keys explicitly.
 
 Fixtures contain public **test-only** seeds. Native tests cover sender/reader,
 outsider, signed grant substitution, invalid wrap, distinct encryption keys,
-card substitution and sealed stream mutations. SDK real-WASM tests open native
+card substitution, sealed stream mutations, recipient re-encryption of the
+signed inner payload, a widened reader set and legacy V1 envelopes. SDK real-WASM tests open native
 fixtures and reproduce exact signed bytes from their canonical payloads. Fresh
 sealing uses randomness and is not expected to reproduce the same ciphertext.
 The HTTP test uses actual SDK/WASM and a separate remote artifact/index service.

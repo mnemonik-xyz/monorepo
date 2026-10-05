@@ -683,3 +683,17 @@ Tasks 18–21 remain pending review and full acceptance: production index smoke,
 final strict checks and complete adversarial coverage have not been demonstrated.
 No #61 live-stream or #74 DID scope waiver is implied. Draft SQL artifact storage
 is superseded; no automatic migration/deletion of old artifacts is performed.
+
+## Sealed A2A sign-encrypt-sign (2026-10-05)
+
+Review finding: sealed A2A encrypted unsigned plaintext and signed only the
+ciphertext, grants and carrier. That order does not bind the plaintext to the
+author and the intended readers. A reader could not prove to a third party
+what the author sent. The fix is sign-encrypt-sign. The author signs
+`mnemonic.a2a.inner.v1` (author, sorted recipients, kind, context, parent,
+time, payload). The client encrypts those COSE bytes, then signs the ciphertext,
+grants and a `mnemonic.a2a.signed.v2` carrier. Open requires the inner signer
+to equal the outer signer. The inner recipients must equal the signed grant
+readers, and the reader must be among them. V1 sealed envelopes still open
+without an inner proof; plain envelopes stay V1. Self-sealed general memories
+(SEALED_V1 with an author-only wrap) are out of this change's scope.

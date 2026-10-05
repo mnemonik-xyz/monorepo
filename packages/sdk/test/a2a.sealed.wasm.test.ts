@@ -5,7 +5,7 @@ import * as wasm from "../../../core/pkg-nodejs/mnemonic_core.js";
 import vectors from "./fixtures/sealed-a2a.json";
 import { MnemonicClient } from "../src/client.js";
 import { Keypair } from "../src/keypair.js";
-import { verifyA2AAttestation } from "../src/a2a.js";
+import { verifyA2AAttestation, verifyA2AInner } from "../src/a2a.js";
 import { LocalSigner } from "../src/signer.js";
 
 const hex = (s:string)=>Uint8Array.from(s.match(/../g)!.map(b=>parseInt(b,16)));
@@ -27,11 +27,22 @@ describe("sealed A2A real WASM",()=>{
   it.each(["sealed","stream"] as const)("opens native %s fixture for sender and recipient only",(key)=>{
     const bytes=hex(vectors[key]);
     expect(bytesHex(wasm.sign_cose_payload(hex(vectors[`${key}_jcs`]),vectors.author))).toBe(vectors[key]);
-    expect(JSON.parse(wasm.open_a2a(vectors.reader,bytes,vectors.author.pubkey_base58,undefined))).toEqual(vectors.payload);
-    expect(JSON.parse(wasm.open_a2a(vectors.author,bytes,vectors.author.pubkey_base58,undefined))).toEqual(vectors.payload);
+    expect(JSON.parse(wasm.open_a2a(vectors.reader,bytes,vectors.author.pubkey_base58,undefined)).payload).toEqual(vectors.payload);
+    expect(JSON.parse(wasm.open_a2a(vectors.author,bytes,vectors.author.pubkey_base58,undefined)).payload).toEqual(vectors.payload);
     expect(()=>wasm.open_a2a(vectors.outsider,bytes,vectors.author.pubkey_base58,undefined)).toThrow();
     const copy=bytes.slice();copy[copy.length-1]^=1;
     expect(()=>wasm.open_a2a(vectors.reader,copy,vectors.author.pubkey_base58,undefined)).toThrow();
+  });
+  it("exposes the author-signed inner binding to the recipient",async()=>{
+    const bytes=hex(vectors.sealed);
+    const opened=JSON.parse(wasm.open_a2a(vectors.reader,bytes,vectors.author.pubkey_base58,undefined));
+    expect(typeof opened.inner_signed).toBe("string");
+    const inner=await verifyA2AInner(hex(opened.inner_signed),vectors.author.pubkey_base58);
+    expect(inner.recipients).toEqual([vectors.reader.pubkey_base58]);
+    expect(inner.payload).toEqual(vectors.payload);
+    await expect(verifyA2AInner(hex(opened.inner_signed),vectors.reader.pubkey_base58)).rejects.toThrow();
+    const plain=JSON.parse(wasm.open_a2a(vectors.reader,hex(vectors.plain),vectors.author.pubkey_base58,undefined));
+    expect(plain.inner_signed).toBeNull();
   });
   it("seals real SDK payload before transport and preserves actual recall bytes",async()=>{
     let signed="";
@@ -59,7 +70,7 @@ describe("sealed A2A real WASM",()=>{
     const receiver=client(vectors.reader,fetchImpl);
     const rows=await receiver.recallA2AContext(vectors.context_id,{sealed:true});
     expect(rows[0]!.coseEnvelopeHex).toBe(signed);
-    expect(await receiver.openA2AAttestation(rows[0]!,vectors.author.pubkey_base58)).toEqual(vectors.payload);
+    expect((await receiver.openA2AAttestation(rows[0]!,vectors.author.pubkey_base58)).payload).toEqual(vectors.payload);
     await expect(receiver.openA2AAttestation({...rows[0]!,signedAt:"fake"},vectors.author.pubkey_base58)).rejects.toThrow();
     await expect(client(vectors.outsider).openA2AAttestation(rows[0]!,vectors.author.pubkey_base58)).rejects.toThrow();
   });

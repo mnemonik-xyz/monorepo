@@ -46,7 +46,7 @@ describe('exact-byte portable A2A storage',()=>{
   const report=await restoreMigratedA2A(fallback,cp,owner,context,[freshDestination],index);
   expect(report.completeToHeads).toBe(true);expect(report.attestations).toHaveLength(3);expect(report.source.status).toBe('disabled');expect(f.stats().sourceFetches).toBe(calls);
   const kp=new Keypair(v.reader),client=new MnemonicClient({baseUrl:'https://disabled-operator.invalid',signer:new LocalSigner(kp),a2aIndex:index,fetch:async()=>{throw new Error('operator disabled');}});client.setKeypair(kp);
-  for(const row of report.attestations)expect(await client.openA2AAttestation(row,owner)).toEqual(f.payloads.get(row.attestationId));
+  for(const row of report.attestations)expect((await client.openA2AAttestation(row,owner)).payload).toEqual(f.payloads.get(row.attestationId));
   // Local continuation retains original parent binding after backend replacement.
   const child=await client.attestA2AMessage({...v.payload,messageId:'continuation'},context,{mode:'local',prevId:f.rows[1]!.attestationId});expect(child).toMatch(/^a2a:/);
   const outsider=new Keypair(v.outsider),outsiderClient=new MnemonicClient({baseUrl:'https://disabled.invalid',signer:new LocalSigner(outsider)});outsiderClient.setKeypair(outsider);

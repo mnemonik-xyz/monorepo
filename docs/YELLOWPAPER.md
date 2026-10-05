@@ -495,6 +495,7 @@ A signed timestamp is an author's claim unless separately supported by validated
 General sealed memory uses XChaCha20-Poly1305 content encryption and HPKE recipient wraps with key commitment checks.
 The verifier accepts supported canonical CBOR inner memory and the existing SDK JSON representation.
 A2A sealing has its own signed binding and recipient-card validation contract.
+New sealed A2A envelopes use sign-encrypt-sign: the author signs the plaintext and recipient list, encrypts that signature, then signs the ciphertext.
 See [sealed A2A](./sealed-a2a.md) for its completed-stream boundaries.
 
 Required decryption keys cannot be recovered from signatures alone.
