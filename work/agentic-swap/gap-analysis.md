@@ -53,24 +53,43 @@ was not available. Statements about Flo.tc come from the draft specification.
 
 ## 2. What is missing
 
+### 2.1 Integration boundary
+
+One rule decides where each gap goes. Mnemonik provides transport, identity,
+sealing, signing and anchoring, and knows nothing about any one application. An
+integration defines its own message types, state machines and policies in its own
+package, on top of the public Rust API or the SDK. A new integration therefore
+needs no change to `mnemonic-core`. A change enters core only when it is generic.
+
+### 2.2 Gaps
+
+Generic gaps. They go into Mnemonik once and serve every integration
+([tech-spec.md](tech-spec.md)):
+
 | # | Gap | Home | Size |
 |---|---|---|---|
-| G1 | Inner negotiation message signed before sealing: kind, session, previous hash, nonce, time, recipient, payload | `core/src/codec/agswap/` | S |
-| G2 | Open path: verify outer, open, verify inner; inner signer equals outer signer; recipient is me; nonce is new | same | S |
-| G3 | Message kinds RFQ, QUOTE, COUNTER, ACCEPT, REJECT, EXPIRE; transcript state machine and transcript hash | same | M |
-| G4 | Client nonce store for replay protection | SDK | S |
-| G5 | `SwapIntent` with `intent_id = blake3(JCS(terms))`; CAIP chain, account and asset ids | `core/src/codec/agswap/` | S |
-| G6 | Swap rule atoms and facts | Warrant `swap-verified` | M |
-| G7 | Signed oracle price facts | Warrant `swap-core` | M |
-| G8 | Notional ledger for limits per period | Warrant `swap-signer` | S–M |
-| G9 | Swap warrant record, signed with the Mnemonik identity and anchored | Warrant `swap-core` + Mnemonik COSE | M |
-| G10 | Agent driver over the settlement engine: phase gate, secret hygiene, timeout checks, watchers | Warrant `swap-signer` + venue adapter | L |
-| G11 | MCP and REST tools for swaps | Venue | M |
-| G12 | Additive `Deal` fields: actors, intent hash, warrant references, transcript hash | Venue | S |
-| G13 | A `Signer` interface where the key stays in an HSM, KMS or TEE; key rotation | `core/src/identity` | M–L |
-| G14 | Agent discovery: signed RFQ, well-known context per pair | Venue + AgentCard | M |
-| G15 | Human approval and audit views | Venue web application | M |
-| G16 | Nonce in A2A messages; today replay protection is only content-hash deduplication | G1 covers it | S |
+| M1 | Signed sealed message: a plaintext signature before sealing that binds a caller-chosen protocol tag, the session, the previous message, a nonce and the recipient; the matching open checks and a nonce store. Today a sealed A2A message has no plaintext signature, and replay protection is only content-hash deduplication. | `core/src/codec/a2a/inner.rs`, SDK | S–M |
+| M2 | A WASM and SDK function that verifies a standalone COSE signature. TypeScript can sign generic COSE today, but not verify it. | `core/src/wasm/mod.rs`, SDK | S |
+| M3 | A key-custody `Signer` interface, so an Ed25519 key can stay in an HSM, a KMS or a TEE. Same algorithm and `kid`. | `core/src/identity/` | M |
+| M4 | Key rotation | `core/src/identity/` (no design yet) | M–L |
+
+Swap gaps. They are integration code and live in the Warrant swap
+specification or at the venue. None of them changes `mnemonic-core`:
+
+| # | Gap | Home | Size |
+|---|---|---|---|
+| W1 | Negotiation message kinds RFQ, QUOTE, COUNTER, ACCEPT, REJECT, EXPIRE, carried as the `body` of an M1 message | Warrant `swap-core` | S |
+| W2 | Swap intent with `intent_id = blake3(JCS(terms))`; CAIP chain, account and asset ids | Warrant `swap-core` | S |
+| W3 | Transcript state machine and transcript hash | Warrant `swap-core` | M |
+| W4 | Swap rule atoms and facts | Warrant `swap-verified` | M |
+| W5 | Signed oracle price facts | Warrant `swap-core` | M |
+| W6 | Notional ledger for limits per period | Warrant `swap-signer` | S–M |
+| W7 | Swap warrant record, signed with the Mnemonik identity and anchored through `mnemonic_attest_a2a` | Warrant `swap-core` and `swap-signer` | M |
+| W8 | Policy signer: phase gate, secret hygiene, timeout checks, watchers | Warrant `swap-signer` + venue adapter | L |
+| V1 | MCP and REST tools for swaps | Venue | M |
+| V2 | Additive `Deal` fields: actors, intent hash, warrant references, transcript hash | Venue | S |
+| V3 | Agent discovery: signed RFQ, well-known context per pair | Venue + AgentCard | M |
+| V4 | Human approval and audit views | Venue web application | M |
 
 ## 3. Is Warrant too large for swaps?
 
@@ -90,14 +109,17 @@ Circom prototype, the escrow contracts, the fixed-width EVM journals, secp256k1
 evidence signing or the invoice parser.
 
 The evaluator in `verified/` is already separate from the zkVM code. Do not add
-swap atoms to it. The invoice guest compiles it, and `InvoiceEscrow` pins the
-guest image id as an immutable value. New swap crates keep the invoice product
+swap atoms to it. All three guests compile it, and four contracts pin a guest
+image id as an immutable value. New swap crates keep the invoice product
 stable. The Warrant swap specification, section 13, gives the layout.
 
 ## 4. Where the decision runs
 
-The policy signer is a separate process next to the agent. It holds the funding
-key, the identity key and the swap secret. The agent holds no key. The signer
+The agent (the LLM process) holds no key and no funds. The funds and keys belong
+to the owner: the human or company that the agent acts for. The owner's policy
+signer runs in the owner's own environment: a separate process next to the agent,
+an HSM, a KMS, a TEE, or the owner's own wallet. It holds the owner's funding key,
+identity key and swap secret. No funds move to a third party. The signer
 builds facts, runs the evaluator and signs only on `Allow`. It sends `Ask` to
 the owner. A WASM build of the evaluator lets the counterparty and auditors
 re-run a decision. An evaluator inside the agent process is acceptable for a
@@ -117,11 +139,11 @@ demonstration. It is not a control, because a manipulated agent can skip it.
   accepts only memory and sealed artifacts. No new ingestion adapter is needed.
 - `sign_artifact` takes a concrete keypair. Core has no `Signer` trait. The SDK
   has `SignerInterface`, but the A2A path passes the raw secret to WASM
-  (`packages/sdk/src/client.ts`). This is gap G13.
+  (`packages/sdk/src/client.ts`). This is gap M3.
 - Identity strings differ: ingestion uses `did:sol:<key>`, A2A `SEALED_V1` uses
-  the bare base58 key. The swap negotiation uses the bare base58 key and compares
-  raw 32-byte keys (tech-spec, "Identity encoding").
-- Key rotation is not implemented and has no design yet (gap G13). The
+  the bare base58 key. The generic signed sealed message (M1) uses the bare
+  base58 key and compares raw 32-byte keys (tech-spec, "Identity encoding").
+- Key rotation is not implemented and has no design yet (gap M4). The
   Ed25519-to-EVM key binding (`KEY_BINDING_V1`, `work/dual-key-identity/`) that
   the Warrant swap specification, section 4.3, needs is also still to do.
 
@@ -133,10 +155,14 @@ demonstration. It is not a control, because a manipulated agent can skip it.
    signature is still useful: it is self-contained and binds the recipient and
    the nonce.
 2. Sign, encrypt, sign needs no change to `SEALED_V1`. The signed inner message
-   goes into `seal_memory` as the plaintext.
+   goes into the sealed A2A message as one DataPart, which the existing path
+   seals and signs.
 3. Warrant needs no zkVM and no on-chain verifier for HTLC swaps.
 4. A daily limit needs a stateful ledger. Warrant has none today.
 5. The draft does not list the chain-level safety checks: SHA-256 on both legs,
    a 32-byte preimage check, a reveal deadline, finality before dependence, fixed
    receivers, contract and asset identity, fee reserves and prepared refunds. The
    Warrant swap specification, section 7, makes them obligatory.
+6. The draft places the negotiation messages in Mnemonik ("adopt as negotiation
+   channel"). The channel is generic Mnemonik. The swap message types are
+   integration code and belong to the swap layer (section 2.1).
