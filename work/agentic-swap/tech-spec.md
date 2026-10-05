@@ -46,14 +46,21 @@ No cryptographic change is needed. The design composes existing parts:
   nonce:      hex, 16 random bytes
   created_at: RFC 3339
   expires_at: RFC 3339
-  sender:     did:key of the sender
-  recipient:  did:key of the recipient
+  sender:     base58 Ed25519 public key of the sender (same form as the COSE kid)
+  recipient:  base58 Ed25519 public key of the recipient (same form as a grant reader)
   payload:    object, by kind (below)
 }
 ```
 
 The protected COSE header has no domain field (`codec/sign.rs`). The `protocol`
 field therefore carries the domain. A verifier rejects any other value.
+
+**Identity encoding.** `sender` and `recipient` use the bare base58 Ed25519 public
+key. This is the form that `sign_cose` writes into the COSE `kid` and that sealed
+A2A grants store as `reader`. Every identity comparison decodes both sides to the
+raw 32-byte key and compares the bytes. A value that does not decode to exactly 32
+bytes is rejected. `did:key` (`identity::did_key_from_pubkey`) is a display and
+policy form only. It never appears in a field that a check compares.
 
 Payloads:
 
@@ -76,8 +83,10 @@ message:
 1. Verify the A2A binding and the grant (existing code).
 2. Open the sealed A2A message and extract exactly one inner DataPart.
 3. Verify the inner COSE signature.
-4. Inner `sender` key equals the outer binding signer.
-5. Inner `recipient` equals the local identity and is a grant reader.
+4. Inner `sender` equals the outer binding signer and the inner COSE `kid`
+   (32-byte key comparison).
+5. Inner `recipient` equals the local identity key and one grant `reader`
+   (32-byte key comparison).
 6. Inner `session_id` equals the binding `context_id`.
 7. `prev_hash` equals the head of the local transcript for this session.
 8. `nonce` is new for (sender, session). The client nonce store records it.
@@ -124,6 +133,8 @@ tool and no new ingestion adapter are needed in phase 1.
   message. No funds move.
 
 ## Tasks
+
+Task files: [`tasks/`](tasks/).
 
 | # | Task | Wave | Depends on |
 |---|---|---|---|

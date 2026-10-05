@@ -119,7 +119,8 @@ demonstration. It is not a control, because a manipulated agent can skip it.
   has `SignerInterface`, but the A2A path passes the raw secret to WASM
   (`packages/sdk/src/client.ts`). This is gap G13.
 - Identity strings differ: ingestion uses `did:sol:<key>`, A2A `SEALED_V1` uses
-  the bare base58 key. Choose one form for swap actors.
+  the bare base58 key. The swap negotiation uses the bare base58 key and compares
+  raw 32-byte keys (tech-spec, "Identity encoding").
 - Key rotation is not implemented. `work/dual-key-identity/` is still to do.
 
 ## 6. Corrections to the draft specification
