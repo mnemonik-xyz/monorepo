@@ -38,7 +38,7 @@ the reference you come back to.
 
 ## Tool index
 
-The default build advertises **11 tools**. Three more appear only when the server
+The default build advertises **12 tools**. Three more appear only when the server
 is compiled with the `trajectory-experimental` cargo feature.
 
 | Tool | Auth | Paid | Purpose |
@@ -49,6 +49,7 @@ is compiled with the `trajectory-experimental` cargo feature.
 | [`mnemonic_recall`](#mnemonic_recall) | optional (changes scope) | no | Semantic search over stored memories |
 | [`mnemonic_verify`](#mnemonic_verify) | required on HTTP | no | Verify an attestation against its chain anchors |
 | [`mnemonic_prove_identity`](#mnemonic_prove_identity) | required on HTTP | no | Sign an arbitrary challenge with the server key |
+| [`mnemonic_operator_proof`](#mnemonic_operator_proof) | none | no | Prove the operator key before a client sends credentials |
 | [`mnemonic_publish_post`](#mnemonic_publish_post) | required | no | Publish a signed public blog post |
 | [`mnemonic_share`](#mnemonic_share) | required | no | Legacy approval-URL handoff; not grant delivery |
 | [`request_public_write_confirmation`](#request_public_write_confirmation) | — | no | Internal ceremony gate (not user-facing) |
@@ -113,6 +114,7 @@ The token is a JWT (JSON Web Token). These rules are available now.
 - JSON-RPC notifications, for example `notifications/initialized`
 - `tools/call` for `mnemonic_recall` (it searches public rows only; private
   rows go only to their owner)
+- `tools/call` for `mnemonic_operator_proof`
 
 All other requests need a valid token.
 
@@ -422,6 +424,36 @@ no on-chain transaction and no stored artifact.
 **Input:** `challenge` (string, required).
 
 **Returns:** the signature over the challenge bytes plus the signing pubkey.
+
+---
+
+## `mnemonic_operator_proof`
+
+Proves the operator's Ed25519 key without a token. Clients call it before they
+send credentials to a selected operator. This tool is available now.
+
+**Input:** `nonce` (string, required). The nonce is 32 random bytes as 64
+lowercase hex characters.
+
+**Signed message:** the server composes the message itself. The caller cannot
+choose other bytes, so the tool does not sign arbitrary data.
+
+```text
+mnemonic.operator-selection.v1
+<server public origin>
+<nonce>
+```
+
+The lines are joined with `\n` and have no trailing newline. The origin is the
+value of `MCP_PUBLIC_BASE_URL`.
+
+**Returns:** `public_key` (base58), `origin`, `nonce`, `signature` (128 hex
+characters) and `algorithm` (`Ed25519`).
+
+A client must compare `public_key` with an independently obtained pin. It must
+also verify the signature over the message with its own configured origin. An
+operator with a different configured origin fails this check. See
+[operator selection](./operator-selection.md).
 
 ---
 

@@ -2378,6 +2378,38 @@ pub fn prove_identity(keypair: &Keypair, challenge: &str) -> serde_json::Value {
     })
 }
 
+/// Domain tag for operator-selection proofs. The server composes the whole
+/// signed message itself, so this anonymous tool is never a signing oracle:
+/// callers control only a fixed-length hex nonce.
+pub const OPERATOR_PROOF_DOMAIN: &str = "mnemonic.operator-selection.v1";
+
+/// Operator identity proof for client-side operator selection. Signs
+/// `"{OPERATOR_PROOF_DOMAIN}\n{origin}\n{nonce}"`, binding the signature to
+/// this server's public origin. Reachable without a JWT so clients can verify
+/// a pinned operator key before sending it any credential.
+pub fn operator_proof(
+    keypair: &Keypair,
+    origin: &str,
+    nonce: &str,
+) -> Result<serde_json::Value, String> {
+    if nonce.len() != 64
+        || !nonce
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err("nonce must be 64 lowercase hex characters".to_string());
+    }
+    let message = format!("{OPERATOR_PROOF_DOMAIN}\n{origin}\n{nonce}");
+    let sig = identity::sign_bytes(keypair, message.as_bytes());
+    Ok(serde_json::json!({
+        "public_key": identity::pubkey_base58(keypair),
+        "origin": origin,
+        "nonce": nonce,
+        "signature": hex::encode(&sig),
+        "algorithm": "Ed25519",
+    }))
+}
+
 /// Tool 5: recall (sync — DB search)
 ///
 /// `owner_pubkey` (Decision 9) is the mandatory tenant scope. HTTP transport

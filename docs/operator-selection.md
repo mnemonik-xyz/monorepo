@@ -43,11 +43,24 @@ await o2.client.whoami();
 // o1.client still addresses O1. No pending operation was moved to O2.
 ```
 
-Each connection verifies an Ed25519 signature over a fresh random challenge,
-bound to the selected origin. Connection fails on an unavailable endpoint, wrong
-key, invalid signature or replayed challenge. Requests to the selected MCP
-origin reject redirects. Credentials and token refreshers must belong to that
-operator; the helper does not copy them from another client.
+Each connection first calls `mnemonic_operator_proof` with a fresh random nonce.
+This request carries no token, cookie or token refresh. The server signs a
+message that it composes from a fixed domain tag, its public origin and the
+nonce. The SDK verifies the signature against the pinned key and the configured
+origin. Only then does it create the authenticated client. A wrong key, invalid
+signature, replayed nonce or different origin fails before any credential leaves
+the client. Requests to the selected MCP origin reject redirects. Credentials and
+token refreshers must belong to that operator; the helper does not copy them
+from another client.
+
+The proof request times out after 15 seconds by default. Pass
+`{ proofTimeoutMs, signal }` as the fourth argument to change the limit or
+cancel it. A timeout fails the connection; the SDK does not try another operator.
+Operators must run a server version with `mnemonic_operator_proof`. Older
+servers fail this check.
+
+`verifyOperatorIdentity(operator, options)` runs the same proof without creating
+a client.
 
 The proof establishes key possession at connection time. It does not establish
 protocol compatibility, storage availability, payment readiness or independent
@@ -75,19 +88,14 @@ for live recovery acceptance.
 Build the SDK, then run:
 
 ```sh
-node scripts/check-operators.mjs --operators /secure/operators.json --sessions /secure/operator-sessions.json
+node scripts/check-operators.mjs --operators /secure/operators.json
 ```
 
 The operator file uses the configuration above with independently obtained
-deployment public-key pins. The private session file maps each operator ID to
-`{"baseUrl":"https://its-exact-origin","jwt":"its-access-token"}`. Include
-exactly the configured IDs; each origin must match the operator configuration.
-Keep this file outside Git with mode `0600`. Obtain a separate login for each
-origin; this probe neither refreshes nor copies sessions between operators.
-
-The probe calls only `mnemonic_prove_identity`, rejects redirects and times out
+deployment public-key pins. The probe needs no login session. It calls only
+`mnemonic_operator_proof`, sends no credentials, rejects redirects and times out
 each request after 15 seconds. It prints public pins and verification status,
-never tokens or raw server errors. Any failed check produces a nonzero exit.
+never raw server errors. Any failed check produces a nonzero exit.
 Run its offline checks with `node --test scripts/check-operators.test.mjs` after
 building the SDK. Successful proof establishes possession of the pinned key,
 not upload, recovery or payment acceptance.

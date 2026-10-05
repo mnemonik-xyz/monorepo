@@ -67,7 +67,7 @@ Cargo workspace (`resolver = "2"`) with four members, plus an npm workspace:
 - **`webapp/`** — React + Vite site (mnemonik.xyz), prerendered, Playwright e2e.
 - **`tests/cross-lang/`** — Rust ↔ Node keychain interop script.
 
-**MCP tools.** Default builds expose 11 tools: `mnemonic_whoami`, `mnemonic_sign_memory`, `mnemonic_check_pending`, `mnemonic_recall`, `mnemonic_verify`, `mnemonic_prove_identity`, `mnemonic_publish_post`, `request_public_write_confirmation`, `mnemonic_share`, `mnemonic_attest_a2a`, `mnemonic_recall_a2a`. `--features trajectory-experimental` adds `mnemonic_attest_step`, `mnemonic_attest_verdict`, `mnemonic_verify_trajectory`. Reference: `docs/tools.md`.
+**MCP tools.** Default builds expose 12 tools: `mnemonic_whoami`, `mnemonic_sign_memory`, `mnemonic_check_pending`, `mnemonic_recall`, `mnemonic_verify`, `mnemonic_prove_identity`, `mnemonic_operator_proof` (anonymous, origin-bound), `mnemonic_publish_post`, `request_public_write_confirmation`, `mnemonic_share`, `mnemonic_attest_a2a`, `mnemonic_recall_a2a`. `--features trajectory-experimental` adds `mnemonic_attest_step`, `mnemonic_attest_verdict`, `mnemonic_verify_trajectory`. Reference: `docs/tools.md`.
 
 **Signing and privacy boundaries.** Legacy HTTP `mnemonic_sign_memory` sends
 plaintext to the operator for artifact preparation, then uses client COSE signing

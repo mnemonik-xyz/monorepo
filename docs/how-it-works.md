@@ -17,7 +17,7 @@ The repository is a Cargo workspace (`resolver = "2"`) with two members. The dep
 | `mnemonic-core::arweave` | Full-mode persistence: ANS-104 bundle builder, Irys upload, deep hash + Avro encoding. |
 | `mnemonic-core::solana` | Full-mode anchoring: `SolanaClient` for SPL Memo writes/reads. |
 | `mnemonic-core::lineage` | Parent-child artifact DAG with cycle detection and BFS traversal (`Direction::{Ancestors, Descendants, Both}`). |
-| `mnemonic-mcp` | JSON-RPC 2.0 dispatcher (`mcp.rs`), the MCP tools (`tools.rs`; 8 by default, 11 with `trajectory-experimental`), Axum bootstrap (`main.rs`), payment gating (`payment.rs`), pricing engine (`pricing.rs`), env-driven config (`config.rs`). |
+| `mnemonic-mcp` | JSON-RPC 2.0 dispatcher (`mcp.rs`), the MCP tools (`tools.rs`; 12 by default, 15 with `trajectory-experimental`), Axum bootstrap (`main.rs`), payment gating (`payment.rs`), pricing engine (`pricing.rs`), env-driven config (`config.rs`). |
 
 ## End-to-end walkthrough — sign_memory
 

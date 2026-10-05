@@ -13,6 +13,16 @@ async function list() {
 const signer = { pubkey: 'unused-for-read-only-proof', sign: async () => { throw new Error('must not sign'); } };
 const result = (data: unknown) => new Response(JSON.stringify({ jsonrpc: '2.0', id: 1,
   result: { content: [{ type: 'text', text: JSON.stringify(data) }] } }));
+const message = (origin: string, nonce: string) => new TextEncoder().encode(
+  `mnemonic.operator-selection.v1\n${origin}\n${nonce}`);
+async function proof(config: Awaited<ReturnType<typeof list>>, i: number, nonce: string,
+  fault: { key?: number; origin?: string; nonce?: string; signature?: string } = {}) {
+  const origin = fault.origin ?? config.operators[i]!.baseUrl;
+  const signedNonce = fault.nonce ?? nonce;
+  return result({ public_key: config.operators[fault.key ?? i]!.publicKey, origin, nonce: signedNonce,
+    algorithm: 'Ed25519', signature: fault.signature ??
+      Buffer.from(await signAsync(message(origin, signedNonce), secrets[i]!)).toString('hex') });
+}
 
 describe('configured operator selection', () => {
   it('selects explicitly, verifies real signatures, and keeps clients and tokens separate', async () => {
@@ -24,10 +34,9 @@ describe('configured operator selection', () => {
       expect(init?.redirect).toBe('error');
       const body = JSON.parse(String(init?.body));
       calls.push({ host, token: new Headers(init?.headers).get('authorization'), tool: body.params.name });
-      if (body.params.name === 'mnemonic_prove_identity') {
-        const challenge = body.params.arguments.challenge;
-        return result({ public_key: config.operators[i]!.publicKey, challenge, algorithm: 'Ed25519',
-          signature: Buffer.from(await signAsync(new TextEncoder().encode(challenge), secrets[i]!)).toString('hex') });
+      if (body.params.name === 'mnemonic_operator_proof') {
+        expect(init?.credentials).toBe('omit');
+        return proof(config, i, body.params.arguments.nonce);
       }
       return result({ server_pubkey: config.operators[i]!.publicKey });
     };
@@ -35,26 +44,52 @@ describe('configured operator selection', () => {
     const o2 = await connectOperator(config, 'o2', { signer, jwt: 'token-two', fetch: mock });
     expect((await o1.client.whoami()).serverPubkey).toBe(config.operators[0]!.publicKey);
     expect((await o2.client.whoami()).serverPubkey).toBe(config.operators[1]!.publicKey);
-    expect(calls.map(c => [c.host, c.token])).toEqual([
-      ['o1.example.com', 'Bearer token-one'], ['o2.example.com', 'Bearer token-two'],
-      ['o1.example.com', 'Bearer token-one'], ['o2.example.com', 'Bearer token-two'],
+    // Identity proofs carry no credential; each token goes only to its operator.
+    expect(calls.map(c => [c.host, c.token, c.tool])).toEqual([
+      ['o1.example.com', null, 'mnemonic_operator_proof'], ['o2.example.com', null, 'mnemonic_operator_proof'],
+      ['o1.example.com', 'Bearer token-one', 'mnemonic_whoami'], ['o2.example.com', 'Bearer token-two', 'mnemonic_whoami'],
     ]);
     expect(Object.isFrozen(o1.operator)).toBe(true);
   });
 
-  it('rejects wrong keys, fabricated signatures and replayed challenges', async () => {
+  it('rejects wrong keys, fabricated signatures, replayed nonces and other origins', async () => {
     const config = await list();
-    for (const fault of ['key', 'signature', 'replay']) {
-      const mock: typeof fetch = async (_input, init) => {
-        const challenge = JSON.parse(String(init?.body)).params.arguments.challenge;
-        const signed = fault === 'replay' ? 'old-challenge' : challenge;
-        return result({ public_key: config.operators[fault === 'key' ? 1 : 0]!.publicKey,
-          challenge: signed,
-          signature: fault === 'signature' ? '00'.repeat(64) :
-            Buffer.from(await signAsync(new TextEncoder().encode(signed), secrets[0]!)).toString('hex') });
-      };
+    const faults = [{ key: 1 }, { signature: '00'.repeat(64) }, { nonce: 'ab'.repeat(32) },
+      { origin: 'https://o2.example.com' }];
+    for (const fault of faults) {
+      const mock: typeof fetch = async (_input, init) =>
+        proof(config, 0, JSON.parse(String(init?.body)).params.arguments.nonce, fault);
       await expect(connectOperator(config, 'o1', { signer, fetch: mock })).rejects.toThrow(/identity/);
     }
+  });
+
+  it('sends no credential and never refreshes a token before the proof succeeds', async () => {
+    const config = await list();
+    let refreshes = 0;
+    const seen: (string | null)[] = [];
+    const mock: typeof fetch = async (_input, init) => {
+      seen.push(new Headers(init?.headers).get('authorization'));
+      return proof(config, 0, JSON.parse(String(init?.body)).params.arguments.nonce, { key: 1 });
+    };
+    await expect(connectOperator(config, 'o1', { signer, jwt: 'secret-token', fetch: mock,
+      tokenRefresher: async () => { refreshes++; return 'fresh-token'; } })).rejects.toThrow(/identity/);
+    expect(seen).toEqual([null]);
+    expect(refreshes).toBe(0);
+  });
+
+  it('bounds the identity proof with a timeout and honors a caller signal', async () => {
+    const config = await list();
+    const hang: typeof fetch = (_input, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+    });
+    await expect(connectOperator(config, 'o1', { signer, fetch: hang }, { proofTimeoutMs: 20 }))
+      .rejects.toThrow(/proof request failed/);
+    const controller = new AbortController();
+    const pending = connectOperator(config, 'o1', { signer, fetch: hang }, { signal: controller.signal });
+    controller.abort();
+    await expect(pending).rejects.toThrow(/proof request failed/);
+    await expect(connectOperator(config, 'o1', { signer, fetch: hang }, { proofTimeoutMs: 0 }))
+      .rejects.toThrow(/proofTimeoutMs/);
   });
 
   it('never falls back to O2 when O1 is unavailable', async () => {
@@ -70,11 +105,7 @@ describe('configured operator selection', () => {
     const mock: typeof fetch = async (input, init) => {
       expect(new URL(String(input)).hostname).toBe('o1.example.com');
       const body = JSON.parse(String(init?.body));
-      if (body.params.name === 'mnemonic_prove_identity') {
-        const challenge = body.params.arguments.challenge;
-        return result({ public_key: config.operators[0]!.publicKey, challenge,
-          signature: Buffer.from(await signAsync(new TextEncoder().encode(challenge), secrets[0]!)).toString('hex') });
-      }
+      if (body.params.name === 'mnemonic_operator_proof') return proof(config, 0, body.params.arguments.nonce);
       writes++;
       throw new Error('response lost after submission');
     };

@@ -281,3 +281,20 @@ MCP2's GitHub start run 37137737510 succeeded and its public health endpoint
 responded. Live authenticated identity/recovery checks remain pending valid
 operator-specific sessions and independently obtained pins. No live upload,
 payment, shutdown or npm publication was performed in this validation.
+
+## 2026-10-05 — Credential-free operator proof (PR #274 review)
+
+Review found that `connectOperator` sent the JWT, and could run the token
+refresher, before it verified the pinned key. It also had no bound on the
+identity request. The server now has an anonymous `mnemonic_operator_proof`
+tool. It signs `mnemonic.operator-selection.v1\n<public origin>\n<nonce>`,
+where the nonce is exactly 64 lowercase hex characters. The server composes the
+message, so the anonymous tool is not a signing oracle. `mnemonic_prove_identity`
+still requires a token. The SDK verifies this proof with a bare request that has
+no credentials and a 15-second default timeout (`proofTimeoutMs`, `signal`).
+Only then does it create the authenticated client. The read-only probe needs no
+sessions now. Live operators need a server build with the new tool.
+
+Follow-up, not changed here: `mnemonic_prove_identity` signs any caller-chosen
+bytes with the operator key for every authenticated user. Review whether it
+needs domain separation.

@@ -2297,6 +2297,10 @@ const ALLOWLIST_TOOLS_CALL_NAMES: &[&str] = &[
     // payment gate. Anonymous access is safe: it returns rows for the
     // supplied context_id only (A2A attestation rows, no personal content).
     "mnemonic_recall_a2a",
+    // Operator-selection proof: signs only a server-composed, origin-bound
+    // message over a fixed-length nonce, so it is not a signing oracle. Must
+    // be anonymous so clients verify the pinned key before sending a JWT.
+    "mnemonic_operator_proof",
 ];
 
 /// Bearer-auth middleware. Inserts the resolved `Claims` into the request

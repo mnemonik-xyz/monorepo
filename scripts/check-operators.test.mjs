@@ -5,37 +5,44 @@ import { checkOperators } from './check-operators.mjs';
 
 const seed = new Uint8Array(32).fill(7);
 const publicKey = 'GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB';
-const configuration = { version: 1, operators: [{ id: 'o1', baseUrl: 'https://o1.example.com', publicKey }] };
-const sessions = { o1: { baseUrl: 'https://o1.example.com', jwt: 'private-token' } };
+const origin = 'https://o1.example.com';
+const configuration = { version: 1, operators: [{ id: 'o1', baseUrl: origin, publicKey }] };
 
-test('probe only requests a fresh identity proof and verifies the real signature', async () => {
+async function proofFor(nonce, signedOrigin = origin) {
+  const message = new TextEncoder().encode(`mnemonic.operator-selection.v1\n${signedOrigin}\n${nonce}`);
+  const signature = Buffer.from(await signAsync(message, seed)).toString('hex');
+  return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1,
+    result: { public_key: publicKey, origin: signedOrigin, nonce, signature } }));
+}
+
+test('probe requests one credential-free proof and verifies the real signature', async () => {
   let calls = 0;
-  const report = await checkOperators(configuration, sessions, async (url, init) => {
+  const report = await checkOperators(configuration, async (url, init) => {
     calls++;
-    assert.equal(url, 'https://o1.example.com/mcp');
+    assert.equal(url, `${origin}/mcp`);
     assert.equal(init.redirect, 'error');
-    assert.equal(init.headers.Authorization, 'Bearer private-token');
+    assert.equal(init.credentials, 'omit');
+    assert.equal(init.headers.Authorization, undefined);
+    assert(init.signal instanceof AbortSignal);
     const body = JSON.parse(init.body);
-    assert.equal(body.params.name, 'mnemonic_prove_identity');
-    const challenge = body.params.arguments.challenge;
-    assert(challenge.startsWith('mnemonic.operator-selection.v1\nhttps://o1.example.com\n'));
-    const signature = Buffer.from(await signAsync(new TextEncoder().encode(challenge), seed)).toString('hex');
-    return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { public_key: publicKey, challenge, signature } }));
+    assert.equal(body.params.name, 'mnemonic_operator_proof');
+    assert.match(body.params.arguments.nonce, /^[0-9a-f]{64}$/);
+    return proofFor(body.params.arguments.nonce);
   });
   assert.equal(calls, 1);
   assert.equal(report.operators[0].status, 'verified');
-  assert(!JSON.stringify(report).includes('private-token'));
 });
 
-test('invalid origin binding fails before credentials are transmitted', async () => {
-  await assert.rejects(() => checkOperators(configuration, { o1: { ...sessions.o1, baseUrl: 'https://other.example.com' } },
-    async () => { assert.fail('must not fetch'); }), /baseUrl/);
+test('a proof bound to another origin fails', async () => {
+  const report = await checkOperators(configuration, async (_url, init) =>
+    proofFor(JSON.parse(init.body).params.arguments.nonce, 'https://other.example.com'));
+  assert.equal(report.operators[0].status, 'failed');
 });
 
 test('failure reports do not include server or transport error contents', async () => {
-  const report = await checkOperators(configuration, sessions, async () => {
-    throw new Error('server echoed private-token');
+  const report = await checkOperators(configuration, async () => {
+    throw new Error('server echoed secret-detail');
   });
   assert.equal(report.operators[0].status, 'failed');
-  assert(!JSON.stringify(report).includes('private-token'));
+  assert(!JSON.stringify(report).includes('secret-detail'));
 });
