@@ -98,8 +98,9 @@ export {
   buildSealedDataPart,
   extractSealedDataPart,
   verifyA2AAttestation,
+  verifyA2AInner,
 } from "./a2a.js";
-export type { SealedA2ADataPart, SealedA2APartPayload } from "./a2a.js";
+export type { SealedA2ADataPart, SealedA2APartPayload, OpenedA2A, A2AInnerBinding } from "./a2a.js";
 
 // ── T3: OAuth surface ──────────────────────────────────────────────────────
 export {

@@ -15,7 +15,9 @@ const id = await sender.attestA2AMessage(message, contextId, {
   },
 });
 const rows = await recipient.recallA2AContext(contextId, { sealed: true });
-const messageAgain = await recipient.openA2AAttestation(rows[0], trustedAuthorKey);
+const {payload, innerSigned} = await recipient.openA2AAttestation(rows[0], trustedAuthorKey);
+// innerSigned: author's signature over plaintext + recipients (null for plain/V1).
+const proof = await verifyA2AInner(innerSigned!, trustedAuthorKey);
 ```
 
 Bind a local keypair or keypair provider to both clients. `trustedCardSigner`
@@ -116,8 +118,8 @@ party as its own message. A forwarder also cannot widen the reader set.
 In Rust, `open_signed_a2a_full` returns the payload and the inner COSE bytes.
 A reader can give the inner bytes to a third party. `verify_a2a_inner` then
 proves that the author sent this plaintext to the named recipients. Showing the
-inner bytes discloses the plaintext. SDK and WASM access to the inner bytes is
-planned; `openA2AAttestation` returns the payload only.
+inner bytes discloses the plaintext. In the SDK, `openA2AAttestation` returns
+`{payload, innerSigned}` and `verifyA2AInner(innerSigned, author)` checks the proof.
 
 Legacy `mnemonic.a2a.signed.v1` sealed envelopes still verify and open. They
 carry no inner signature, so they give no plaintext-to-recipient proof.

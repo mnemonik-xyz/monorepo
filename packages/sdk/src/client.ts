@@ -33,6 +33,7 @@ import {
   attestA2ATask,
   recallA2AContext,
   openA2AAttestation,
+  type OpenedA2A,
 } from "./a2a.js";
 import { coseSignPayload } from "./cose.js";
 import {
@@ -948,7 +949,7 @@ export class MnemonicClient {
   }
 
   /** Verify the expected author and decrypt recalled bytes in this client. */
-  openA2AAttestation(attestation: Attestation, expectedAuthor: string, encryptionSecret?: Uint8Array): Promise<Record<string,unknown>> {
+  openA2AAttestation(attestation: Attestation, expectedAuthor: string, encryptionSecret?: Uint8Array): Promise<OpenedA2A> {
     return openA2AAttestation.call(this,attestation,expectedAuthor,encryptionSecret);
   }
 

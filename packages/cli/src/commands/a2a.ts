@@ -151,7 +151,7 @@ export async function runA2ARecall(opts: A2ARecallOptions): Promise<void> {
 
   if (opts.openAuthor) {
     try {
-      results = await Promise.all(results.map(async (a) => ({...a,payload:await client.openA2AAttestation(a,opts.openAuthor!)})));
+      results = await Promise.all(results.map(async (a) => ({...a,payload:(await client.openA2AAttestation(a,opts.openAuthor!)).payload})));
     } catch (e) { throw fromSdkError(e); }
   }
   format({ results }, opts, (_d, _color) => {

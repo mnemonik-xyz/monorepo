@@ -918,6 +918,7 @@ pub fn prepare_a2a(
 }
 
 /// Verify every signature and sealed chain, then open locally for this identity.
+/// Returns JSON `{payload, inner_signed}`.
 #[cfg(feature = "a2a-experimental")]
 #[wasm_bindgen]
 pub fn open_a2a(
@@ -933,9 +934,23 @@ pub fn open_a2a(
         .map(|s| s.as_slice().try_into())
         .transpose()
         .map_err(|_| JsValue::from_str("encryption secret must be 32 bytes"))?;
-    let result = crate::codec::a2a::signed::open_signed_a2a(signed, &kp, expected_author, arr)
+    let opened = crate::codec::a2a::signed::open_signed_a2a_full(signed, &kp, expected_author, arr)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    serde_json::to_string(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+    // `inner_signed` is the author's COSE over plaintext and recipients (hex), or null.
+    serde_json::to_string(&serde_json::json!({
+        "payload": opened.payload,
+        "inner_signed": opened.inner_signed.map(hex::encode),
+    }))
+    .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Verify an inner sign-encrypt-sign binding that a reader presents.
+#[cfg(feature = "a2a-experimental")]
+#[wasm_bindgen]
+pub fn verify_a2a_inner(inner_signed: &[u8], expected_author: &str) -> Result<String, JsValue> {
+    let inner = crate::codec::a2a::signed::verify_a2a_inner(inner_signed, expected_author)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    serde_json::to_string(&inner).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Verify public signatures and the sealed hash chain, without decrypting.

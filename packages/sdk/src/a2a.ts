@@ -363,8 +363,11 @@ async function sendSignedA2A(this: WithCallTool, kind: string, payload: unknown,
   }return result;
 }
 
-/** Verify author and the complete sealed chain, then decrypt locally. */
-export async function openA2AAttestation(this: WithCallTool, attestation: Attestation, expectedAuthor: string, encryptionSecret?: Uint8Array): Promise<Record<string,unknown>> {
+/** Verify author and the complete sealed chain, then decrypt locally.
+ * `innerSigned` is the author's COSE signature over the plaintext and its
+ * recipients (sign-encrypt-sign). It is null for plain and legacy V1 envelopes.
+ */
+export async function openA2AAttestation(this: WithCallTool, attestation: Attestation, expectedAuthor: string, encryptionSecret?: Uint8Array): Promise<OpenedA2A> {
   if (!attestation.coseEnvelopeHex) throw new UserError("A2A recall omitted signed bytes");
   const wasm = await loadWasm();
   if (!wasm.open_a2a || !wasm.verify_a2a) throw new ServerError("A2A WASM bindings unavailable");
@@ -380,9 +383,31 @@ export async function openA2AAttestation(this: WithCallTool, attestation: Attest
     }
     const kp = await this._resolveA2AKeypair();
     try {
-      return JSON.parse(wasm.open_a2a(kp,signed,expectedAuthor,encryptionSecret)) as Record<string,unknown>;
+      const opened = JSON.parse(wasm.open_a2a(kp,signed,expectedAuthor,encryptionSecret)) as {payload: Record<string,unknown>; inner_signed: string | null};
+      return {payload: opened.payload, innerSigned: opened.inner_signed === null ? null : fromHex(opened.inner_signed)};
     } finally { kp.secret.fill(0); }
   } catch (e) { throw new IntegrityError("A2A verification or decryption failed",e); }
+}
+
+/** Result of {@link openA2AAttestation}. */
+export interface OpenedA2A {
+  payload: Record<string,unknown>;
+  innerSigned: Uint8Array | null;
+}
+
+/** Signed inner binding of a sealed V2 envelope. */
+export interface A2AInnerBinding {
+  protocol: string; author: string; recipients: string[]; kind: string;
+  context_id: string; prev_id: string | null; created_at: string; payload: Record<string,unknown>;
+}
+
+/** Verify inner bytes that a reader presents: the author signed this plaintext to these recipients. */
+export async function verifyA2AInner(innerSigned: Uint8Array, expectedAuthor: string): Promise<A2AInnerBinding> {
+  if (!expectedAuthor) throw new UserError("a trusted A2A author is required");
+  const wasm = await loadWasm();
+  if (!wasm.verify_a2a_inner) throw new ServerError("A2A WASM bindings unavailable");
+  try { return JSON.parse(wasm.verify_a2a_inner(innerSigned,expectedAuthor)) as A2AInnerBinding; }
+  catch (e) { throw new IntegrityError("A2A inner verification failed",e); }
 }
 
 /** Public verification requires only signed bytes and a trusted author key. */

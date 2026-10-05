@@ -441,7 +441,8 @@ Apache-2.0.
 
 All A2A attestations are signed locally. Use `sealed: { recipients }` on
 `attestA2AMessage`/`attestA2AArtifact`, then `recallA2AContext(context, {sealed:true})`
-and `openA2AAttestation(row, trustedAuthor)` on the recipient client. A recipient
+and `openA2AAttestation(row, trustedAuthor)` on the recipient client. It returns `{payload, innerSigned}`;
+`innerSigned` is the author's signature over the plaintext and recipients. A recipient
 is `{card, trustedCardSigner}`; the card must carry a valid detached EdDSA JWS.
 `verifyA2AAttestation(hex, trustedAuthor)` needs no private key. Optional
 `sealed.chunkSize` seals a completed payload into a verified chunk chain.
