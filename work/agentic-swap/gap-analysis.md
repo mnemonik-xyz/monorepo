@@ -71,7 +71,7 @@ Generic gaps. They go into Mnemonik once and serve every integration
 | M1 | Signed sealed message: a plaintext signature before sealing that binds a caller-chosen protocol tag, the session, the previous message, a nonce and the recipient; the matching open checks and a nonce store. Today a sealed A2A message has no plaintext signature, and replay protection is only content-hash deduplication. | `core/src/codec/a2a/inner.rs`, SDK | S–M |
 | M2 | A WASM and SDK function that verifies a standalone COSE signature. TypeScript can sign generic COSE today, but not verify it. | `core/src/wasm/mod.rs`, SDK | S |
 | M3 | A key-custody `Signer` interface, so an Ed25519 key can stay in an HSM, a KMS or a TEE. Same algorithm and `kid`. | `core/src/identity/` | M |
-| M4 | Key rotation | `core/src/identity/` (no design yet) | M–L |
+| M4 | Key rotation and recipient key discovery | [`work/agent-identity-records/`](../agent-identity-records/) | L |
 
 Swap gaps. They are integration code and live in the Warrant swap
 specification or at the venue. None of them changes `mnemonic-core`:
