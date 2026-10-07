@@ -108,8 +108,13 @@ records with the same payload bytes are one record.
    by rotation (signed by the next key) is final. A revocation by update (signed
    by the current key) is provisional: under rule 5, a rotation from the same
    parent discards it. A thief with only the current key cannot end the identity.
-8. **Expiry.** `valid_until` is at most 90 days after `created_at`. After the
-   head's `valid_until`, the identity resolves to `expired`.
+8. **Expiry.** `valid_until` is at most 90 days after `created_at`. The signer
+   sets `created_at`, so the resolver also bounds it by the record's anchor time
+   (the Irys receipt timestamp): a record whose `created_at` is more than 10
+   minutes after its anchor time is invalid. A head therefore expires at most
+   90 days and 10 minutes after it was anchored, whatever `created_at` claims. A
+   record with no anchor time is not counted. After the head's `valid_until`,
+   the identity resolves to `expired`.
 9. **Gaps.** If `seq n` is missing and a later record is signed by the head key or
    by a key whose hash equals the head `next_key_hash`, the identity resolves to
    `incomplete` with no current key. A discovery source failure or a budget limit
@@ -161,8 +166,13 @@ some time.
   It is mounted outside the bearer-auth layer. No payment.
 - **MCP tool.** `mnemonic_resolve_agent({ id })`: read-only and free, on HTTP and
   stdio. It is added to `ALLOWLIST_TOOLS_CALL_NAMES` (`mcp/src/oauth/mod.rs`).
-  It returns the resolved status, current key, `enc_key`, services and AgentCard.
-  No MCP tool publishes, rotates or revokes.
+  It returns the signed records of the chain, each with its Arweave transaction
+  id and anchor time, and the server's resolved view (status, current key,
+  `enc_key`, services and AgentCard). The resolved view is only a hint: the
+  server is an index, not an authority, and could substitute a key or a card.
+  A caller that seals to the agent or trusts its key verifies the records
+  itself (SDK `resolveAgent`, CLI `show`). An MCP client without a verifier
+  treats the result as unverified. No MCP tool publishes, rotates or revokes.
 - **Local verification.** The SDK and CLI verify every chain with the same rules,
   whatever the source. A caller can also query the Irys GraphQL index directly.
   That index is a second party and can also hide records.
