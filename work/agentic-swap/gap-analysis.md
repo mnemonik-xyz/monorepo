@@ -38,7 +38,8 @@ was not available. Statements about Flo.tc come from the draft specification.
 | Parent link check (same context, parent hash, signer is author or reader) | `verify_parent_link` in the same file |
 | Recipient key from a verified AgentCard | `recipient_from_verified_card` |
 | Anchoring of exact bytes, receipts only on the server | `mnemonic_attest_a2a`, `mnemonic_recall_a2a` (`mcp/src/tools.rs` `ingest_a2a`) |
-| TypeScript and WASM entry points | `packages/sdk/src/a2a.ts`; `core/src/wasm/mod.rs` `prepare_a2a`, `open_a2a`, `verify_a2a` |
+| TypeScript and WASM entry points | `packages/sdk/src/a2a.ts`; `core/src/wasm/mod.rs` `prepare_a2a`, `open_a2a`, `verify_a2a`, `verify_a2a_inner` |
+| Sign-encrypt-sign: plaintext signed for named recipients (PR #276) | `A2aInnerBinding`, `verify_a2a_inner`, `open_signed_a2a_full` in `signed.rs`; SDK `openA2AAttestation` returns `innerSigned`, `verifyA2AInner` |
 | A signed judgement over a hash | `VERDICT_V1` (feature `trajectory-experimental`) |
 
 ### 1.2 Warrant (`policy-execution`, available now)
@@ -68,17 +69,17 @@ Generic gaps. They go into Mnemonik once and serve every integration
 
 | # | Gap | Home | Size |
 |---|---|---|---|
-| M1 | Signed sealed message: a plaintext signature before sealing that binds a caller-chosen protocol tag, the session, the previous message, a nonce and the recipient; the matching open checks and a nonce store. Today a sealed A2A message has no plaintext signature, and replay protection is only content-hash deduplication. | `core/src/codec/a2a/inner.rs`, SDK | S–M |
+| M1 | Freshness and protocol profile for sealed A2A V2. Since PR #276, sealed A2A signs the plaintext before encryption (`A2aInnerBinding`, `mnemonic.a2a.inner.v1`). That binding covers author, recipients, kind, `context_id`, `prev_id`, `created_at` and payload. It has no nonce, no expiry and no application protocol tag. The integration puts these three values in the signed payload. Mnemonik adds documentation and one optional SDK check helper. | `docs/sealed-a2a.md`, SDK | S |
 | M2 | A WASM and SDK function that verifies a standalone COSE signature. TypeScript can sign generic COSE today, but not verify it. | `core/src/wasm/mod.rs`, SDK | S |
 | M3 | A key-custody `Signer` interface, so an Ed25519 key can stay in an HSM, a KMS or a TEE. Same algorithm and `kid`. | `core/src/identity/` | M |
-| M4 | Key rotation | `core/src/identity/` (no design yet) | M–L |
+| M4 | Key rotation and recipient key discovery | [`work/agent-identity-records/`](../agent-identity-records/) | L |
 
 Swap gaps. They are integration code and live in the Warrant swap
 specification or at the venue. None of them changes `mnemonic-core`:
 
 | # | Gap | Home | Size |
 |---|---|---|---|
-| W1 | Negotiation message kinds RFQ, QUOTE, COUNTER, ACCEPT, REJECT, EXPIRE, carried as the `body` of an M1 message | Warrant `swap-core` | S |
+| W1 | Negotiation message kinds RFQ, QUOTE, COUNTER, ACCEPT, REJECT, EXPIRE, carried in the signed payload of a sealed A2A V2 message (profile M1) | Warrant `swap-core` | S |
 | W2 | Swap intent with `intent_id = blake3(JCS(terms))`; CAIP chain, account and asset ids | Warrant `swap-core` | S |
 | W3 | Transcript state machine and transcript hash | Warrant `swap-core` | M |
 | W4 | Swap rule atoms and facts | Warrant `swap-verified` | M |
@@ -132,8 +133,8 @@ demonstration. It is not a control, because a manipulated agent can skip it.
   domain separator must therefore go inside the signed payload, as the A2A
   binding does with `protocol: "mnemonic.a2a.signed.v1"`.
 - Use JCS for the new objects. `to_canonical_cbor` drops fields that are not in
-  `cbor_field_order`, converts RFC 3339 strings to tags and serves memory
-  artifacts only.
+  `cbor_field_order`, converts RFC 3339 strings to tags and works only
+  with a fixed, registered schema such as `MEMORY_V1`, `SEALED_V1` or `GRANT_V1`.
 - Anchor transcripts and warrants through `mnemonic_attest_a2a` with
   `kind: "artifact"` in the negotiation `context_id`. `/api/ingest-artifact`
   accepts only memory and sealed artifacts. No new ingestion adapter is needed.
@@ -141,8 +142,9 @@ demonstration. It is not a control, because a manipulated agent can skip it.
   has `SignerInterface`, but the A2A path passes the raw secret to WASM
   (`packages/sdk/src/client.ts`). This is gap M3.
 - Identity strings differ: ingestion uses `did:sol:<key>`, A2A `SEALED_V1` uses
-  the bare base58 key. The generic signed sealed message (M1) uses the bare
-  base58 key and compares raw 32-byte keys (tech-spec, "Identity encoding").
+  the bare base58 key. Sealed A2A V2 also uses the bare base58 key for `author`
+  and `recipients` in the inner binding. The code compares these strings. Each
+  grant reader must decode to exactly 32 bytes.
 - Key rotation is not implemented and has no design yet (gap M4). The
   Ed25519-to-EVM key binding (`KEY_BINDING_V1`, `work/dual-key-identity/`) that
   the Warrant swap specification, section 4.3, needs is also still to do.
@@ -151,12 +153,15 @@ demonstration. It is not a control, because a manipulated agent can skip it.
 
 1. The draft says that encrypt-then-sign gives no content non-repudiation. This
    is only partly true. The signed `kc` commits to the per-message key. A party
-   can reveal that key and so prove the plaintext of one message. The inner
-   signature is still useful: it is self-contained and binds the recipient and
-   the nonce.
-2. Sign, encrypt, sign needs no change to `SEALED_V1`. The signed inner message
-   goes into the sealed A2A message as one DataPart, which the existing path
-   seals and signs.
+   can reveal that key and so prove the plaintext of one message. Since PR #276,
+   sealed A2A V2 also signs the plaintext before encryption. A reader can show
+   the inner bytes to a third party, and `verify_a2a_inner` checks them. The
+   inner binding covers the recipients, the context and the previous message. It
+   has no nonce and no expiry. The swap payload carries these values.
+2. Sign, encrypt, sign is available now (PR #276). Sealed A2A V2 signs the
+   plaintext binding, encrypts the signed bytes and signs the ciphertext.
+   `SEALED_V1` did not change. The swap message goes in the A2A payload. It gets
+   no second inner signature.
 3. Warrant needs no zkVM and no on-chain verifier for HTLC swaps.
 4. A daily limit needs a stateful ledger. Warrant has none today.
 5. The draft does not list the chain-level safety checks: SHA-256 on both legs,

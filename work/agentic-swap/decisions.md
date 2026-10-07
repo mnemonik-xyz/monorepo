@@ -67,3 +67,16 @@ Consequences:
 
 Supersedes the scope of the 2026-10-05 entries above where they place swap code
 in core.
+
+---
+
+## 2026-10-05 — PR #276 supersedes `SIGNED_INNER_V1`
+
+Author: claude, after an adversarial review against `main`.
+
+PR #276 added sign-encrypt-sign to sealed A2A (`mnemonic.a2a.signed.v2`,
+`A2aInnerBinding`). `SIGNED_INNER_V1` and `inner.rs` are dropped. Tasks 1 and 2
+are cancelled. Task 4 becomes an optional SDK profile-check helper; tasks 5 and 6
+shrink. The integration carries `protocol`, `nonce` and `expires_at` in the
+signed payload and rejects envelopes without an inner signature. Key rotation
+and recipient discovery (gap M4) move to `work/agent-identity-records/`.
