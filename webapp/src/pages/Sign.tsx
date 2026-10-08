@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Decoder } from "cbor-x";
 import ContentPreview from "../components/ContentPreview";
 import {
@@ -9,7 +9,7 @@ import {
   type KeypairJson,
 } from "../lib/storage";
 import { loadWasm } from "../lib/wasm";
-import { MCP_BASE } from "../lib/api";
+import { MCP_BASE, hostedOperatorBase } from "../lib/api";
 
 /**
  * Sign-approval page (`/sign/:correlationId`).
@@ -30,8 +30,11 @@ import { MCP_BASE } from "../lib/api";
  *   5. On Reject: do not POST — show local "rejected" state. The bundle
  *      ages out server-side at the TTL.
  *
- * MCP backend host: `https://mcp.mnemonik.xyz` per Decision 5. Browser CSP
- * `connect-src` allows this origin.
+ * MCP backend host: the `mcp_base` query parameter names the operator that
+ * parked the bundle (`mcp`, `mcp2`, ...). Each operator keeps its own pending
+ * map, so the page must talk to that one. Without a valid hosted `mcp_base`
+ * the page falls back to `MCP_BASE`. Browser CSP `connect-src` allows
+ * `*.mnemonik.xyz`.
  */
 
 type Status =
@@ -75,6 +78,11 @@ const UUID_RE =
 export default function Sign() {
   const { correlationId } = useParams<{ correlationId: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const mcpBase = useMemo(
+    () => hostedOperatorBase(searchParams.get("mcp_base") ?? "") ?? MCP_BASE,
+    [searchParams],
+  );
 
   const [status, setStatus] = useState<Status>({ kind: "loading" });
   const [now, setNow] = useState<number>(() => Date.now());
@@ -90,6 +98,8 @@ export default function Sign() {
   // We still read JWT opportunistically so the DID display works when the
   // user authenticated to the webapp directly (not through an AI tool).
   const jwt = useMemo(() => readJwt(), []);
+  // The stored JWT belongs to the default operator. Never send it elsewhere.
+  const authJwt = mcpBase === MCP_BASE ? jwt : null;
   const did = useMemo(() => {
     if (!jwt) return null;
     const payload = decodeJwtPayload(jwt);
@@ -124,9 +134,9 @@ export default function Sign() {
     (async () => {
       try {
         const headers: Record<string, string> = { Accept: "application/cbor" };
-        if (jwt) headers.Authorization = `Bearer ${jwt}`;
+        if (authJwt) headers.Authorization = `Bearer ${authJwt}`;
         const res = await fetch(
-          `${MCP_BASE}/api/pending/${encodeURIComponent(correlationId)}`,
+          `${mcpBase}/api/pending/${encodeURIComponent(correlationId)}`,
           { method: "GET", headers },
         );
 
@@ -196,7 +206,7 @@ export default function Sign() {
     return () => {
       cancelled = true;
     };
-  }, [correlationId, jwt, validCorrelation]);
+  }, [authJwt, correlationId, mcpBase, validCorrelation]);
 
   // Countdown tick — recompute every second based on wall-clock.
   useEffect(() => {
@@ -236,8 +246,8 @@ export default function Sign() {
       const cbHeaders: Record<string, string> = {
         "Content-Type": "application/json",
       };
-      if (jwt) cbHeaders.Authorization = `Bearer ${jwt}`;
-      const res = await fetch(`${MCP_BASE}/api/sign-callback`, {
+      if (authJwt) cbHeaders.Authorization = `Bearer ${authJwt}`;
+      const res = await fetch(`${mcpBase}/api/sign-callback`, {
         method: "POST",
         headers: cbHeaders,
         body: JSON.stringify({
@@ -297,7 +307,7 @@ export default function Sign() {
     } catch (e) {
       setStatus({ kind: "error", message: formatError(e) });
     }
-  }, [correlationId, jwt, status]);
+  }, [authJwt, correlationId, mcpBase, status]);
 
   const handleReject = () => {
     setStatus({ kind: "rejected" });

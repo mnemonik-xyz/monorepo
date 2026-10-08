@@ -294,7 +294,7 @@ bundle for you to sign:
 {
   "status": "awaiting_signature",
   "correlation_id": "<uuid>",
-  "approve_url": "https://mnemonik.xyz/approve?...",
+  "approve_url": "https://www.mnemonik.xyz/sign/<uuid>?mcp_base=<server origin>",
   "content_hash": "<blake3 hex>",
   "expires_in": 300
 }
@@ -304,6 +304,10 @@ Complete it one of two ways:
 
 1. **Browser** — open `approve_url`, approve, then poll
    [`mnemonic_check_pending`](#mnemonic_check_pending) with the `correlation_id`.
+   The `mcp_base` parameter names the server that holds the bundle. Each
+   hosted server (for example `mcp` and `mcp2`) keeps its own pending
+   bundles. The sign page accepts only `mnemonik.xyz` hosts and loopback
+   development servers.
 2. **Headless** — sign the canonical-CBOR bundle locally with your Ed25519 key
    and `POST {correlation_id, signed}` to `/api/sign-callback`, then call
    `mnemonic_check_pending`. The SDK's `MnemonicClient.signMemory()` does this

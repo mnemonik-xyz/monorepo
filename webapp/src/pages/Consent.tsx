@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { MCP_BASE } from "../lib/api";
+import { MCP_BASE, normalizeMcpBase } from "../lib/api";
 import { loadWasm } from "../lib/wasm";
 import { readIdentity } from "../lib/storage";
 
@@ -44,23 +44,6 @@ function base64ToBytes(b64: string): Uint8Array {
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
-}
-
-function normalizeMcpBase(raw: string): string | null {
-  if (!raw) return null;
-  try {
-    const url = new URL(raw);
-    const isHttps = url.protocol === "https:";
-    const isLocalHttp =
-      url.protocol === "http:" &&
-      (url.hostname === "localhost" || url.hostname === "127.0.0.1");
-    if (!isHttps && !isLocalHttp) return null;
-    if (url.username || url.password) return null;
-    if (url.pathname !== "/" || url.search || url.hash) return null;
-    return url.origin;
-  } catch {
-    return null;
-  }
 }
 
 export default function Consent() {
