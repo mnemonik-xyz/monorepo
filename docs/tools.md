@@ -456,6 +456,18 @@ This legacy tool returns a browser approval URL using `memory_hash` and `reader`
 Its `awaiting_signature` response is only a UI handoff, not evidence that a grant
 was signed, persisted or delivered. It does not establish a complete sharing flow.
 
+The `approve_url` is an absolute URL:
+
+```text
+https://www.mnemonik.xyz/grant/approve?correlation_id=<uuid>&memory_hash=<hash>&reader=<reader>&owner=<owner>&mcp_base=<server origin>
+```
+
+The server percent-encodes every parameter. The `mcp_base` parameter names the
+server that created the request. Each hosted server (for example `mcp` and
+`mcp2`) keeps its own pending state. The approval page accepts only
+`mnemonik.xyz` hosts and loopback development servers. For other values, it
+uses the default hosted server.
+
 New hosted `POST /api/grants` writes and SDK `share` are retired in the current
 source migration. Existing grant reads and withdrawal remain available. Retain
 and distribute signed grants client-side, or use sealed A2A recipient grants.

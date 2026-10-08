@@ -2615,7 +2615,8 @@ async fn handle_tool_call(
             // reads this to render the signing page; the client polls via
             // mnemonic_check_pending (re-using the same correlation_id semantics).
             let correlation_id = uuid::Uuid::new_v4().to_string();
-            let approve_url = format!("/approve-grant?correlation_id={correlation_id}&memory_hash={memory_hash}&reader={reader}&owner={sub}");
+            let approve_url =
+                crate::oauth::grant_approve_url(&correlation_id, memory_hash, reader, sub);
             serde_json::json!({
                 "status": "awaiting_signature",
                 "correlation_id": correlation_id,

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import GrantApprove from "./GrantApprove";
+import { MCP_BASE } from "../lib/api";
 
 vi.mock("../lib/wasm", () => ({
   loadWasm: vi.fn(async () => ({
@@ -130,6 +131,41 @@ describe("GrantApprove page", () => {
     expect(
       screen.getByText(/Missing `memory_hash` or `reader`/i),
     ).toBeInTheDocument();
+  });
+
+  async function confirmWithMcpBase(mcpBase: string): Promise<string> {
+    const fetchMock = vi.fn(async () =>
+      new Response(new Uint8Array([1, 2, 3]), {
+        status: 200,
+        headers: { "content-type": "application/cbor" },
+      }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const user = userEvent.setup();
+    const url =
+      `/grant/approve?correlation_id=c1&memory_hash=${VALID_HASH}` +
+      `&reader=${encodeURIComponent(READER_DID)}&owner=did%3Asol%3AO` +
+      `&mcp_base=${encodeURIComponent(mcpBase)}`;
+    render(
+      <MemoryRouter initialEntries={[url]}>
+        <GrantApprove />
+      </MemoryRouter>,
+    );
+    await user.click(await screen.findByTestId("grant-proceed"));
+    await user.click(await screen.findByTestId("grant-confirm"));
+    await screen.findByTestId("grant-error", {}, { timeout: 3000 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    return String((fetchMock.mock.calls[0] as unknown[])[0]);
+  }
+
+  it("uses_the_operator_named_by_mcp_base", async () => {
+    const fetched = await confirmWithMcpBase("https://mcp2.mnemonik.xyz");
+    expect(fetched).toBe(`https://mcp2.mnemonik.xyz/api/sealed/${VALID_HASH}`);
+  });
+
+  it("ignores_mcp_base_outside_hosted_operators", async () => {
+    const fetched = await confirmWithMcpBase("https://evil.example");
+    expect(fetched).toBe(`${MCP_BASE}/api/sealed/${VALID_HASH}`);
   });
 
   it("shows_no_identity_state_when_no_keypair", async () => {

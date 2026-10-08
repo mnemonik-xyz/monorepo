@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { readIdentity } from "../lib/storage";
 import { loadWasm } from "../lib/wasm";
-import { MCP_BASE } from "../lib/api";
+import { MCP_BASE, hostedOperatorBase } from "../lib/api";
 
 /**
  * Grant approve page (`/grant/approve`).
@@ -13,11 +13,17 @@ import { MCP_BASE } from "../lib/api";
  *   1. The MCP server calls `mnemonic_share {memory_hash, reader}`.
  *   2. Server returns `{status: "awaiting_signature", approve_url}`.
  *   3. The AI tool redirects the user's browser here with:
- *      ?memory_hash=<hash>&reader=<did_or_key>&grant_token=<token>
+ *      ?correlation_id=<id>&memory_hash=<hash>&reader=<did_or_key>
+ *      &owner=<did>&mcp_base=<server origin>[&grant_token=<token>]
  *   4. This page fetches the sealed memory bytes from `/api/sealed/<hash>`.
  *   5. In the browser: unwrap K from the author's own wrap, re-wrap to reader.
  *   6. POST the signed GRANT_V1 CBOR to `/api/grants`.
  *   7. The server never receives K — only the HPKE-wrapped K for the reader.
+ *
+ * MCP backend host: the `mcp_base` query parameter names the operator that
+ * created the pending grant (`mcp`, `mcp2`, ...). Each operator keeps its own
+ * pending state, so the page must talk to that one. Only `mnemonik.xyz` hosts
+ * and loopback are accepted; otherwise the page falls back to `MCP_BASE`.
  *
  * Security: same as ShareDialog (§8.4). The no-revocation warning (§5.5) is
  * shown before the user confirms.
@@ -37,6 +43,10 @@ export default function GrantApprove() {
   const memoryHash = params.get("memory_hash") ?? "";
   const reader = params.get("reader") ?? "";
   const grantToken = params.get("grant_token") ?? "";
+  const mcpBase = useMemo(
+    () => hostedOperatorBase(params.get("mcp_base") ?? "") ?? MCP_BASE,
+    [params],
+  );
 
   const identity = useMemo(() => readIdentity(), []);
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
@@ -73,7 +83,7 @@ export default function GrantApprove() {
     try {
       // 1. Fetch the sealed memory bytes from the server.
       const res = await fetch(
-        `${MCP_BASE}/api/sealed/${encodeURIComponent(hash)}`,
+        `${mcpBase}/api/sealed/${encodeURIComponent(hash)}`,
         {
           method: "GET",
           headers: { Accept: "application/cbor" },
@@ -120,7 +130,7 @@ export default function GrantApprove() {
       };
       if (token) grantHeaders["X-Grant-Token"] = token;
 
-      const grantRes = await fetch(`${MCP_BASE}/api/grants`, {
+      const grantRes = await fetch(`${mcpBase}/api/grants`, {
         method: "POST",
         headers: grantHeaders,
         body: grantCbor,
@@ -140,7 +150,7 @@ export default function GrantApprove() {
         message: e instanceof Error ? e.message : String(e),
       });
     }
-  }, [phase, identity]);
+  }, [phase, identity, mcpBase]);
 
   const handleReject = useCallback(() => {
     setPhase({

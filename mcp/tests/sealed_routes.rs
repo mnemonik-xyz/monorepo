@@ -314,9 +314,22 @@ async fn mnemonic_share_returns_awaiting_signature() {
         "awaiting_signature",
         "mnemonic_share must return status=awaiting_signature: {result}"
     );
+    // An AI client cannot open a relative path. The URL must be absolute,
+    // name the existing webapp route on `www`, and carry this server's origin.
+    let approve_url = result["approve_url"]
+        .as_str()
+        .unwrap_or_else(|| panic!("mnemonic_share must include approve_url: {result}"));
     assert!(
-        result["approve_url"].as_str().is_some(),
-        "mnemonic_share must include approve_url: {result}"
+        approve_url.starts_with("https://www.mnemonik.xyz/grant/approve?correlation_id="),
+        "approve_url must be an absolute www URL: {approve_url}"
+    );
+    assert!(
+        approve_url.contains("&reader=did%3Asol%3AReaderPubkey123&"),
+        "reader must be percent-encoded: {approve_url}"
+    );
+    assert!(
+        approve_url.contains(&format!("&owner={owner_pubkey}&mcp_base=http")),
+        "approve_url must name the owner and mcp_base: {approve_url}"
     );
     assert!(
         result["correlation_id"].as_str().is_some(),

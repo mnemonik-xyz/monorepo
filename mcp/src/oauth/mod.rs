@@ -399,6 +399,40 @@ pub fn sign_approve_url(correlation_id: &str) -> String {
     )
 }
 
+/// Webapp grant-approval page (route `/grant/approve`). `mnemonic_share`
+/// returns this URL with the grant parameters and `mcp_base`, so the page
+/// talks to the operator that created the pending grant. Uses `www` for the
+/// same reason as [`WEBAPP_SIGN_URL`].
+pub const WEBAPP_GRANT_URL: &str = "https://www.mnemonik.xyz/grant/approve";
+
+/// The grant-approval URL for a `mnemonic_share` request, naming this
+/// server's origin. Every parameter is percent-encoded.
+pub fn grant_approve_url(
+    correlation_id: &str,
+    memory_hash: &str,
+    reader: &str,
+    owner: &str,
+) -> String {
+    grant_approve_url_for_origin(correlation_id, memory_hash, reader, owner, server_origin())
+}
+
+fn grant_approve_url_for_origin(
+    correlation_id: &str,
+    memory_hash: &str,
+    reader: &str,
+    owner: &str,
+    origin: &str,
+) -> String {
+    format!(
+        "{WEBAPP_GRANT_URL}?correlation_id={}&memory_hash={}&reader={}&owner={}&mcp_base={}",
+        urlencoding_encode(correlation_id),
+        urlencoding_encode(memory_hash),
+        urlencoding_encode(reader),
+        urlencoding_encode(owner),
+        urlencoding_encode(origin)
+    )
+}
+
 /// JWT claim set per Decision 11.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
@@ -4578,6 +4612,36 @@ mod tests {
         assert_eq!(encoded_origin, urlencoding_encode(server_origin()));
         assert!(encoded_origin.starts_with("http"));
         assert!(!encoded_origin.contains('/') && !encoded_origin.contains(':'));
+    }
+
+    #[test]
+    fn grant_approve_url_names_www_and_this_server() {
+        let url = grant_approve_url("c1", "abc", "did:sol:R", "did:sol:O");
+        assert!(url.starts_with("https://www.mnemonik.xyz/grant/approve?correlation_id=c1&"));
+        let encoded_origin = url.split_once("&mcp_base=").unwrap().1;
+        assert_eq!(encoded_origin, urlencoding_encode(server_origin()));
+    }
+
+    #[test]
+    fn grant_approve_url_encodes_every_parameter() {
+        // Reader and hash come from the tool call. A raw `&`, `=` or `#`
+        // must not add or replace query parameters such as `mcp_base`.
+        let url = grant_approve_url_for_origin(
+            "id 1",
+            "h#x",
+            "did:sol:R&mcp_base=https://evil.example",
+            "o=1",
+            "https://mcp2.mnemonik.xyz",
+        );
+        assert_eq!(
+            url,
+            "https://www.mnemonik.xyz/grant/approve?correlation_id=id%201\
+             &memory_hash=h%23x\
+             &reader=did%3Asol%3AR%26mcp_base%3Dhttps%3A%2F%2Fevil.example\
+             &owner=o%3D1\
+             &mcp_base=https%3A%2F%2Fmcp2.mnemonik.xyz"
+        );
+        assert_eq!(url.matches("&mcp_base=").count(), 1);
     }
 
     #[test]
