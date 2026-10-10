@@ -76,7 +76,7 @@ const report = await client.restoreA2AContext(contextId, {
 const localRows = await client.recallA2AContext(contextId, {mode: "local"});
 ```
 
-Configure `a2aGatewayUrl`, `a2aIndexUrl`, and `a2aIndexFlavour` separately.
+Configure `a2aGatewayUrl` (default `https://arweave.net`) and `a2aIndexUrl` (default `https://arweave.net/graphql`) separately.
 The external index is an unsigned discovery hint; signatures establish trust.
 Requests carry no MCP JWT. Known-locator import works before index visibility.
 Discovery retains verified forks and reports budgets, errors and missing parents.
@@ -193,7 +193,8 @@ publishing this draft. Review against the merged recovery specification.
 ## Replaceable discovery sources
 
 Available now in the SDK: pass `discoverySource` to `restoreA2AContext` to select an index adapter.
-`ArweaveDiscoverySource` queries standard Arweave GraphQL, for example `https://arweave.net/graphql`.
+`ArweaveDiscoverySource(endpoint, request?)` queries standard Arweave GraphQL, for example `https://arweave.net/graphql`.
+It always sorts results by block height, oldest first (`sort: HEIGHT_ASC`).
 Custom adapters implement `DiscoverySource` and return candidate locators with optional public metadata.
 The client verifies original bytes against the caller's independently trusted authors.
 An adapter cannot expand that trusted set.
@@ -212,7 +213,7 @@ const report = await client.restoreA2AContext(contextId, {
 `report.source` records source identity, status, page count, candidate count, and any continuation cursor.
 Statuses distinguish exhausted scans, budgets, unavailable sources, malformed responses, cancellation, and disabled discovery.
 Continuation checkpoints bind the context, authors, source identity, and supported backends.
-Changing an endpoint or index flavour requires a fresh scan.
+Changing an endpoint requires a fresh scan.
 Previously verified local entries remain available during partial scans or source replacement.
 
 Pass `discoverySource: false` and explicit `parentLocators` to recover known artifacts without an index.
