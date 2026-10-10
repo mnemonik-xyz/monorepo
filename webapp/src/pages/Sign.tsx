@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { DeliveryStatus } from "../components/DeliveryStatus";
+import { isArweaveId } from "../lib/delivery";
 import { Decoder } from "cbor-x";
 import ContentPreview from "../components/ContentPreview";
 import {
@@ -423,7 +424,15 @@ export default function Sign() {
               </div>
             )}
 
-            {status.arweaveTx && <DeliveryStatus arweaveTx={status.arweaveTx} />}
+            {status.arweaveTx && isArweaveId(status.arweaveTx) ? (
+              <DeliveryStatus arweaveTx={status.arweaveTx} />
+            ) : (
+              status.arweaveTx && (
+                <div className="text-xs" data-testid="sign-success-local">
+                  Stored by this operator only; it is not delivered to Arweave.
+                </div>
+              )
+            )}
           </div>
         )}
 

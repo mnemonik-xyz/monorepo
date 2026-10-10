@@ -23,4 +23,10 @@ describe("index.html CSP", () => {
     // Additional operators (mcp2, ...) are subdomains; no rebuild per server.
     expect(allowed).toContain("https://*.mnemonik.xyz");
   });
+
+  it("allows the post-sign delivery status checks (Turbo status, Arweave GraphQL)", () => {
+    const allowed = connectSrc(indexHtml);
+    expect(allowed).toContain("https://upload.ardrive.io");
+    expect(allowed).toContain("https://arweave.net");
+  });
 });

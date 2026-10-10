@@ -46,6 +46,14 @@ describe("DeliveryStatus", () => {
     expect(check.mock.calls.length).toBe(calls);
   });
 
+  it("does not render or poll for synthetic local ids", async () => {
+    const check = vi.fn(async (): Promise<Delivery> => ({ stage: "unknown", readUrl: null }));
+    const { container } = render(<DeliveryStatus arweaveTx="local:abc" check={check} pollMs={5} />);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(check).not.toHaveBeenCalled();
+    expect(container).toBeEmptyDOMElement();
+  });
+
   it("never moves back to an earlier stage after a failed check", async () => {
     const answers: Delivery[] = [
       { stage: "bundled", readUrl: `https://turbo-gateway.com/${ID}` },

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   checkDelivery,
+  isArweaveId,
   type DeliveryStage,
   type DeliveryStatus as Delivery,
 } from "../lib/delivery";
@@ -45,6 +46,8 @@ export function DeliveryStatus({ arweaveTx, check = checkDelivery, pollMs = DELI
   const [status, setStatus] = useState<Delivery | null>(null);
 
   useEffect(() => {
+    // Synthetic ids (for example `local:<id>`) are never delivered to Arweave.
+    if (!isArweaveId(arweaveTx)) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const started = Date.now();
@@ -67,6 +70,7 @@ export function DeliveryStatus({ arweaveTx, check = checkDelivery, pollMs = DELI
   }, [arweaveTx, check, pollMs]);
 
   const reached = status ? ORDER[status.stage] : -1;
+  if (!isArweaveId(arweaveTx)) return null;
 
   return (
     <div className="space-y-2" data-testid="delivery-status" aria-live="polite">
