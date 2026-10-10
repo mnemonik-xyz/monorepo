@@ -43,7 +43,7 @@ The current Universal Paywall stake rail:
   integration release.
 
 Those properties are useful for an MVP streaming meter but insufficient for a
-service that incurs Irys and Solana costs for each accepted operation.
+service that incurs Arweave and Solana costs for each accepted operation.
 
 ## Architecture
 
@@ -62,7 +62,7 @@ Universal Paywall HTTP API
         ├── exact x402 facilitator ── settle one payment
         └── stake facilitator ─────── reserve + batch settlement
 
-Mnemonic MCP ── operator-funded relay ── Irys + Solana Memo
+Mnemonic MCP ── operator-funded relay ── ArDrive Turbo (Arweave) + Solana Memo
 ```
 
 The payment provider never receives the artifact plaintext. It receives an
@@ -326,7 +326,7 @@ charged.
 2. Productize one-time standard x402 in Universal Paywall.
 3. Implement durable, idempotent exact-payment status and receipts.
 4. Integrate exact payment into Mnemonic behind a staging feature flag.
-5. Complete real-wallet tests and the full Irys/Solana delivery loop.
+5. Complete real-wallet tests and the full Arweave/Solana delivery loop.
 
 ### Phase 2 — frictionless client surfaces
 
@@ -385,7 +385,7 @@ reconciliation, recovery, and refund gates pass. `local` remains free throughout
       metadata.
 - [ ] Staging tests cover wallet rejection, network switch, insufficient USDC,
       quote expiry, duplicate callbacks, concurrent requests, facilitator crash,
-      RPC uncertainty, Irys failure, Solana failure, verification failure, resume,
+      RPC uncertainty, Turbo upload failure, Solana failure, verification failure, resume,
       revoke, release, and refund/credit.
 - [ ] Production dashboards alert on stuck reservations, unsettled exact
       payments, settlement lag, reconciliation mismatch, and facilitator gas.
@@ -394,7 +394,7 @@ reconciliation, recovery, and refund gates pass. `local` remains free throughout
 
 - Universal Paywall does not sign Mnemonic artifacts.
 - Mnemonic does not custody user USDC or private wallet keys.
-- The integration does not make Irys or Solana writes client-submitted.
+- The integration does not make Arweave or Solana writes client-submitted.
 - The recurring rail does not permit unlimited or non-expiring policies.
 - Payment state is not used as the source of truth for anchored-memory recall.
 

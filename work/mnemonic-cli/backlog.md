@@ -122,10 +122,10 @@ Flip `STORAGE_MODE=local` → `STORAGE_MODE=full` (Arweave + Solana anchoring) A
 - Both surfaces touch the CLI: new `mnemonic balance`, `mnemonic top-up`, low-balance warnings; new `verify` output showing real `arweave_tx` + `solana_tx`.
 
 **Approximate scope:**
-- Server config flip + funding: ~½ dev-day + $50 capital outlay (SOL + Irys credits).
+- Server config flip + funding: ~½ dev-day + $50 capital outlay (SOL + bundler credits).
 - Async write path (write to SQLite immediately, anchor in background): ~1 dev-day.
 - `PAYMENT_MODE=balance` user surface: top-up flow on webapp, balance display, refund-on-error UX, CLI commands: ~3–5 dev-days.
-- Operational monitoring: SOL/Irys balance alerts, graceful degradation, treasury management policy.
+- Operational monitoring: SOL and bundler credit balance alerts, graceful degradation, treasury management policy.
 
 **Open economic questions (need proper deliberation before flipping):**
 - Pricing surface — per-call cost surfaced to user vs flat-rate tier?

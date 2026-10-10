@@ -68,7 +68,7 @@ It must not be confused with the older unsigned plain stdio-local path.
 | Choice | Current source behavior | Boundary |
 |---|---|---|
 | Local sealed memory | CLI stores original ciphertext; SDK can prepare without HTTP | Retain keys and artifacts. SDK session cache alone is not a backup |
-| Externally delivered sealed memory | Original encrypted signed bytes go to configured Arweave/Irys storage | Metadata remains visible; availability depends on storage |
+| Externally delivered sealed memory | Original encrypted signed bytes go to Arweave through ArDrive Turbo | Metadata remains visible; availability depends on storage |
 | Public memory | Explicit public consent permits plaintext publication | Anyone who obtains the bytes can read them |
 
 The CLI defaults to sealed local writes.
@@ -82,6 +82,8 @@ Explicit hosted local writes are rejected.
 ## 6. External delivery and time
 
 Current shared ingestion uploads original signed bytes and verifies exact read-back.
+The operator uploads through ArDrive Turbo, which bundles data items into Arweave transactions.
+An upload counts as permanent only when an Arweave gateway reports it in a block.
 It does not require a new Solana memo.
 Historical Solana memo verification and discovery remain available.
 

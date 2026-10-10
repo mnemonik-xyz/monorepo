@@ -435,7 +435,7 @@ come from your trust configuration. See [Sealed A2A](../../docs/sealed-a2a.md).
 
 ### A2A recovery (draft)
 
-A2A artifacts are signed on the client and stored externally on Arweave/Irys.
+A2A artifacts are signed on the client and stored externally on Arweave.
 Hosted MCP returns metadata receipts; clients fetch, verify and decrypt locally.
 SDK `restoreA2AContext(context, {expectedAuthors, heads})` needs no MCP login.
 Configure payload gateway/index URL and index flavour separately. Completeness

@@ -109,8 +109,8 @@
     {
       "severity": "nit",
       "location": "core/src/arweave/mod.rs:347-357",
-      "issue": "`test_network_timeout` asserts `client.write_bytes(b\"data\", ...)` returns `Err` but the comment admits it's exercising the arlocal path (is_local=true, bypass=false), not the Irys path — i.e. the test is named for a scenario it doesn't actually hit. The failure it detects is the arlocal POST timing out, not the Irys upload timing out.",
-      "suggestion": "Rename to `test_arlocal_unreachable_returns_err` or add a second test using `new_for_test` (bypass_local_routing=true) with a non-listening port to actually hit the Irys path and assert the expected error message. Current test is correct as a smoke-test of error propagation; only the name/intent comment misleads."
+      "issue": "`test_network_timeout` asserts `client.write_bytes(b\"data\", ...)` returns `Err` but the comment admits it's exercising the arlocal path (is_local=true, bypass=false), not the previous bundler path — i.e. the test is named for a scenario it doesn't actually hit. The failure it detects is the arlocal POST timing out, not the previous bundler upload timing out.",
+      "suggestion": "Rename to `test_arlocal_unreachable_returns_err` or add a second test using `new_for_test` (bypass_local_routing=true) with a non-listening port to actually hit the previous bundler path and assert the expected error message. Current test is correct as a smoke-test of error propagation; only the name/intent comment misleads."
     }
   ],
   "strengths": [

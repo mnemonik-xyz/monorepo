@@ -260,7 +260,7 @@ place.
 ## 9. Decisions
 
 **D-1 Arweave default unchanged.**
-The only production-eligible backend on day one is Arweave via Irys. No behaviour
+The only production-eligible backend on day one is Arweave via ArDrive Turbo. No behaviour
 change for any existing deployment.
 
 **D-2 Locator is self-describing.**
@@ -277,7 +277,7 @@ the sole copy of an anchored memory. The config check enforces this at startup.
 
 **D-A1 — BlobStore::put and the Solana keypair.**
 `ArweaveClient::write_item` requires a `&Keypair` to sign the ANS-104 data item
-for Irys. The `BlobStore::put` signature above does not include the keypair because
+for ArDrive Turbo. The `BlobStore::put` signature above does not include the keypair because
 other backends (Filecoin, IPFS pinning) do not sign with a Solana key. Options:
 
 1. Keep `put(bytes, owner)` as-is and have `ArweaveClient` hold the keypair
@@ -296,14 +296,14 @@ Resolution needed before T2.
 
 **D-A2 — Owner tag on Arweave items.**
 `BlobStore::list(owner)` requires the backend to enumerate items by owner. For
-Arweave via Irys this is a GraphQL tag filter. The current `write_item` does not
+Arweave this is a GraphQL tag filter. The current `write_item` does not
 consistently apply an `Owner` tag; it applies `App-Name` and
 `Content-Type`. Adding `("Owner", owner)` to every new upload is the prerequisite
 for `list` to work. Existing items without the tag are reachable via Solana memo
 history (the existing `enumerate_anchored` path), so the gap is only for new
-uploads. The spec assumes this tag will be added in T2. Confirm the Irys GraphQL
+uploads. The spec assumes this tag will be added in T2. Confirm the Arweave GraphQL
 indexer actually indexes custom tags for ANS-104 bundle items (see the enumeration
-caveat in the README — Irys bundles were invisible to gateway GraphQL at one
+caveat in the README — items from the previous bundler were invisible to gateway GraphQL at one
 point).
 
 Resolution needed before T2.

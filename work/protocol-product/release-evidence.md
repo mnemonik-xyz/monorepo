@@ -39,8 +39,8 @@ The command exited **2**, meaning no positive pinned fixture was established.
 
 | Endpoint / filter | Two observations | Interpretation |
 |---|---|---|
-| `https://uploader.irys.xyz/graphql`, App-Name | 24 candidates, no next page | Public inventory was reachable. These are untrusted index hints, not verified Mnemonik artifacts |
-| Same Irys endpoint, App-Name + A2A kind | Zero candidates | No positive A2A discovery/recovery evidence |
+| `https://{previous-bundler-host}/graphql`, App-Name | 24 candidates, no next page | Public inventory was reachable. These are untrusted index hints, not verified Mnemonik artifacts |
+| Same previous-bundler endpoint, App-Name + A2A kind | Zero candidates | No positive A2A discovery/recovery evidence |
 | `https://arweave.net/graphql`, App-Name | Zero candidates | Not an interchangeable positive index for these observations |
 | Same Arweave endpoint, App-Name + A2A kind | Zero candidates | No positive A2A discovery/recovery evidence |
 

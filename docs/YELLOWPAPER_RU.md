@@ -964,7 +964,7 @@ DISTRIBUTION MATRIX EXPANSION
 
 - **Локальная запись (SQLite):** без сети и без сбора. Задержка как бенчмарк **не измерена**.
 - **Якорённая запись (Arweave + Solana):** каждая запись памяти использует собственную загрузку в Arweave и собственный memo в Solana (§5.6). Задержка как бенчмарк **не измерена**. Она зависит от шлюза Arweave и подтверждения в Solana.
-- **Цена:** оператор берёт `max(minimum, (Irys + Solana fee) × SOL/USD × 1.2)`. Минимум по умолчанию — 0.001 USDC (`mcp/src/pricing.rs`, `mcp/src/config.rs`).
+- **Цена:** оператор берёт `max(minimum, (стоимость хранения в USD + Solana fee × SOL/USD) × 1.2)`. Стоимость хранения берётся из ценового API Turbo (`payment.ardrive.io`) и пересчитывается в USD. Минимум по умолчанию — 0.001 USDC (`mcp/src/pricing.rs`, `mcp/src/config.rs`).
 - **Пакетное якорение** (§5.6.1) — это проект. При пакете из $N$ записей памяти стоимость в реестре на одну запись снижалась бы как $1/N$:
 
 $$T_{\text{amortized}} = \frac{T_{\text{batch\_compile}} + T_{\text{ledger}}}{N}$$

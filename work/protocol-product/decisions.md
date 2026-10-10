@@ -105,7 +105,7 @@ No repository, deployment, package publication or code move was performed.
 
 ## 2026-10-02 — Task 9 replaceable discovery
 
-Implemented SDK discovery interfaces and Irys/Arweave adapters with source-bound continuation and explicit disabled-discovery recovery.
+Implemented SDK discovery interfaces and previous-bundler and Arweave adapters with source-bound continuation and explicit disabled-discovery recovery.
 Source diagnostics preserve outage, malformed responses, budgets and cancellation instead of presenting empty success.
 Artifact signatures and pinned authors retain authority; changing the index cannot add trusted identities.
 Root review added credential omission, redirect refusal and deadlines spanning response-body reads.
@@ -118,7 +118,7 @@ Task 9 closes its implementation acceptance. Live-provider claims remain gated b
 ## 2026-10-02 — Task 4 recovery and authenticated backup
 
 Implemented source diagnostics with retained partial pages and explicit scan budgets.
-The local restore command now reports incomplete discovery and uses the correct Irys owner filter.
+The local restore command now reports incomplete discovery and uses the correct owner filter for the previous bundler.
 Added native verified-kind recovery, exact-envelope retention, complete plaintext and structured unsupported/key errors.
 SDK checkpoints authenticate scope, identity, heads and locators; portable backups encrypt explicit caller-owned key material.
 
@@ -195,7 +195,7 @@ Clean isolated webapp install/build and 16 sealed-view tests passed; isolated Do
 Pinned published WASM still lacks the sealed opener; the page reports unsupported crypto rather than bypassing checks.
 Cloudflare dashboard logs were not available, so its exact build failure cause is not inferred from the GitHub workflow failures.
 
-Live read-only observations found 24 Irys App-Name candidates but zero A2A candidates; the Arweave index returned zero for both filters.
+Live read-only observations found 24 App-Name candidates through the previous bundler but zero A2A candidates; the Arweave index returned zero for both filters.
 The [release-evidence record](release-evidence.md) preserves endpoints, timestamps, scan bounds and the JSON observation record.
 Exit 2 from the probe explicitly means no positive pinned A2A fixture was established.
 Task 5 and existing A2A acceptance remain in progress. Known synthetic fixture pins, submission time/lag observations and configured live operator evidence are still required.

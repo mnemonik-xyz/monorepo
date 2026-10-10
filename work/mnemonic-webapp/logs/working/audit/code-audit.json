@@ -72,7 +72,7 @@
       "dimension": "code-readability",
       "file": "mcp/src/seed.rs:204-209",
       "title": "CostHint with zeroed fields is a code smell",
-      "description": "The seeder creates a CostHint with irys_lamports=0, sol_price_usdc=0.0, charge_micro_usdc=0 because 'values are ignored in local mode'. This works but couples the seeder to the assumption of local mode. If the storage_mode is ever changed, these zero values could cause silent bugs.",
+      "description": "The seeder creates a CostHint with storage_lamports=0, sol_price_usdc=0.0, charge_micro_usdc=0 because 'values are ignored in local mode'. This works but couples the seeder to the assumption of local mode. If the storage_mode is ever changed, these zero values could cause silent bugs.",
       "recommendation": "Consider adding a CostHint::local_default() constructor or using the pricing engine even in the seeder path to make intent explicit."
     },
     {

@@ -26,7 +26,7 @@ is in the local clone at commit `96aa291`; E2E consumes it through a temporary
 `file:../dappwright` dependency at E2E commit `09073e0`.
 
 This is a local Phase 1 smoke-test milestone. It is not a production-readiness
-claim and it does not validate real Irys or production Solana delivery.
+claim and it does not validate real Arweave or production Solana delivery.
 
 ### Durable-operation progress
 
@@ -108,7 +108,7 @@ verification paths unchanged.
    requirements in `tech-spec.md` are met.
 7. Expand tests: exact concurrency, provider/MCP restart, proof replay,
    wallet rejection, quote expiry, duplicate callback, uncertain settlement,
-   delivery retry, and real Irys/Solana staging delivery.
+   delivery retry, and real Arweave/Solana staging delivery.
 
 ## Exit criteria for Phase 1
 

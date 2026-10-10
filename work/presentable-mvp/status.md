@@ -23,7 +23,7 @@ Read order for a new session: this file → `plan.md` (design + decisions)
 Signing model (owner rule: "MCP never signs memories"):
 - Hosted server: never signs a memory or post. It verifies the user's
   COSE signature (`api.rs` sign-callback: kid == owner) and only signs the
-  *transport*: the Irys/Arweave upload item that wraps the user-signed bytes
+  *transport*: the Arweave upload data item that wraps the user-signed bytes
   and the Solana memo transaction as fee payer. Free quota (C1) must reuse
   this path unchanged.
 - Local stdio binary: runs on the user's machine with the user's own key;

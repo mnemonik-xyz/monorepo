@@ -76,15 +76,15 @@ The most natural concern about integrating Mnemonik into a Hindsight-style memor
 
 ### 5.1 Per-attestation unit cost (April 2026)
 
-A single Mnemonik attestation in full mode = one Solana SPL Memo tx + one Irys/Arweave upload of the COSE_Sign1 bytes.
+A single Mnemonik attestation in full mode = one Solana SPL Memo tx + one Arweave upload of the COSE_Sign1 bytes.
 
 | Component | Cost |
 |---|---|
 | Solana base fee (per signature) | 5,000 lamports ≈ **$0.0003** |
-| Irys upload (~500B–2KB artifact) | ~**$0.00001–$0.0001** |
+| Arweave upload (~500B–2KB artifact) | ~**$0.00001–$0.0001** |
 | **Per-attestation total** | **~$0.0003–$0.0005** |
 
-Compute costs are negligible: Ed25519 signing is microseconds, blake3 is faster than memcpy, and TurboQuant compression already runs in `mnemonic-core`. The real performance driver is Solana RPC round-trips and Irys upload wall-clock — not dollars but milliseconds added to TEMPR's retain pipeline.
+Compute costs are negligible: Ed25519 signing is microseconds, blake3 is faster than memcpy, and TurboQuant compression already runs in `mnemonic-core`. The real performance driver is Solana RPC round-trips and Arweave upload wall-clock — not dollars but milliseconds added to TEMPR's retain pipeline.
 
 ### 5.2 Workload projections (naive "sign everything" integration)
 
@@ -131,7 +131,7 @@ Cuts cost ~5× immediately.
 
 ### 6.4 Async anchor, sync sign
 
-Sign synchronously (microseconds, in-memory), queue the Solana + Irys writes, return immediately to TEMPR. User-visible latency stays at SQLite speed; chain catches up in the background. Mnemonik's storage trait already supports this split.
+Sign synchronously (microseconds, in-memory), queue the Solana + Arweave writes, return immediately to TEMPR. User-visible latency stays at SQLite speed; chain catches up in the background. Mnemonik's storage trait already supports this split.
 
 ### 6.5 x402 cost passthrough
 
@@ -175,4 +175,4 @@ A `hindsight-mnemonik` adapter that signs every retain, emits append-only opinio
 - Latimer et al., *Hindsight is 20/20: Building Agent Memory that Retains, Recalls, and Reflects*, arXiv:2512.12818, Dec 2025.
 - Mnemonic Protocol Whitepaper v0.1, April 2026.
 - Solana fee structure: 5,000 lamports/signature base fee, [solana.com/docs/core/fees](https://solana.com/docs/core/fees).
-- Irys/Arweave at-cost storage pricing, [irys.xyz](https://irys.xyz/).
+- Arweave storage pricing through ArDrive Turbo, [ardrive.io](https://ardrive.io/).

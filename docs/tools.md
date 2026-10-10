@@ -190,7 +190,7 @@ choose before attempting a write that might be rejected or charged.
 
 **`pricing_status` values:**
 
-- `live`: The last price refresh was successful. The price comes from current Irys and SOL/USDC quotes.
+- `live`: The last price refresh was successful. The price comes from current ArDrive Turbo storage quotes (converted to USD) and SOL/USDC quotes.
 - `fallback`: The server has no current quote, or the last refresh failed. The price is the operator floor or the last good quote. The server still charges this price.
 - `disabled`: The operator does not charge (`PAYMENT_MODE=none`). Both amounts are `0`.
 
@@ -337,6 +337,10 @@ Resolves a deferred-sign `correlation_id`. Poll after `awaiting_signature`.
 { "status": "awaiting_signature" }   // user has not approved yet — keep polling
 { "status": "not_found" }            // never existed, or the 300s window expired
 ```
+
+`solana_explorer_url` links to the Solana explorer. On devnet it adds `?cluster=devnet`.
+`arweave_url` is `<gateway>/<id>` on the primary read gateway (`ARWEAVE_GATEWAY_URL`).
+`anchoring_network` names the Solana network only. Every upload goes to Arweave mainnet.
 
 ---
 
@@ -660,7 +664,7 @@ the author or a named grant recipient. See [Sealed A2A](./sealed-a2a.md) for the
 complete input/output contract, SDK/CLI usage and streaming limits.
 
 
-A2A anchored artifacts live on Arweave/Irys; hosted SQL keeps metadata receipts
+A2A anchored artifacts live on Arweave; hosted SQL keeps metadata receipts
 only. Clients fetch and verify original signatures and open sealed data locally.
 Use `prev_locator: "ar://..."` for external parent verification. Explicit hosted
 `mode: "local"` is rejected; SDK/CLI local mode uses agent-owned storage.

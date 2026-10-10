@@ -44,7 +44,7 @@ Do not present the generic memory-ID cycle test as A2A cryptographic coverage.
 
 Local implementation evidence is extensive:
 
-- Provider-specific Irys/Arweave queries, opaque cursors and credentials omitted from requests.
+- Provider-specific previous-bundler and Arweave queries, opaque cursors and credentials omitted from requests.
 - Independently pinned authors, signed contexts, forged tags and altered signatures.
 - Duplicate locators, competing branches, omission, lag and index replacement.
 - Source errors, malformed pages, stalled index bodies, cancellation and scan limits.

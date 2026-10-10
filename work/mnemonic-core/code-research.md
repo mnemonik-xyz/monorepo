@@ -359,7 +359,7 @@ pub fn verify_artifact(cose_bytes: &[u8], expected_hash: Option<&str>) -> Result
 | `compress.rs` | 4 | Covers: roundtrip, serialize/deserialize, compression ratio, compressed size |
 | `identity.rs` | 4 | Covers: did_sol, did_key, sign/verify, keypair file roundtrip |
 | `db.rs` | 2 | Covers: save+count, semantic search ranking; imports `embed::HashEmbedder` |
-| `arweave.rs` | 0 | No unit tests; arlocal/irys paths require HTTP |
+| `arweave.rs` | 0 | No unit tests; arlocal/bundler paths require HTTP |
 | `solana.rs` | 0 | No unit tests; all methods require live RPC |
 | `lineage.rs` | 9 | Covers: record parents, get children, validate parents (ok/not-found/too-many), cycle detection, no-false-cycle, empty parents, traverse ancestors |
 | `codec/schema.rs` | 4 | Covers: schema lookup, validate artifact, type strings, cbor_field_order coverage |

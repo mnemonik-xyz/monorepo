@@ -12,7 +12,7 @@ Status: planned boundaries. See [gaps.md](gaps.md) for current exceptions.
 | Operator API | Hosted or agent-local process | Auth, validate and coordinate delivery | `mcp/src/mcp.rs`, `api.rs`, `tools.rs`, `sealed_routes.rs` | Managed execution |
 | Payment | Hosted operator | Quote, authorization, settlement and remedy | `mcp/src/payment.rs`, `pricing.rs`, paid-operation modules | Predictable billing |
 | Storage adapter | Operator and client | Upload, fetch and enumerate | `core/src/arweave`, future storage adapters | Supported backend access |
-| External infrastructure | External provider | Store bytes and expose lookup | Arweave, Irys, configured gateways | Provider service |
+| External infrastructure | External provider | Store bytes and expose lookup | Arweave, ArDrive Turbo, configured gateways | Provider service |
 | Recovery | Agent device | Verify graph and rebuild index | `core/src/restore`, `rebuild`, SDK A2A | Migration and continuity |
 | Operations | Operator | Measure availability and handle incidents | Planned reporting | Monitoring and support |
 

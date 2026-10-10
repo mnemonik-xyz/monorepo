@@ -125,14 +125,14 @@ Review details — in JSON files via links. QA report — in logs/working/.
 **Status:** Done
 **Commit:** 54bc461
 **Agent:** main agent
-**Summary:** Moved arweave.rs to core/src/arweave/mod.rs. Added upload_url and bypass_local_routing fields to ArweaveClient so write_irys() targets a configurable URL and tests bypass the is_local() routing to arlocal. Added #[cfg(test)] new_for_test constructor. Wrote 6 httpmock tests: write_success, read_success, write_bytes_success, health_check_success, network_timeout, malformed_json_response. Both write() and write_bytes() routing guards updated independently.
+**Summary:** Moved arweave.rs to core/src/arweave/mod.rs. Added upload_url and bypass_local_routing fields to ArweaveClient so write_bundler() targets a configurable URL and tests bypass the is_local() routing to arlocal. Added #[cfg(test)] new_for_test constructor. Wrote 6 httpmock tests: write_success, read_success, write_bytes_success, health_check_success, network_timeout, malformed_json_response. Both write() and write_bytes() routing guards updated independently.
 **Deviations:** None.
 
 **Verification:**
 - `cargo test -p mnemonic-core -- arweave` -> 6 passed
 - `cargo clippy -p mnemonic-core -- -D warnings` -> clean
 - `cargo build -p mnemonic-mcp` -> success
-- No irys.xyz URLs in test code
+- No {previous-bundler-host} URLs in test code
 
 ## Task 8: Extract solana module + httpmock tests + isolate verify_usdc_transfer
 
@@ -330,7 +330,7 @@ Addressed findings from `code-reviewer-round1.json` (changes-required; 1 major +
 - `cargo bench -p mnemonic-core --no-run` → both bench binaries (decompress, cbor_codec) compiled
 - `grep -n "MockEmbedder" core/src/embed/*.rs` → struct + impl gated with `#[cfg(test)]` at lines 122-146
 - `grep -rn "#\[ignore\]" core/src/ core/tests/` → 0 matches
-- `grep -rn "uploader.irys.xyz\|mainnet.*solana\|api.mainnet-beta" core/` → 2 matches, both in non-test code (production default URL constant + module doc comment)
+- `grep -rn "{previous-bundler-host}\|mainnet.*solana\|api.mainnet-beta" core/` → 2 matches, both in non-test code (production default URL constant + module doc comment)
 
 **Follow-up note for pre-deploy QA (task 16):** No findings are blocking pre-deploy QA. The two non-trivial items to address in a follow-up cycle are TEST-STORAGE-CONTRACT-1 (cast to `&dyn AttestationStore` / `&dyn LineageStore` in storage tests so the trait abstraction provides actual contract guarantees) and TEST-COMPRESS-EDGE-1 (replace the `let _ = result;` discard with a real assertion on the empty/single-element edge cases). Both can be addressed by editing existing test functions; no new test infrastructure required.
 

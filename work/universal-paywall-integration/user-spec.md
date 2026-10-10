@@ -87,7 +87,7 @@ An active allowance removes the per-anchor wallet prompt, but not the explicit
 6. The page shows a single continuous progress flow: **Payment confirmed →
    Storing → Anchoring → Verifying**.
 7. The page returns a receipt with content hash, client signer, amount, network,
-   payment reference, Arweave/Irys ID, Solana transaction, and verification time.
+   payment reference, Arweave ID, Solana transaction, and verification time.
 8. After success, the UI may unobtrusively offer **Avoid wallet prompts next
    time**. It must not create an allowance automatically.
 
@@ -194,6 +194,6 @@ remain available for verification without dominating the journey.
 - Charging for local storage, recall, or verification.
 - Subscriptions or unlimited allowances.
 - Custodial balances or developer API-key credits.
-- Direct client submission of the Irys upload or Solana Memo transaction.
+- Direct client submission of the Arweave upload or Solana Memo transaction.
 - Silent payment by context-compaction or background agents.
 

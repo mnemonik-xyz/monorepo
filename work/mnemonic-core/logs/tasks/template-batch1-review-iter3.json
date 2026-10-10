@@ -24,12 +24,12 @@
         }
       ],
       "focused_checks_verified": [
-        "upload_url field approach: ArweaveClient gains `upload_url: String` field set to 'https://uploader.irys.xyz/upload' in new(), used by write_irys(). new_for_test sets upload_url to '{base_url}/upload'. Correct — no force_irys field.",
+        "upload_url field approach: ArweaveClient gains `upload_url: String` field set to 'https://{previous-bundler-host}/upload' in new(), used by write_bundler(). new_for_test sets upload_url to '{base_url}/upload'. Correct — no force_bundler field.",
         "Write tests mock POST /upload: TDD Anchor (test_write_success, test_write_bytes_success, test_malformed_json_response) and What to do step 5 all specify POST /upload. 'POST /tx is only arlocal path' explicitly noted. Correct.",
         "GET /info for health_check: TDD Anchor line documents 'mock serves GET /info -> 200', Details health_check section shows when.method(GET).path(\"/info\"). Correct.",
         "GET /{tx_id} for read: TDD Anchor documents 'GET /{tx_id} from mock (actual path: no /tx/ prefix, no /data suffix)', Details read() section shows path(format!(\"/{}\", tx_id)). Correct.",
         "POST /upload for write: all three write-path tests (write, write_bytes, malformed) use POST /upload via new_for_test. Correct.",
-        "No hardcoded mainnet URLs in test code: AC and Security constraints section both require Keypair::new() and ban irys.xyz in cfg(test) blocks. Correct."
+        "No hardcoded mainnet URLs in test code: AC and Security constraints section both require Keypair::new() and ban {previous-bundler-host} in cfg(test) blocks. Correct."
       ]
     },
     "14": {
@@ -56,5 +56,5 @@
       ]
     }
   },
-  "summary": "2 approved, 0 need fixes. Task 7: focused checks all pass — upload_url field approach (not force_irys) is correctly specified throughout the task; all three mock paths correct (GET /info, GET /{tx_id}, POST /upload); write tests mock POST /upload not POST /tx. Two minor carry-forward findings remain (reviewer absolute paths, missing cargo build in Automated) but no critical or major issues. Task 14: critical finding from iter-2 is confirmed fixed — Required Skills now points to ~/.claude/skills/security-auditor/SKILL.md (tilde path); wave=12 is correct. One residual minor finding: Reviewers section prose still references 'Audit Wave' label. Both tasks are clear for execution."
+  "summary": "2 approved, 0 need fixes. Task 7: focused checks all pass — upload_url field approach (not force_bundler) is correctly specified throughout the task; all three mock paths correct (GET /info, GET /{tx_id}, POST /upload); write tests mock POST /upload not POST /tx. Two minor carry-forward findings remain (reviewer absolute paths, missing cargo build in Automated) but no critical or major issues. Task 14: critical finding from iter-2 is confirmed fixed — Required Skills now points to ~/.claude/skills/security-auditor/SKILL.md (tilde path); wave=12 is correct. One residual minor finding: Reviewers section prose still references 'Audit Wave' label. Both tasks are clear for execution."
 }

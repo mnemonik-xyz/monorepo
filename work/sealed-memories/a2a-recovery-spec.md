@@ -16,7 +16,7 @@ The operator verifies those bytes and uploads them unchanged. An operator's
 ANS-104 transport signature is not the author's artifact signature.
 
 There are exactly two modes: agent-owned local storage and externally anchored
-Arweave/Irys storage. Hosted local memory storage is not a third mode.
+Arweave storage. Hosted local memory storage is not a third mode.
 
 Hosted MCP SQL may contain utility configuration, OAuth/payment/quota records
 and reconstructible routing receipts. It must not contain A2A payload bytes,
@@ -113,9 +113,9 @@ authors are explicit: a context may contain a recipient-authored continuation.
 Knowing a context ID is not proof that every signer in it is trusted.
 
 Configuration separates payload gateway URL from index endpoint and explicit
-index flavour (Irys or Arweave). Reuse the repository's established schema
-semantics: Irys has node millisecond timestamps and no Arweave `sort`/`block`;
-Arweave has block timestamps. Never equate upload operator address with author.
+index endpoint. The index is standard Arweave GraphQL (for example
+`https://arweave.net/graphql`) with block timestamps.
+The owner filter is the Arweave address: base64url(sha256(public key)). Never equate upload operator address with author.
 Query the app/type/context/Producer tags, paginate with opaque cursors and
 validate every candidate from its fetched signed bytes. Tags, timestamps,
 returned owner and ordering are discovery hints only.
@@ -138,7 +138,7 @@ A receipt directory can accelerate lookup but cannot be the only source.
 External index lag is expected: a just-delivered known locator may work before
 search does. Retry explicitly; an empty page does not prove no artifacts exist.
 
-Current Irys indexing is a remaining provider dependency. This spec replaces
+Current Arweave GraphQL indexing is a remaining provider dependency. This spec replaces
 MCP SQL dependency, not all external availability dependencies. Legacy memo
 readers may remain where already applicable; no new Solana memo writer is added.
 Live endpoint coverage must be measured before claiming production enumeration.

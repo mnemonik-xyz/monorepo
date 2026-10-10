@@ -220,7 +220,7 @@ No general-purpose storage trait implies support for every provider or artifact 
 | Backend | Source support | Boundary |
 |---|---|---|
 | Client local storage/index | Retain original artifacts and rebuild local indexes | Default SDK caches are session-only |
-| Arweave/Irys | Ingestion upload/read-back; separate provider-specific discovery | Availability and index lag are external dependencies |
+| Arweave (ArDrive Turbo upload) | Ingestion upload/read-back from any Arweave gateway; discovery through Arweave GraphQL | Availability and index lag are external dependencies |
 | Configured HTTP object origin | A2A exact-byte migration and destination restore | No deployed service, retention SLA or discovery adapter supplied |
 | Historical Solana memo source | Legacy verification/discovery | No mandatory memo on new shared ingestion |
 | IPFS/Filecoin/other providers | Design examples only | No supported adapter claimed |
@@ -246,6 +246,13 @@ Ledger anchors are selectively applied based on specific operational constraints
 Shared ingestion validates the signed artifact and any external parent before payment or upload.
 It binds a durable operation to the author, original envelope digest, backend and locator.
 It uploads original bytes, fetches the locator, and compares exact bytes before reporting verified delivery.
+The upload goes to ArDrive Turbo (`https://upload.ardrive.io/v1/tx/solana`) as an ANS-104 data item.
+The operator's Ed25519 (Solana) key signs the data item (ANS-104 signature type 2).
+Turbo bundles data items into Arweave transactions. Turbo has no test network, so every upload is permanent on Arweave mainnet.
+Data items up to 105 KiB are free, within a 10 MiB lifetime limit per wallet and per IP address.
+Larger items need Turbo credits in the operator wallet. Without credits, Turbo returns HTTP 402 and the upload fails with a "needs credits" error.
+An upload counts as permanent only when an Arweave gateway reports it in a block (GraphQL `block.height`).
+Reads use any Arweave gateway, with failover across configured gateways.
 Receipt persistence is reported separately from external delivery.
 New writes do not require a Solana memo.
 

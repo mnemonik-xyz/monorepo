@@ -4,20 +4,20 @@ wave: 1
 blocked_by: [live-data-verification]
 ---
 
-# T2: Acceptance gate — Irys superset of memo enumeration
+# T2: Acceptance gate — previous-bundler superset of memo enumeration
 
 Run the live parity check with the environment variables read by `core/examples/enumerate.rs`:
 ```bash
-env -u IRYS_ONLY \
+env -u BUNDLER_ONLY \
   WALLET='<known-production-wallet>' \
-  IRYS_GRAPHQL_URL='https://uploader.irys.xyz/graphql' \
+  BUNDLER_GRAPHQL_URL='https://{previous-bundler-host}/graphql' \
   SOLANA_RPC_URL='<configured-rpc-url>' \
   cargo run -p mnemonic-core --example enumerate
 ```
 
-Irys output must be a superset of memo output for a wallet with known historical anchors.
+The previous bundler's output must be a superset of memo output for a wallet with known historical anchors.
 Record revision, date, redacted endpoint configuration, source counts, missing IDs and process exit status.
-An empty memo set or an Irys-only run does not establish this production gate.
+An empty memo set or an bundler-only run does not establish this production gate.
 Do not publish RPC credentials in evidence.
 
 ## Review — 2026-10-02

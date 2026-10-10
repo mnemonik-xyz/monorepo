@@ -10,7 +10,7 @@ The manifest does not replace any artifact signature.
 
 | Adapter | Fetch | Upload | Discovery | Retention and consistency |
 |---|---|---|---|---|
-| `ArweaveStorageAdapter` | `ar://<43-character-id>` | Explicitly unsupported; use paid ingestion | Separate discovery interface | External Arweave/Irys policy; gateway availability and index lag remain dependencies |
+| `ArweaveStorageAdapter` | `ar://<43-character-id>` | Explicitly unsupported; use paid ingestion | Separate discovery interface | External Arweave policy; gateway availability and index lag remain dependencies |
 | `HttpObjectStorageAdapter` | `blob://<64-lowercase-hex-SHA256>` | Immutable `PUT /objects/<digest>`, then exact read-back | Unsupported | Configured object server policy; no permanence claim |
 
 Both adapters limit each object to 1 MiB and use a configured HTTP(S) origin.

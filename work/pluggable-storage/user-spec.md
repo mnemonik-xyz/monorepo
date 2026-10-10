@@ -2,7 +2,7 @@
 
 ## What changes
 
-Today, every anchored memory goes to Arweave via Irys. That is not configurable —
+Today, every anchored memory goes to Arweave via ArDrive Turbo. That is not configurable —
 the backend is baked in. This feature makes the storage backend a named, swappable
 choice so the protocol is not permanently coupled to a single network.
 
@@ -43,7 +43,7 @@ precisely because it meets a bar that most systems do not:
 | Third-party readable without the operator | A verifier must be able to fetch the artifact without asking us |
 | Enumerable by owner | Restore must be able to list every item an identity ever stored |
 
-Arweave via Irys meets all four today. Filecoin with a paid pinning contract may
+Arweave via ArDrive Turbo meets all four today. Filecoin with a paid pinning contract may
 meet the first two conditionally; its stub is present to hold the interface but is
 not production-eligible until those conditions are documented and tested.
 

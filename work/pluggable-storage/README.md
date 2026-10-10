@@ -52,7 +52,7 @@ or a `{backend, ref}` pair. This is the one real schema change, and it must be a
 existing bare ids are implicitly `ar://`, and must keep resolving.
 
 **2. Enumeration is per backend and is the hard part.** Verified 2026-09-27: our Arweave items
-are invisible to Arweave-schema gateways by tag, because Irys bundles them — see
+are invisible to Arweave-schema gateways by tag, because the previous bundler bundled them — see
 `work/chain-agnostic/` F6. Every backend needs its own answer to "list everything this owner
 stored", and a backend that cannot answer it cannot support restore. A backend that stores bytes
 but cannot enumerate them is a write-only hole.
@@ -71,7 +71,7 @@ A backend is eligible for `anchored` mode only if it provides all four:
 
 Assessed against that bar:
 
-- **Arweave (via Irys)** — eligible. Pay once, permanent. Current default.
+- **Arweave (via ArDrive Turbo)** — eligible. Pay once, permanent. Current default.
 - **Filecoin / IPFS with a paid pinning service** — conditionally eligible. Content-addressed and
   third-party readable, but durability depends on the pin surviving. Needs an explicit statement
   of who pays and what happens when they stop.
@@ -86,7 +86,7 @@ bar comes before the trait.
 ## Scope
 
 - `core/src/blobstore/` — the trait, `Locator` parsing and display, and the eligibility doc.
-- `core/src/arweave/` — implement the trait; keep the concrete client for the Irys specifics.
+- `core/src/arweave/` — implement the trait; keep the concrete client for the ArDrive Turbo specifics.
 - `core/src/storage/sqlite.rs` — locator migration, additive, with bare ids reading as `ar://`.
 - `core/src/restore/` — enumerate through the trait instead of the concrete client.
 - Config — backend selection, and a refusal to start when an ineligible backend is set for

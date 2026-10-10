@@ -1,7 +1,7 @@
 # Client-prepared memory ingestion
 
 This is the implementation boundary for product task 2. It is not a production availability or paid retry
-claim. External delivery tests use a mocked Arweave/Irys gateway; encryption and signing use the real
+claim. External delivery tests use a mocked Arweave gateway; encryption and signing use the real
 WASM/native implementation.
 
 ## Prepare, retain, deliver

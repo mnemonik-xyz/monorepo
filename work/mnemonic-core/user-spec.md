@@ -50,7 +50,7 @@ MCP запускается как раньше. Под капотом `mnemonic-
 ## Риски
 
 - **Риск 1: turboquant import namespace.** `compress.rs` импортирует `turboquant::`, после смены на `turboquant-plus-rs` namespace становится `turboquant_plus_rs::`. Митигация: первый шаг миграции — только смена dep + обновление импортов + `cargo test`. Остальные шаги — после.
-- **Риск 2: Нулевое покрытие arweave.rs и solana.rs.** Митигация: httpmock-тесты добавляются при переносе этих модулей — мокируем Irys и Solana RPC эндпоинты.
+- **Риск 2: Нулевое покрытие arweave.rs и solana.rs.** Митигация: httpmock-тесты добавляются при переносе этих модулей — мокируем прежний бандлер и Solana RPC эндпоинты.
 - **Риск 3: fastembed модель не скачана.** При первом запуске `FastEmbedder::try_new()` скачивает ~22MB модель. Митигация: в CI устанавливать fastembed cache; в тестах использовать `HashEmbedder`-эквивалент или mock. На самом деле HashEmbedder удалён — тесты embed должны или мокировать, или использовать `EMBED_PROVIDER=openai` в CI с заглушкой.
 
 ## Технические решения

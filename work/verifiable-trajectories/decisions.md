@@ -153,7 +153,7 @@ untouched.
 
 **Update — both integration items now landed (2026-06-27, same day):**
 - Canonical `ArweaveStore` (`storage/trajectory_arweave.rs`): tagged ANS-104
-  writes via the existing Irys path (extended `ArweaveClient::write_item` to take
+  writes via the existing bundler upload path (extended `ArweaveClient::write_item` to take
   custom tags) + a blocking GraphQL tag-read implementing `TrajectoryStore`.
   `canonical_cbor` recovered as the COSE payload; metadata from item tags.
   httpmock tests cover the read-chain-and-verify and write-data-item paths.
@@ -205,7 +205,7 @@ from two real client identities, not from the server refusing its own key.
 store + stateless verify"; SqliteStore demoted to optional cache.
 
 **Substrate note (corrects the first cut).** `core/src/arweave/mod.rs` ALREADY
-constructs + signs single ANS-104 data items via Irys (deep-hash path included).
+constructs + signs single ANS-104 data items for the bundler upload (deep-hash path included).
 So the work is an *extension* — single item → multi-item bundle + a GraphQL
 tag-query read path — not a net-new dependency. Likewise the on-chain
 `batch_root` and the bundle manifest root are unified: the bundle's data items

@@ -16,7 +16,7 @@ scope: exact-payment-only
 
 This runbook is for the isolated Base Sepolia staging environment. It is not a
 mainnet launch procedure. Its purpose is to detect and remedy a *settled* exact
-payment whose Arweave/Irys or Solana delivery has not completed.
+payment whose Arweave or Solana delivery has not completed.
 
 ## Safety invariants
 
@@ -39,7 +39,7 @@ payment whose Arweave/Irys or Solana delivery has not completed.
 | EVM settlement key | Paywall operator | SOPS-rendered facilitator `.env`; never CI logs | Base Sepolia RPC reachability and facilitator health |
 | Mnemonic/approval API credentials | Mnemonic operator | SOPS-rendered MCP/approval configuration | Authenticated operation-status request |
 | Solana relay/keypair | Mnemonic operator | SOPS-rendered MCP configuration | relay balance and submitted signature status |
-| Irys funding credentials | Mnemonic operator | SOPS-rendered MCP configuration | funded balance and upload availability |
+| ArDrive Turbo upload identity (operator Ed25519 key) | Mnemonic operator | SOPS-rendered MCP configuration | free-tier allowance or Turbo credit balance, and upload availability |
 | Base Sepolia RPC / USDC / payee | Release owner | non-secret `.env` values, reviewed at deploy | chain id 84532, USDC address, payee binding |
 
 The facilitator deployment workflow must run through the protected
@@ -57,9 +57,11 @@ Before an external E2E or any remediation, verify:
 3. Mnemonic's authenticated operation-status endpoint can read an existing
    operation only with its single-purpose resume capability.
 4. The Solana relay has sufficient devnet/test funds for one bounded retry and
-   Irys has sufficient testnet/devnet upload credit. Do not top up a production
-   account merely to make staging green.
-5. Arweave/Irys retrieval and Solana RPC confirmation succeed independently.
+   the operator wallet has free-tier allowance or Turbo credits for the planned
+   uploads. Turbo has no test network: every staging upload is permanent on
+   Arweave mainnet. Upload only test data. Do not buy credits only to make
+   staging green.
+5. Arweave gateway retrieval and Solana RPC confirmation succeed independently.
 
 The expected redacted monitoring dimensions are:
 
@@ -69,7 +71,7 @@ The expected redacted monitoring dimensions are:
 | Delivery attempt | state, attempt count, retry age | retry age exceeds the configured service objective |
 | Delivery confirmation | stage (`upload`, `solana`, `recall`) | repeated `delivery_retryable` or receipt/recall mismatch |
 | Retry worker | batch size, resumed count, errors | worker is silent while due rows exist |
-| Relay/Irys capacity | network, remaining balance bucket | balance is below the single-retry threshold |
+| Relay/Turbo capacity | network, remaining balance bucket | balance is below the single-retry threshold |
 | Reconciliation | operation state vs provider receipt vs Solana/Arweave ids | any three-way mismatch |
 
 Use opaque ids or one-way hashes in metrics and logs. `operation_id` may go in
@@ -136,7 +138,7 @@ already-settled operation's delivery work.
 
 - Immutable image digests and protected-environment deployment logs.
 - Redacted external E2E record: Base Sepolia receipt, real Solana testnet
-  signature, Irys/Arweave id, recall verification, and one-operation/one-charge
+  signature, Arweave id, recall verification, and one-operation/one-charge
   assertion.
 - Reconciliation samples for normal delivery, ambiguous Solana timeout,
   delivery retry, MCP restart, duplicate callback, quote expiry, and wallet

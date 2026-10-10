@@ -16,7 +16,7 @@ truth, no bulk re-import into the DB).
 `getSignaturesForAddress` over the server wallet; every anchor memo
 (`{"h", "a", "v"}`) yields `(solana_tx, arweave_tx, content_hash,
 block_time)`. This is the PRIMARY source — the gateways never indexed
-the historical Irys-bundled items (D6).
+the historical bundled items (D6).
 
 `core/src/arweave/graphql.rs` — `GraphQlClient::list_anchored`: paginated
 gateway GraphQL query (`first: 100`, cursor loop, `HEIGHT_ASC`) filtered by
@@ -69,7 +69,7 @@ future recovery needs zero payload fetches.
 | --- | --- | --- |
 | `CHAIN_STATS_WALLETS` | `` | comma-separated base58 pubkeys (public only) |
 | `CHAIN_STATS_GRAPHQL_URL` | `https://arweave.net/graphql` | gateway GraphQL |
-| `CHAIN_STATS_GATEWAY_URL` | `https://gateway.irys.xyz` | payload fetches (arweave.net serves HTML placeholders for Irys items — D7) |
+| `CHAIN_STATS_GATEWAY_URL` | `https://{previous-bundler-gateway}` | payload fetches (arweave.net serves HTML placeholders for previous-bundler items — D7) |
 | `CHAIN_STATS_REFRESH_SECS` | `3600` | snapshot refresh (min 60) |
 
 ## Testing
@@ -80,7 +80,7 @@ future recovery needs zero payload fetches.
   pending-block items (pure unit tests).
 - Live verification (2026-07-09, prod wallet `DYVu4Bry…mrG25`): 16
   anchored memories recovered, 3 distinct users, all 16 payloads readable
-  via `gateway.irys.xyz`. Gateways' GraphQL indexed none of them — hence
+  via `{previous-bundler-gateway}`. Gateways' GraphQL indexed none of them — hence
   the Solana-memo enumeration (D6).
 
 ## Known limits

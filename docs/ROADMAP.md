@@ -18,7 +18,7 @@ anchoring is an explicit paid operation.
 - Semantic recall backed by full-precision embeddings in SQLite, with portable
   TurboQuant-compressed embeddings stored in the artifact.
 - Per-request write intent: `local` keeps a memory on the node; `participate`
-  uploads the signed data item through Irys and writes its content commitment
+  uploads the signed data item to Arweave and writes its content commitment
   to a Solana SPL Memo.
 - Public and private memories, recall, verification, recovery of externally
   stored public artifacts, OAuth 2.1 + PKCE, and the hosted HTTP MCP endpoint.
@@ -54,9 +54,9 @@ Remaining work:
 - Expose `mode`, visibility, and payment intent consistently in the SDK, CLI,
   browser extension, and IDE instructions.
 - Remove server-signing language and ambiguous `arweave_tx` terminology from
-  public documentation and responses. Current external data receipts are Irys
-  ANS-104 data-item IDs; their gateway availability must not be presented as
-  proven Arweave L1 permanence.
+  public documentation and responses. Current external data receipts are
+  ANS-104 data-item IDs. Gateway availability alone is not proof of Arweave
+  permanence; an item is permanent only when a gateway reports it in a block.
 - Add cross-client conformance tests proving that identical canonical bytes are
   signed by the client identity and rejected when the JWT subject, signer, or
   callback payload does not match.
@@ -127,7 +127,7 @@ client identity.
 
 Move the hosted service from operator-subsidized anchoring to an explicit paid
 path without making ordinary memory capture fragile or surprising. The server
-continues to relay the Irys upload and Solana Memo from its funded operator
+continues to relay the Arweave upload and Solana Memo from its funded operator
 wallet; the client pays the quoted anchoring service cost in USDC through x402.
 
 [Universal Paywall](https://mnemonik-dev.github.io/universal-paywall-site/) is
@@ -166,7 +166,7 @@ Canonical paid journey:
 5. For one-time x402, the wallet approves exactly this operation. With an active
    allowance, the payment rail atomically reserves the quoted amount after the
    user confirms in Mnemonic; no wallet prompt is required.
-6. MCP uploads the client-signed bytes to Irys, writes the Solana Memo, refetches
+6. MCP uploads the client-signed bytes to Arweave through ArDrive Turbo, writes the Solana Memo, refetches
    and verifies delivery, then commits an allowance reservation if applicable
    and returns a complete receipt.
 7. If delivery fails after payment or reservation, the same payment state
