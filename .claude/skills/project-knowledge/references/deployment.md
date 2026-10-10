@@ -50,7 +50,8 @@ Variables for `mcp/` (set by user):
 | `EMBED_PROVIDER` | `fastembed` | `fastembed`, `openai`, `hash` |
 | `OPENAI_API_KEY` | — | If `EMBED_PROVIDER=openai` |
 | `TURBO_BITS` | `4` | 2, 3, or 4 |
-| `ARWEAVE_URL` | `https://uploader.irys.xyz` | Arweave/Irys endpoint |
+| `ARWEAVE_GATEWAY_URL` | `https://arweave.net` | Primary Arweave read gateway. Old name `ARWEAVE_URL` is still accepted. Uploads always go to ArDrive Turbo |
+| `ANCHORING_NETWORK` | `mainnet` | Solana network for memo anchors (`mainnet` or `devnet`). `devnet` requires `SOLANA_RPC_URL=https://api.devnet.solana.com`. Uploads are always Arweave mainnet |
 | `SOLANA_RPC_URL` | `https://api.mainnet-beta.solana.com` | Solana RPC |
 | `MCP_TRANSPORT` | `http` | `stdio` or `http` |
 | `MCP_HTTP_PORT` | `3000` | HTTP transport port |

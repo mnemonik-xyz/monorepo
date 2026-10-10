@@ -35,7 +35,7 @@ Append-only. Owner decisions, task reports and audit findings go here.
   holds `rusqlite`, `reqwest`, `rsa` and `rand`, none of which `rebuild.rs` touches.
 - **F5.** Solana memo history, not Arweave GraphQL, is the authoritative index.
   `core/src/arweave/recovery.rs:1-17` records a live check on 2026-07-09: 16 memos and 0 GraphQL
-  hits, because gateways never indexed the old Irys-bundled items.
+  hits, because gateways never indexed the old bundled items.
 - **F6.** Adding an optional field is hash-safe. `to_canonical_cbor` writes only present and
   non-null fields from `cbor_field_order` (`core/src/codec/canonical.rs:28`), so an absent field
   contributes no bytes and existing `content_hash` values do not move.
@@ -160,12 +160,12 @@ Arweave-schema gateways. Verified on 2026-09-27 against `arweave-search.goldsky.
 validation error. Do not "simplify" the query; it is correct for its configured endpoint.
 
 **But it finds nothing.** Both gateways returned **zero** edges for
-`tags: [{name: "App-Name", values: ["mnemonic-protocol"]}]`, while the Irys GraphQL endpoint
-returned a full first page of 100 for the same tag filter. So our items live on Irys and are not
+`tags: [{name: "App-Name", values: ["mnemonic-protocol"]}]`, while the previous bundler GraphQL endpoint
+returned a full first page of 100 for the same tag filter. So our items live on the previous bundler and are not
 indexed by Arweave-schema gateways, by tag, today — new items included.
 
 This **confirms** the note in `core/src/arweave/recovery.rs` ("gateways' GraphQL never indexed
-the old Irys-bundled items", 16 memos and 0 GraphQL hits on 2026-07-09) and extends it: the same
+the old bundled items", 16 memos and 0 GraphQL hits on 2026-07-09) and extends it: the same
 holds for current items.
 
 **Consequence.** Solana memo history is currently the ONLY working enumeration source for
@@ -177,8 +177,19 @@ Also noted: `https://arweave.net/graphql` returned a CDN 504 on two separate att
 anything here.
 
 **Open, and a real improvement rather than a guess (Q-3).** Pointing the GraphQL source at the
-Irys endpoint would find our items — but Irys uses a different schema: no `sort` argument, no
+previous bundler endpoint would find our items — but the previous bundler uses a different schema: no `sort` argument, no
 `block` field, and `timestamp` on the node in milliseconds. That is a deliberate change with its
 own migration, not a config tweak, and it would let the memo writer become optional. It needs the
 owner, and it must not be confused with `chain_stats_gateway_url`, which is the payload-fetch
-gateway and correctly points at Irys already.
+gateway and correctly points at the previous bundler already.
+
+## 2026-10-10 — Uploads move to ArDrive Turbo
+
+A live check found that production items uploaded through the previous bundler never
+reached Arweave. The bundler reported no seeding, and arweave.net returned 404 for them.
+A test item uploaded through ArDrive Turbo reached an Arweave block in about 10 minutes.
+It read back byte-exact from arweave.net and ar-io.dev.
+
+Decision (owner): new uploads go through ArDrive Turbo. Discovery and chain stats use
+standard Arweave GraphQL (`https://arweave.net/graphql`). Items uploaded through the
+previous bundler are not migrated. The software cannot read or restore them.

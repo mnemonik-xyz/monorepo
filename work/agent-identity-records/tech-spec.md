@@ -110,7 +110,7 @@ records with the same payload bytes are one record.
    parent discards it. A thief with only the current key cannot end the identity.
 8. **Expiry.** `valid_until` is at most 90 days after `created_at`. The signer
    sets `created_at`, so the resolver also bounds it by the record's anchor time
-   (the Irys receipt timestamp): a record whose `created_at` is more than 10
+   (the ArDrive Turbo receipt timestamp): a record whose `created_at` is more than 10
    minutes after its anchor time is invalid. A head therefore expires at most
    90 days and 10 minutes after it was anchored, whatever `created_at` claims. A
    record with no anchor time is not counted. After the head's `valid_until`,
@@ -160,8 +160,8 @@ some time.
 
 - **Index.** The hosted server keeps a table of authorized records, keyed by
   `(id, seq, payload hash)`. It rebuilds the table from Arweave by the `Agent-Id`
-  tag through the Irys GraphQL endpoint (public Arweave gateways return no items
-  for bundled tags; see `work/DECOUPLING-SEQUENCE.md`).
+  tag through Arweave GraphQL (`https://arweave.net/graphql`). Items count only
+  after a gateway reports them in a block.
 - **Endpoints.** `GET /api/agents/{id}` returns the chain and the resolved status.
   It is mounted outside the bearer-auth layer. No payment.
 - **MCP tool.** `mnemonic_resolve_agent({ id })`: read-only and free, on HTTP and
@@ -174,7 +174,7 @@ some time.
   itself (SDK `resolveAgent`, CLI `show`). An MCP client without a verifier
   treats the result as unverified. No MCP tool publishes, rotates or revokes.
 - **Local verification.** The SDK and CLI verify every chain with the same rules,
-  whatever the source. A caller can also query the Irys GraphQL index directly.
+  whatever the source. A caller can also query the Arweave GraphQL index directly.
   That index is a second party and can also hide records.
 - **Rollback.** A truncated chain still verifies. The SDK therefore keeps the
   highest verified head for each `id` and rejects a chain without that head,

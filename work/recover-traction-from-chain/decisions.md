@@ -40,18 +40,18 @@ secrets store (SOPS planned by the operator) and must never appear in
 Live verification against the production wallet
 `DYVu4Bry3BzGVsR3Hj2iGVT5fNdWFoHw2zRxsdTmrG25` found 16 anchor memos
 (2026-05-02 … 2026-05-20) but ZERO GraphQL hits on arweave.net and
-Goldsky — even by exact id. The historical Irys-bundled items were never
+Goldsky — even by exact id. The historical bundled items were never
 indexed by the gateways. `SolanaClient::list_memo_anchors`
 (`getSignaturesForAddress` + memo parse) now feeds `snapshot_chain`,
 unioned with GraphQL by `arweave_tx`. Recovered live: 16 anchored
 memories, 3 distinct users, all 16 payloads readable.
 
-## 2026-07-09 — D7: payload gateway defaults to gateway.irys.xyz
+## 2026-07-09 — D7: payload gateway defaults to {previous-bundler-gateway}
 
 arweave.net returns an HTML placeholder page with HTTP 200 for
-Irys-bundled items it never indexed — a silent-corruption trap (COSE
-decode fails, producer counts as None). The Irys gateway serves the
-real bytes. Also: Irys's WAF 403s some default user agents
+bundled by the previous bundler items it never indexed — a silent-corruption trap (COSE
+decode fails, producer counts as None). The previous bundler gateway serves the
+real bytes. Also: the previous bundler's WAF 403s some default user agents
 (`Python-urllib` blocked), so core's Arweave HTTP clients now send an
 explicit `mnemonic-core/<version>` UA.
 

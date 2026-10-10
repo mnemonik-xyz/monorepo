@@ -20,7 +20,7 @@ sequenceDiagram
     participant DB as Mnemonic SQLite
     participant W as Approval webapp + wallet
     participant UP as Universal Paywall
-    participant A as Arweave / Irys
+    participant A as Arweave (ArDrive Turbo)
     participant S as Solana
 
     C->>M: sign_memory(mode=participate, content)

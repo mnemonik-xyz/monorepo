@@ -86,7 +86,7 @@ None. This is a library extraction — no shared runtime resources like DB pools
 **Alternatives considered:** Fix in a separate task — rejected because touching the same code twice increases merge risk.
 
 ### Decision 6: httpmock tests for arweave and solana
-**Decision:** Add httpmock-based unit tests for `arweave.rs` (~6 tests: write, read, write_bytes, health_check, network timeout, malformed response) and `solana.rs` (~7 tests: write_memo, read_memo, airdrop, get_tx_signers, confirm_tx retry exhaustion, health_check, error handling). Mock Irys upload/read endpoints and Solana JSON-RPC. Tests must not contain real mainnet URLs or funded keypairs.
+**Decision:** Add httpmock-based unit tests for `arweave.rs` (~6 tests: write, read, write_bytes, health_check, network timeout, malformed response) and `solana.rs` (~7 tests: write_memo, read_memo, airdrop, get_tx_signers, confirm_tx retry exhaustion, health_check, error handling). Mock the previous bundler upload/read endpoints and Solana JSON-RPC. Tests must not contain real mainnet URLs or funded keypairs.
 **Rationale:** These modules currently have zero test coverage. Supports US risk 2 mitigation and acceptance criterion: "httpmock-tests for arweave/solana." `[TECHNICAL]`
 **Alternatives considered:** Integration tests with arlocal/solana-test-validator — rejected for this iteration because they require external services in CI.
 

@@ -29,10 +29,10 @@ Neither format proves global completeness or truth of content.
 | Backend or source | Implemented capability | Explicit boundary |
 |---|---|---|
 | Caller-owned local storage | CLI persists sealed ciphertext; SDK accepts a caller-owned A2A index. Checkpoint and backup APIs return data for caller persistence | SDK default caches are session-only. Local SQL/index loss requires retained bytes, trusted checkpoints and keys |
-| Arweave/Irys delivery | Operator uploads original signed bytes and checks exact fetched bytes | Availability is observed at read-back time. No unconditional retention, indexing, or timestamp guarantee follows |
+| Arweave delivery | Operator uploads original signed bytes through ArDrive Turbo and checks exact fetched bytes | Availability is observed at read-back time. No unconditional retention, indexing, or timestamp guarantee follows |
 | `ArweaveStorageAdapter` | Bounded `ar://` fetch through configured origin | Adapter upload is unsupported; use ingestion. Discovery is a separate API |
 | `HttpObjectStorageAdapter` | `blob://<SHA256>` fetch and immutable PUT with exact read-back | One configured origin; server must enforce its retention/access policy. No deployed object service is supplied |
-| Arweave/Irys discovery | Provider-specific queries, cursors, known-locator fallback and structured source diagnostics | Indexes are untrusted discovery hints. Lag, omission and failure are reported; exhaustion is not completeness |
+| Arweave discovery | Arweave GraphQL queries, cursors, known-locator fallback and structured source diagnostics | Indexes are untrusted discovery hints. Lag, omission and failure are reported; exhaustion is not completeness |
 | Native parent resolution | `ar://`; optional configured blob origin via `MNEMONIC_PARENT_BLOB_ORIGIN` | Blob origin must be configured on the receiving operator. Parent authenticity is checked after bounded fetch |
 | Historical Solana memos | Legacy verification and discovery | New shared ingestion does not require a new Solana memo |
 | IPFS, Filecoin, arbitrary cloud providers | No supported adapter in this matrix | Design examples are not production integrations |

@@ -2,9 +2,9 @@
   "version": 1,
   "started_at": "2026-10-02T12:14:32.826Z",
   "endpoints": {
-    "irys": "https://uploader.irys.xyz/graphql",
+    "previous_bundler": "https://{previous-bundler-host}/graphql",
     "arweave": "https://arweave.net/graphql",
-    "gateway": "https://gateway.irys.xyz"
+    "gateway": "https://{previous-bundler-gateway}"
   },
   "mode": "read_only_no_credentials",
   "pinned_fixture": null,
@@ -13,7 +13,7 @@
       "started_at": "2026-10-02T12:14:32.826Z",
       "finished_at": "2026-10-02T12:14:33.430Z",
       "inventory": {
-        "irys": {
+        "previous_bundler": {
           "status": "exhausted",
           "candidates": 24,
           "has_more": false,
@@ -35,7 +35,7 @@
           "other_id_shapes": 0,
           "elapsed_ms": 589
         },
-        "a2a_irys": {
+        "a2a_previous_bundler": {
           "status": "exhausted",
           "candidates": 0,
           "has_more": false,
@@ -63,7 +63,7 @@
       "started_at": "2026-10-02T12:14:34.430Z",
       "finished_at": "2026-10-02T12:14:34.840Z",
       "inventory": {
-        "irys": {
+        "previous_bundler": {
           "status": "exhausted",
           "candidates": 24,
           "has_more": false,
@@ -85,7 +85,7 @@
           "other_id_shapes": 0,
           "elapsed_ms": 358
         },
-        "a2a_irys": {
+        "a2a_previous_bundler": {
           "status": "exhausted",
           "candidates": 0,
           "has_more": false,

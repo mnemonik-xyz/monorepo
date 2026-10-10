@@ -47,7 +47,7 @@ Measured from the code on 2026-09-28.
 | Fact | Where | Status |
 |---|---|---|
 | One paid action: `mnemonic_sign_memory` with `mode: "anchored"` | `CLAUDE.md` § Payment | available now |
-| Price = max(minimum, (Irys + chain fee) × SOL/USD × (1 + margin)) | `mcp/src/pricing.rs:7` | available now |
+| Price = max(minimum, (storage USD + chain fee × SOL/USD) × (1 + margin)); storage USD is the ArDrive Turbo quote | `mcp/src/pricing.rs:7` | available now |
 | Margin default 2000 bps (20 %) | `mcp/src/config.rs:329` | available now |
 | Minimum price 0.001 USD | `docs/WHITEPAPER.md` § 13 | available now |
 | Payment rail: x402 in USDC, Solana and EVM networks | `mcp/src/payment.rs:518` | available now |
@@ -125,7 +125,7 @@ party can check from data.
 - A **false validation** is provable because anyone can re-run COSE verification on the bytes.
   ERC-8004 already names "stake-secured re-execution" as one validator trust model [S6].
 
-The enumeration gap makes the indexer role real, not invented. Today only the Irys index and the
+The enumeration gap makes the indexer role real, not invented. Today only one Arweave GraphQL index and the
 Solana memo can list an owner's items (`work/chain-agnostic/decisions.md` F6, D-4). Several
 independent indexers remove that single-provider risk.
 

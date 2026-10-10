@@ -24,7 +24,7 @@ status: backlog
 ### `STORAGE_MODE=full` на хостинге
 **Что:** Включить Arweave + Solana запись на `mcp.mnemonik.xyz`.
 **Зачем:** Полная on-chain атестация — это differentiator протокола.
-**Зависит от:** funded Solana keypair, мониторинг Irys/Arweave costs, payment-flow (см. ниже).
+**Зависит от:** funded Solana keypair, мониторинг Arweave costs, payment-flow (см. ниже).
 **Эффорт:** ~1 dev-day setup + ongoing operational cost.
 
 ### `PAYMENT_MODE=balance` activation

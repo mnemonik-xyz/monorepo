@@ -36,8 +36,8 @@ obvious, and getting the order wrong is the only way this work destroys value.
 
 **1. Never remove an enumeration source before its replacement is measured.**
 
-Arweave-schema gateways return **zero** items for our `App-Name` tag, because Irys bundles them
-and those gateways index the containing bundle. The Irys endpoint returns them. Verified
+Arweave-schema gateways return **zero** items for our `App-Name` tag, because the previous bundler bundles them
+and those gateways index the containing bundle. The previous bundler endpoint returns them. Verified
 2026-09-27.
 
 So the Solana memo is currently the only thing that can list an owner's anchored memories. Remove

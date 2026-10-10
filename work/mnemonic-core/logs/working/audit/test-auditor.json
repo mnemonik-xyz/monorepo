@@ -56,7 +56,7 @@
       "id": 2,
       "criterion": "Arweave httpmock test count >= 6, all 6 scenarios present (write, read, write_bytes, health_check, timeout, malformed)",
       "verdict": "PASS",
-      "evidence": "core/src/arweave/mod.rs:283-372 -- 6 #[tokio::test] functions: test_write_success (line 286), test_read_success (line 305), test_write_bytes_success (line 320), test_health_check_success (line 336), test_network_timeout (line 348), test_malformed_json_response (line 360). All use `MockServer::start()` with dynamic ports; no real Irys URL appears in any test (the `uploader.irys.xyz` matches in the file are at line 23 (production default URL constant) and line 3 (module doc comment), both in non-test code). Note: test_network_timeout is misnamed -- it actually exercises the arlocal path (is_local=true, bypass=false) and not the Irys path -- already documented as a nit by code-auditor (task 13)."
+      "evidence": "core/src/arweave/mod.rs:283-372 -- 6 #[tokio::test] functions: test_write_success (line 286), test_read_success (line 305), test_write_bytes_success (line 320), test_health_check_success (line 336), test_network_timeout (line 348), test_malformed_json_response (line 360). All use `MockServer::start()` with dynamic ports; no real the previous bundler URL appears in any test (the `{previous-bundler-host}` matches in the file are at line 23 (production default URL constant) and line 3 (module doc comment), both in non-test code). Note: test_network_timeout is misnamed -- it actually exercises the arlocal path (is_local=true, bypass=false) and not the previous bundler path -- already documented as a nit by code-auditor (task 13)."
     },
     {
       "id": 3,
@@ -116,7 +116,7 @@
       "id": 12,
       "criterion": "No test file contains real mainnet URLs or funded keypairs",
       "verdict": "PASS",
-      "evidence": "`grep -rn 'uploader.irys.xyz\\|mainnet.*solana\\|api.mainnet-beta' core/` -> only 2 matches, both in core/src/arweave/mod.rs at line 3 (module doc comment describing production behavior) and line 23 (default `upload_url` field value in `ArweaveClient::new`). Neither is inside a #[cfg(test)] block. All test clients are constructed with `MockServer::start()` (dynamic 127.0.0.1 port) or for solana via `SolanaClient::new(server.base_url())`. All test keypairs are `Keypair::new()` (ephemeral). No funded-keypair seeds, no hardcoded secret bytes, no `Keypair::from_bytes(&[...])` with embedded private material."
+      "evidence": "`grep -rn '{previous-bundler-host}\\|mainnet.*solana\\|api.mainnet-beta' core/` -> only 2 matches, both in core/src/arweave/mod.rs at line 3 (module doc comment describing production behavior) and line 23 (default `upload_url` field value in `ArweaveClient::new`). Neither is inside a #[cfg(test)] block. All test clients are constructed with `MockServer::start()` (dynamic 127.0.0.1 port) or for solana via `SolanaClient::new(server.base_url())`. All test keypairs are `Keypair::new()` (ephemeral). No funded-keypair seeds, no hardcoded secret bytes, no `Keypair::from_bytes(&[...])` with embedded private material."
     }
   ],
   "findings": [
@@ -186,11 +186,11 @@
     {
       "id": "TEST-ARWEAVE-TIMEOUT-MISNAMED-1",
       "severity": "nit",
-      "title": "test_network_timeout exercises arlocal path, not Irys timeout",
+      "title": "test_network_timeout exercises arlocal path, not the previous bundler timeout",
       "location": "core/src/arweave/mod.rs:347-357",
       "category": "anti_pattern",
-      "description": "Already flagged as a nit in code-auditor task 13 finding (line 347-357 of arweave/mod.rs). The test points the client at `http://127.0.0.1:1` (a port nothing listens on), then asserts `health_check` returns false and `write_bytes` returns Err. Because is_local=true (loopback) and bypass_local_routing=false, the client takes the arlocal POST path -- so the test is exercising arlocal-server-unreachable, not Irys-upload-timeout. The name suggests the latter, the implementation does the former. Repeating here for completeness; not adding new content beyond what code-auditor already documented.",
-      "recommendation": "Either rename to `test_arlocal_unreachable_returns_err` or add a second test with `ArweaveClient::new_for_test(...)` (which sets bypass_local_routing=true) pointed at `http://127.0.0.1:1` so it actually hits the Irys path. The current test is correct as a smoke test of error propagation; only the name and intent comment mislead."
+      "description": "Already flagged as a nit in code-auditor task 13 finding (line 347-357 of arweave/mod.rs). The test points the client at `http://127.0.0.1:1` (a port nothing listens on), then asserts `health_check` returns false and `write_bytes` returns Err. Because is_local=true (loopback) and bypass_local_routing=false, the client takes the arlocal POST path -- so the test is exercising arlocal-server-unreachable, not previous-bundler-upload-timeout. The name suggests the latter, the implementation does the former. Repeating here for completeness; not adding new content beyond what code-auditor already documented.",
+      "recommendation": "Either rename to `test_arlocal_unreachable_returns_err` or add a second test with `ArweaveClient::new_for_test(...)` (which sets bypass_local_routing=true) pointed at `http://127.0.0.1:1` so it actually hits the previous bundler path. The current test is correct as a smoke test of error propagation; only the name and intent comment mislead."
     }
   ],
   "verification": {

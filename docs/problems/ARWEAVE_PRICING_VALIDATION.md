@@ -8,9 +8,9 @@
 
 ## Results (Option A — API price query)
 
-**Measured via Irys bundler price API + CoinGecko AR/USD:**
+**Measured via the previous bundler price API + CoinGecko AR/USD:**
 
-| AR/USD | Irys rate | Whitepaper claimed | Ratio |
+| AR/USD | Bundler rate | Whitepaper claimed | Ratio |
 |--------|-----------|-------------------|-------|
 | $1.75 | **$16.74/GB** | ~$5.00/GB | 3.3x understated |
 
@@ -39,10 +39,10 @@ The per-snapshot costs are still economically viable for the target use case (re
 ## Validation Options (for future reference)
 
 ### Option A — API price query (DONE)
-- **Method:** Query Irys price endpoint + CoinGecko AR/USD
+- **Method:** Query the previous bundler price endpoint + CoinGecko AR/USD
 - **Cost:** Zero
 - **Script:** `validate_arweave_pricing.mjs`
-- **Accuracy:** Current bundler rate; does not account for Irys free tier, discounts, or actual transaction fees
+- **Accuracy:** Current bundler rate; does not account for the bundler free tier, discounts, or actual transaction fees
 - **Status:** ✅ Completed 2026-04-01
 
 ### Option B — Real micro-upload test
@@ -73,7 +73,7 @@ The per-snapshot costs are still economically viable for the target use case (re
 
 ## Recommended whitepaper fix
 
-Replace `~$5/GB` with `~$17/GB (at AR=$1.75, via Irys bundler, April 2026)` and add a note that Arweave pricing is AR-denominated and varies with the AR/USD exchange rate.
+Replace `~$5/GB` with `~$17/GB (at AR=$1.75, via the previous bundler, April 2026)` and add a note that Arweave pricing is AR-denominated and varies with the AR/USD exchange rate.
 
 Updated economics table should use the measured $16.74/GB rate and include a caveat:
 > Arweave storage costs are denominated in AR tokens. The USD costs shown use the AR/USD rate at time of measurement ($1.75, April 2026). At AR=$10 (previous highs), costs would be ~$96/GB. At AR=$0.50, costs would be ~$4.78/GB.

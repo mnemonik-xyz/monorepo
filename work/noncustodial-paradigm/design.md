@@ -386,7 +386,7 @@ flowchart TB
       CB["canonical CBOR (content + embedding + meta)"] --> COSE["COSE_Sign1 signed by USER Ed25519"]
     end
     subgraph ENVELOPE["Outer transaction (storage)"]
-      COSE --> TX["Arweave/Irys tx wraps the signed bytes"]
+      COSE --> TX["Arweave data item (ArDrive Turbo) wraps the signed bytes"]
       TX --> PAYER{"who signs/pays the upload tx?"}
       PAYER -->|operator relay — default, metered via x402| ST["stored on Arweave"]
       PAYER -->|user self-funds — optional| ST
@@ -402,7 +402,7 @@ flowchart TB
   the canonical CBOR the client signs, so the uploaded bytes == the signed bytes
   (tamper-evident). No re-canonicalization after signing.
 - The only thing that changes vs today is *who holds the signing key* (user, not
-  operator). The Arweave/Irys upload mechanics are untouched.
+  operator). The Arweave upload mechanics (ArDrive Turbo) are untouched.
 
 > Verdict: client-signing is orthogonal to Arweave storage. No break.
 
@@ -718,7 +718,7 @@ cent (the pricing engine even has a `min_price` floor because it rounds to ~nil,
 
 ```mermaid
 flowchart TB
-    PAY["Write fee paid once (x402 / self-funded Irys)"]
+    PAY["Write fee paid once (x402 / self-funded Turbo credits)"]
     PAY --> C1["Arweave upload — ONE-TIME, permanent (endowment)"]
     PAY --> C2["Solana memo anchor — ONE-TIME per write (~5000 lamports)"]
     PAY --> C3["embedding compute — ONE-TIME at write"]
@@ -730,7 +730,7 @@ flowchart TB
     GAP -. fixed by §16 .-> FIX["Arweave-canonical + operator-independent recall<br/>→ no perpetual operator cost → re-aligned"]
 ```
 
-- **Write-time (aligned).** The fee is quoted as `(irys + sol_tx) × SOL/USDC ×
+- **Write-time (aligned).** The fee is quoted as `(storage_usd + sol_tx × SOL/USDC) ×
   (1+margin)`, floored — so the user's one-time payment covers the permanent
   Arweave upload + the Solana anchor + a 20% margin. Pay-once matches
   store-forever. ✓
@@ -747,7 +747,7 @@ a third-party indexer) can serve recall. So §16 is not only a *trust* fix; it i
 the *economic-alignment* fix.
 
 ### Who pays — and why each option is aligned
-- **Self-funded Irys (most aligned).** The user (the beneficiary) pays the
+- **Self-funded Turbo credits (most aligned).** The user (the beneficiary) pays the
   Arweave upload directly; the operator bears **zero** storage cost and is a pure
   relay. Perfect alignment, no subsidy.
 - **Operator-fronted + x402 margin.** Operator pays Arweave/Solana and recoups via
@@ -757,7 +757,7 @@ the *economic-alignment* fix.
 
 ### Risks (bounded)
 - **FX/volatility** between USDC paid and AR/lamports cost at upload time — the
-  20% margin + live price refresh (`pricing.rs:93`, CoinGecko + Irys) buffer it.
+  20% margin + live price refresh (`pricing.rs`, CoinGecko + ArDrive Turbo price API) buffer it.
 - **Tiny-write rounding** — the `min_price` floor ensures even sub-cent writes
   cover the Solana anchor fee + overhead.
 - **Permanence is a one-way door** — you cannot un-store; matters for the
@@ -766,7 +766,7 @@ the *economic-alignment* fix.
 > Verdict: storing on Arweave is **economically sound** — pay-once/store-forever
 > matches a one-time write fee, and per-memory cost is negligible. The single
 > structural misalignment (perpetual recall serving) is closed by the §16
-> operator-independent recall track. Prefer **self-funded Irys** (or allowance) so
+> operator-independent recall track. Prefer **self-funded Turbo credits** (or allowance) so
 > the beneficiary bears the cost; keep the margin + floor to absorb FX and the
 > Solana anchor.
 

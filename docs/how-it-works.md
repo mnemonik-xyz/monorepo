@@ -14,7 +14,7 @@ The repository is a Cargo workspace (`resolver = "2"`) with two members. The dep
 | `mnemonic-core::identity` | Ed25519 keypair load/generate, base58 encoding, `did:sol` and `did:key` derivation. |
 | `mnemonic-core::sealed` | `seal_memory`, `open_memory`, `open_with_key`, `make_grant`, `open_grant`, `link_fragment`: sealed write / open / grant / bearer-link operations. Uses `core/src/encrypt.rs` (XChaCha20-Poly1305 + HPKE) and `core/src/identity/recall_key.rs`. |
 | `mnemonic-core::storage` | `AttestationStore` trait and `SqliteStore` implementation; `LineageStore` trait; SQL lives in `core/src/storage/sqlite.rs`. Sealed rows store outer CBOR in the `sealed_blob` column; `content` is empty. |
-| `mnemonic-core::arweave` | Full-mode persistence: ANS-104 bundle builder, Irys upload, deep hash + Avro encoding. |
+| `mnemonic-core::arweave` | Full-mode persistence: ANS-104 data-item builder (Ed25519, signature type 2), ArDrive Turbo upload, deep hash + Avro encoding. |
 | `mnemonic-core::solana` | Full-mode anchoring: `SolanaClient` for SPL Memo writes/reads. |
 | `mnemonic-core::lineage` | Parent-child artifact DAG with cycle detection and BFS traversal (`Direction::{Ancestors, Descendants, Both}`). |
 | `mnemonic-mcp` | JSON-RPC 2.0 dispatcher (`mcp.rs`), the MCP tools (`tools.rs`; 12 by default, 15 with `trajectory-experimental`), Axum bootstrap (`main.rs`), payment gating (`payment.rs`), pricing engine (`pricing.rs`), env-driven config (`config.rs`). |
@@ -34,7 +34,7 @@ Implemented in `mcp/src/tools.rs::sign_memory`.
    - **Deferred (client-signed).** Each JWT write in `anchored` mode, and each JWT write without a `mode` field. The server parks the canonical bundle and returns `{status: "awaiting_signature", correlation_id, approve_url, content_hash, expires_in: 300}`. The client signs locally (browser approval, or a headless `POST /api/sign-callback`). Then step 7 runs. Nothing is persisted or anchored until the callback lands. Bundles expire after 300 seconds. `mnemonic_check_pending` resolves the `correlation_id` to the final state.
 7. **Persist.**
    - **Local mode:** write the content hash plus the uncompressed embedding to `SqliteStore`; return synthetic `local:` tx IDs.
-   - **Full mode:** upload COSE bytes to Arweave via the Irys client; submit an SPL Memo on Solana carrying `{"h": blake3, "a": arweave_tx, "v": 2}`; record both tx IDs alongside the row in SQLite. Cost is captured in `attestation_costs` for P&L tracking.
+   - **Full mode:** upload COSE bytes to Arweave through ArDrive Turbo; submit an SPL Memo on Solana carrying `{"h": blake3, "a": arweave_tx, "v": 2}`; record both tx IDs alongside the row in SQLite. Cost is captured in `attestation_costs` for P&L tracking.
 
 ## End-to-end walkthrough — sealed write (client-side paths)
 
@@ -99,6 +99,9 @@ Query parameters:
 Privacy rule (available now): the route returns only SQLite rows with `visibility = 'public'`. This applies to the listing and to recall, for each `source` value. The route never returns a private row. A row with no `visibility` value (a legacy row) counts as private. A local write is always private, so `source=on_node` shows only memories published with `mnemonic_publish_post`. An anchored `anchored` write is always public, because its content is plain text on Arweave (owner decision D-8). Each row has `plaintext_on_arweave`: `true` when the content is plain text on Arweave. Sealed (encrypted) anchored writes are planned.
 
 Chain recovery (available now): when the operator sets `CHAIN_STATS_WALLETS`, the server reads its anchored memories from Solana memos and Arweave. It keeps them in memory as a snapshot. SQLite does not store this snapshot.
+The server finds items through standard Arweave GraphQL (`CHAIN_STATS_GRAPHQL_URL`, default `https://arweave.net/graphql`).
+The owner filter is the Arweave address of the wallet: base64url(sha256(public key)).
+It fetches payloads from `CHAIN_STATS_GATEWAY_URL` (default `https://arweave.net`).
 
 Recall with `q` (available now):
 

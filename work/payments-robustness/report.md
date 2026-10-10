@@ -13,7 +13,7 @@ consumers (especially EVM/Arc consumers like Arco).
 
 - Payment logic lives entirely in **`mcp/src/payment.rs`** + **`mcp/src/pricing.rs`**; the **DB schema** (`api_keys`, `payment_events`, `x402_nonces`) lives in **`core/src/storage/sqlite.rs`**. `core/` has no payment *logic* (architecture rule #1 holds).
 - There are **three rails**: `none` (free, operator-absorbed), `balance` (custodial prepaid **`mnm_` API key**), `x402` (per-call on-chain transfer), plus `both`.
-- **Settlement is single-chain, single-asset: USDC on _Solana_** (mainnet mint `EPjFW…Dt1v`), paid to one operator **treasury** pubkey, priced in **micro-USDC** with a 20% margin over the Arweave(Irys)+Solana cost.
+- **Settlement is single-chain, single-asset: USDC on _Solana_** (mainnet mint `EPjFW…Dt1v`), paid to one operator **treasury** pubkey, priced in **micro-USDC** with a 20% margin over the Arweave+Solana cost.
 - **The API-key model is the weak point**: it's a custodial, Web2 bearer-secret prepaid account that duplicates an identity the protocol *already has* (Ed25519 / `did:sol`), and it is bound to one chain/asset.
 - **Two unrelated things share the `Authorization: Bearer` header** — a `mnm_` API key (payment) and an OAuth **JWT** (authn). Distinguished only by the `mnm_` prefix.
 - **Security finding:** `GET /admin/stats` (operator P&L — revenue, cost, margin) appears **ungated**; `GET /balance?api_key=` leaks balance to anyone holding the key in a URL query.
@@ -53,8 +53,8 @@ consumers (especially EVM/Arc consumers like Arco).
 ### Pricing — `mcp/src/pricing.rs`
 | Concern | Symbol | Location |
 |---|---|---|
-| Engine doc (Irys + SOL/USDC → price) | module header | `mcp/src/pricing.rs:1` |
-| Refresh (fetch Irys + SOL spot) | `PricingEngine::refresh` | `mcp/src/pricing.rs:93` |
+| Engine doc (Arweave storage + SOL/USDC → price) | module header | `mcp/src/pricing.rs:1` |
+| Refresh (fetch storage quote + SOL spot) | `PricingEngine::refresh` | `mcp/src/pricing.rs:93` |
 | **Price formula** (break-even + margin, floored) | `compute_price` | `mcp/src/pricing.rs:43` |
 
 ### Config — `mcp/src/config.rs`
@@ -167,10 +167,10 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    IR["Irys upload cost<br/>(lamports, typical payload)"] --> P
+    IR["Arweave storage cost<br/>(ArDrive Turbo quote, USD, typical payload)"] --> P
     TX["Solana memo tx fee<br/>(~5000 lamports)"] --> P
     SP["SOL/USDC spot (CoinGecko)"] --> P
-    P["compute_price = max(min_price,<br/>(irys+tx) × SOL/USDC × (1+margin))"] --> Q["quoted cost<br/>(micro-USDC)"]
+    P["compute_price = max(min_price,<br/>(storage_usd + tx × SOL/USDC) × (1+margin))"] --> Q["quoted cost<br/>(micro-USDC)"]
 ```
 
 ---
@@ -262,7 +262,7 @@ it, and no EVM-native settlement path.
 ### Appendix — settlement facts
 - **Asset/chain:** USDC, Solana (mint `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`, `config.rs:151`).
 - **Recipient:** operator `TREASURY_PUBKEY` (`config.rs:150`).
-- **Price:** `max(min_price, (irys_lamports + sol_tx_fee) × SOL/USDC × (1 + 20%))`, micro-USDC (`pricing.rs:43`).
+- **Price:** `max(min_price, (storage_usd + sol_tx_fee × SOL/USDC) × (1 + 20%))`, micro-USDC (`pricing.rs:43`).
 - **Paid call:** only `mnemonic_sign_memory`, only `participate` + `payment_mode != none` (`mcp.rs:1227`). `recall`/`verify`/`whoami` are free; `recall` even bypasses JWT (`oauth/mod.rs:2295`).
 
 ---
@@ -320,7 +320,7 @@ flowchart TD
       E["Streaming payment (e.g. per-write debit)"]
     end
     subgraph L3["Level 3 — user-funded anchoring"]
-      F["User pays Arweave/Irys directly (their wallet funds upload)"]
+      F["User pays Arweave storage directly (their wallet funds the Turbo upload)"]
       G["User co-signs / self-signs the artifact<br/>(operator never holds user funds or key)"]
     end
     Now --> L1 --> L2 --> L3
@@ -336,9 +336,9 @@ flowchart TD
   streaming debit. Now the operator never holds a free-floating balance; it can
   only pull what a receipt authorizes. This is genuinely non-custodial for funds.
 - **Level 3 (high effort, fully trustless funds+anchor):** the **user funds the
-  Arweave upload directly** (their wallet pays Irys) and/or **co-signs** the
+  Arweave upload directly** (their wallet pays for the Turbo upload) and/or **co-signs** the
   artifact, so the operator is a pure relay that never touches user funds or
-  keys. Cost: much heavier client (Arweave/Irys signing in-wallet), loses the
+  keys. Cost: much heavier client (ANS-104 data-item signing in-wallet), loses the
   "drop-in MCP backend" simplicity, and breaks the operator-fronted UX.
 
 ### 7.5 Recommendation (to debate in the plan)

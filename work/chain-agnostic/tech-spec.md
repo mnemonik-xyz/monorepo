@@ -34,7 +34,7 @@ Real chain code is confined to three places:
 1. **`core/src/solana/mod.rs`** — 499 lines. JSON-RPC, the SPL Memo program id, transaction
    assembly, `write_memo` / `submit_memo` / `read_memo` / `list_memo_anchors` / `confirm_tx`.
 2. **`mcp/src/payment.rs:696` `verify_usdc_transfer`** plus one `getTransaction` RPC call.
-3. **The Irys upload**, `https://uploader.irys.xyz/tx/solana`, which accepts an ANS-104 data
+3. **The previous bundler upload**, `https://{previous-bundler-host}/tx/solana`, which accepts an ANS-104 data
    item signed by the Solana key. `solana_pubkey_to_arweave_address` derives the owner address
    from the same key.
 
@@ -50,8 +50,8 @@ it is last.
 **The Solana memo is currently the only working enumeration source.** Verified on 2026-09-27
 (`work/arweave-as-source-of-truth/decisions.md` D-5): Arweave-schema gateways
 (`arweave-search.goldsky.com`, `permagate.io`) return **zero** items for
-`App-Name: mnemonic-protocol`, while the Irys GraphQL endpoint returns a full page of 100 for
-the same filter. Our items are Irys-bundled, so Arweave gateways index the containing bundle
+`App-Name: mnemonic-protocol`, while the previous bundler GraphQL endpoint returns a full page of 100 for
+the same filter. Our items are bundled by the previous bundler, so Arweave gateways index the containing bundle
 rather than the items.
 
 Stop writing memos before fixing enumeration and every anchored memory becomes unenumerable,
@@ -65,7 +65,7 @@ visible and the first step does not foreclose them.
 
 ### Stage 1 — enumerate from an index that sees our items
 
-Point the GraphQL source at Irys and make the query match its schema. Irys rejects two fields
+Point the GraphQL source at the previous bundler and make the query match its schema. The previous bundler rejects two fields
 the Arweave schema accepts, and asking for either fails the whole request:
 
 ```text
@@ -77,14 +77,14 @@ So: no `sort` argument, and the time is on the node as `timestamp` in **millisec
 under `block` in seconds.
 
 Do not delete the Arweave-schema query. Both must exist, because the endpoint is configurable
-and an operator may point at either. Introduce a `GatewayFlavour` (`Arweave` | `Irys`) that
+and an operator may point at either. Introduce a `GatewayFlavour` (`Arweave` | `Bundler`) that
 selects the query text and the timestamp parsing, and derive it from the configured URL with an
 explicit override.
 
-Ordering moves client-side for the Irys flavour, since the gateway cannot sort.
+Ordering moves client-side for the previous bundler flavour, since the gateway cannot sort.
 
 **Acceptance, and it is a gate rather than a checklist item:** for a wallet with existing
-anchored memories, the Irys enumeration returns a superset of the memo enumeration. Until that
+anchored memories, the previous bundler enumeration returns a superset of the memo enumeration. Until that
 holds, stage 2 does not start.
 
 ### Stage 2 — stop writing the memo
@@ -98,7 +98,7 @@ holds, stage 2 does not start.
   COSE-verifies, which is the stronger half; the memo comparison becomes optional.
 - `mnemonic_verify` keeps accepting a `solana_tx` lookup for legacy rows.
 
-The operator's Solana wallet still pays Irys for uploads. This stage removes the memo, not the
+The operator's Solana wallet still pays the previous bundler for uploads. This stage removes the memo, not the
 chain.
 
 ### Stage 3 — payments (scoped, not specified)
@@ -147,12 +147,12 @@ it is never correct.
 
 ## Testing
 
-- **Enumeration parity.** Against a wallet with known anchored items, assert the Irys
+- **Enumeration parity.** Against a wallet with known anchored items, assert the previous bundler
   enumeration is a superset of the memo enumeration. This is the gate for stage 2.
-- **Schema exactness per flavour.** Assert the Irys query contains no `sort` and no `block`, and
+- **Schema exactness per flavour.** Assert the previous bundler query contains no `sort` and no `block`, and
   that the Arweave query still contains both. A single test asserting one shape would silently
   break the other.
-- **Timestamp units.** Irys milliseconds convert to seconds; Arweave seconds pass through. A
+- **Timestamp units.** Previous-bundler milliseconds convert to seconds; Arweave seconds pass through. A
   missing divide is wrong by a factor of a thousand and nothing else validates the magnitude.
 - **Anchored write makes no Solana call.** Point the RPC at a URL that fails on contact and
   assert an anchored write still succeeds.
@@ -164,10 +164,10 @@ it is never correct.
 
 - **Enumeration gap, the only way to lose data.** Mitigated by making stage 1 a measured gate
   rather than a review item.
-- **Irys schema drift.** Our items are visible only through Irys, so an upstream schema change
+- **Previous-bundler schema drift.** Our items are visible only through the previous bundler, so an upstream schema change
   breaks enumeration silently. Mitigation: the live `#[ignore]` test, and never adding a field
   the schema does not define.
-- **Single-provider dependency.** Removing the memo leaves Irys as the only index that sees our
+- **Single-provider dependency.** Removing the memo leaves the previous bundler as the only index that sees our
   items. That is a real reduction in redundancy, traded for cost. Say it plainly rather than
   presenting the change as pure gain.
 - **A future reader assumes "no Solana" means the readers went too.** Mitigation: Decision 1 is

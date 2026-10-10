@@ -3,7 +3,7 @@
 The SDK creates the ciphertext, author wrap, recipient grants and every COSE
 signature locally. HTTP MCP accepts only authenticated client-signed writes.
 The server verifies signatures and bindings, then delivers original bytes to
-Arweave/Irys. Hosted SQLite holds routing receipts only. The client signs artifacts;
+Arweave. Hosted SQLite holds routing receipts only. The client signs artifacts;
 the operator signs the ANS-104 transport upload. Decryption stays on the client.
 
 ```ts
@@ -76,12 +76,12 @@ const report = await client.restoreA2AContext(contextId, {
 const localRows = await client.recallA2AContext(contextId, {mode: "local"});
 ```
 
-Configure `a2aGatewayUrl`, `a2aIndexUrl`, and `a2aIndexFlavour` separately.
+Configure `a2aGatewayUrl` (default `https://arweave.net`) and `a2aIndexUrl` (default `https://arweave.net/graphql`) separately.
 The external index is an unsigned discovery hint; signatures establish trust.
 Requests carry no MCP JWT. Known-locator import works before index visibility.
 Discovery retains verified forks and reports budgets, errors and missing parents.
 Completeness is only ancestry to caller-pinned heads, never proof that every
-artifact or newer head was indexed. The Irys provider remains an availability
+artifact or newer head was indexed. The Arweave GraphQL index remains an availability
 dependency. Live production enumeration has not been demonstrated by this draft.
 
 `mode: "local"` signs and stores on the agent's device without network. Supply
@@ -186,20 +186,21 @@ SDK: 343 tests passed. CLI: 187 passed, 2 skipped (including concurrent durable
 index writers). MCP: five targeted tests plus the explicitly enabled real HTTP/WASM
 recovery test passed. TypeScript build passed after index locking. Strict production clippy (`--workspace --lib --bins -D warnings`) passes. The
 workspace run passed 1,265 tests; sequential doctest rerun resolved concurrent
-build crate-version mismatches. The live Irys query returned HTTP
+build crate-version mismatches. The live index query returned HTTP
 403 in this environment; production index recovery remains unverified. Tasks 18–21 and task 14/#242 are not closed by
 publishing this draft. Review against the merged recovery specification.
 
 ## Replaceable discovery sources
 
 Available now in the SDK: pass `discoverySource` to `restoreA2AContext` to select an index adapter.
-`IrysDiscoverySource` and `ArweaveDiscoverySource` use their respective GraphQL schemas.
+`ArweaveDiscoverySource(endpoint, request?)` queries standard Arweave GraphQL, for example `https://arweave.net/graphql`.
+It always sorts results by block height, oldest first (`sort: HEIGHT_ASC`).
 Custom adapters implement `DiscoverySource` and return candidate locators with optional public metadata.
 The client verifies original bytes against the caller's independently trusted authors.
 An adapter cannot expand that trusted set.
 
 ```ts
-const source = new IrysDiscoverySource('https://uploader.irys.xyz/graphql');
+const source = new ArweaveDiscoverySource('https://arweave.net/graphql');
 const report = await client.restoreA2AContext(contextId, {
   expectedAuthors: [trustedAuthor],
   heads: authenticatedHeads,
@@ -212,7 +213,7 @@ const report = await client.restoreA2AContext(contextId, {
 `report.source` records source identity, status, page count, candidate count, and any continuation cursor.
 Statuses distinguish exhausted scans, budgets, unavailable sources, malformed responses, cancellation, and disabled discovery.
 Continuation checkpoints bind the context, authors, source identity, and supported backends.
-Changing an endpoint or index flavour requires a fresh scan.
+Changing an endpoint requires a fresh scan.
 Previously verified local entries remain available during partial scans or source replacement.
 
 Pass `discoverySource: false` and explicit `parentLocators` to recover known artifacts without an index.

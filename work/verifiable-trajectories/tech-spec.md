@@ -49,7 +49,7 @@ overhead). We ship A + B.
   (0x00 leaf / 0x01 node), odd-node promotion. Set-semantics (sorts+dedups),
   per-owner. Add an **order-preserving** sibling for trajectories.
 - `arweave/mod.rs` — already constructs + signs **single** ANS-104 data items and
-  uploads via Irys; `read(tx_id)`. Missing: multi-item **bundles** and a GraphQL
+  uploads them through the bundler; `read(tx_id)`. Missing: multi-item **bundles** and a GraphQL
   **tag-query** read path. Extend, don't replace.
 - `storage/traits.rs` — `AttestationStore` trait; only impl is `SqliteStore`.
   The trait is the backend seam. Add `ArweaveStore` as the canonical impl;

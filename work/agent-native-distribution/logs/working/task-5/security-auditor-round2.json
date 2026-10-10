@@ -81,7 +81,7 @@
     "mcp_stdio_accepts_jsonrpc_on_stdin no longer carries #[ignore], meaning the Decision 12 warning-line test (env_var_ignored_without_flag) runs in the default cargo test suite. The previous #[ignore] meant the critical security property was not validated in standard CI.",
     "opt_in_escalation_with_valid_confirmation_token_reaches_hosted (new test 3b) pins the 'gate does not over-fire on well-formed requests' contract, preventing a future regression where the local gate starts blocking all public-write escalations.",
     "FailingEmbedder consolidated into mcp/tests/support/mod.rs — reduces code duplication that previously could diverge between error_catalogue.rs and sign_memory_softfall.rs, ensuring a single fixture definition governs the -32098 trigger path.",
-    "STARTUP_TIMEOUT reduced from 45s to 15s now that PRICING_REFRESH_DISABLED=1 removes the uploader.irys.xyz / coingecko.com startup latency. Tighter timeout means a genuinely hung binary fails faster in CI."
+    "STARTUP_TIMEOUT reduced from 45s to 15s now that PRICING_REFRESH_DISABLED=1 removes the {previous-bundler-host} / coingecko.com startup latency. Tighter timeout means a genuinely hung binary fails faster in CI."
   ],
   "open_items_for_later_tasks": [
     "SAR5-M1 (downgraded to LOW): URL scheme validation for MNEMONIC_HOSTED_ENDPOINT when --allow-custom-endpoint is set. Restrict to https:// or loopback http://. Recommended for Task 9 code-audit or v1.1.",

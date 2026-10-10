@@ -11,21 +11,21 @@ depends_on:
 ## Goal
 
 Execute the approved staging E2E with a real wallet and real external Solana
-and Irys delivery, then record only redacted, independently verifiable
+and Arweave delivery, then record only redacted, independently verifiable
 evidence.
 
 ## Required external authority
 
 - Approved staging EVM/USDC/facilitator deployment and funded test wallet.
 - Approved Solana staging/testnet relay identity with fees available.
-- Approved Irys endpoint and funded storage identity.
+- Approved Arweave upload identity with free-tier allowance or Turbo credits.
 - A named operator responsible for the remedy workflow.
 
 ## Acceptance criteria
 
 - The gate passes without manual wallet clicks.
 - Evidence links the signed provider receipt, EVM settlement transaction,
-  Irys identifier, Solana transaction, and successful recall.
+  Arweave identifier, Solana transaction, and successful recall.
 - Restart/reconciliation evidence shows no duplicate charge.
 - The evidence record contains no private artifact content, credentials, or
   raw EIP-3009 authorization.

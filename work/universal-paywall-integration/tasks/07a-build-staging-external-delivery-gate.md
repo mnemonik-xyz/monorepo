@@ -10,13 +10,13 @@ depends_on:
 ## Goal
 
 Make the existing automated exact-payment E2E runnable against an approved
-staging EVM network, Solana testnet/staging RPC, and Irys endpoint without
+staging EVM network, Solana testnet/staging RPC, and ArDrive Turbo upload endpoint without
 changing the fast local CI path.
 
 ## Scope
 
 - Introduce an explicit staging E2E configuration contract: RPC endpoints,
-  chain ID, USDC asset, payee, facilitator, Solana endpoint, Irys endpoint,
+  chain ID, USDC asset, payee, facilitator, Solana endpoint, Arweave read gateway,
   and secret references.
 - Keep secrets out of source, logs, URLs, fixtures, and task evidence.
 - Make the external test opt-in and fail closed when required configuration is

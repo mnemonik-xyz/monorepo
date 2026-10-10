@@ -5,7 +5,7 @@ depends_on:
   - tasks/06-add-payment-recovery-and-security-matrix.md
 ---
 
-# Validate staging Irys/Solana delivery and operational readiness
+# Validate staging Arweave/Solana delivery and operational readiness
 
 > Superseded by Tasks 07a–07c. This file remains as the parent scope and
 > acceptance record; execute the smaller tasks in order.
@@ -17,7 +17,7 @@ real delivery dependencies and operator safeguards.
 
 ## Scope
 
-- Add a separately gated staging test using real Irys and Solana testnet or
+- Add a separately gated staging test using real Arweave uploads (ArDrive Turbo, mainnet only) and Solana testnet or
   approved staging infrastructure.
 - Verify receipt-to-delivery reconciliation and restart recovery.
 - Document service credentials, receipt key publication, health/readiness,

@@ -51,7 +51,7 @@ It does not establish a separate operator deployment or recovery after financial
 
 [Prior validation](../../docs/sealed-a2a.md) records passing targeted tests and an explicit HTTP/WASM run.
 Those are historical implementation results, not new results from this audit.
-That record reports HTTP 403 from live Irys discovery; production recovery remains unverified.
+That record reports HTTP 403 from live previous-bundler discovery; production recovery remains unverified.
 The full negative-parent, fork, duplicate-locator, timeout and operator-rotation matrix still needs mapped acceptance evidence.
 Actual SSE streaming (#61) remains required for the wider streaming scope.
 DID discovery (#74), or an explicitly agreed AgentCard-only V1 scope, remains a separate obligation.

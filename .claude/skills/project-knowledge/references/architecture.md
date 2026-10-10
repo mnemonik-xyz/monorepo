@@ -56,7 +56,7 @@ Top-level repo files added during the AI-tools integration phase: `smithery.yaml
 - `rusqlite` (bundled) — SQLite without system dependency
 - `sha2` — SHA-256 hashing
 - `ed25519-dalek` — standalone signing for ANS-104 items
-- `reqwest` — async HTTP (Arweave/Irys, CoinGecko)
+- `reqwest` — async HTTP (ArDrive Turbo, Arweave gateways, CoinGecko)
 
 **`mcp/`:**
 - `axum` — async HTTP server
@@ -71,10 +71,12 @@ Top-level repo files added during the AI-tools integration phase: `smithery.yaml
 
 ## External Integrations
 
-**Arweave / Irys**
+**Arweave (upload through ArDrive Turbo)**
 - Purpose: permanent storage for attestation payloads
-- Auth: ANS-104 bundle item signed with agent Ed25519 keypair
-- Production: `https://uploader.irys.xyz` / Local dev: `http://localhost:1984`
+- Upload: `https://upload.ardrive.io/v1/tx/solana`. ANS-104 data item signed with the operator Ed25519 (Solana) key, signature type 2. Turbo bundles items into Arweave transactions. No test network: every upload is permanent on Arweave mainnet
+- Reads: any Arweave gateway (`ARWEAVE_GATEWAY_URL`, default `https://arweave.net`, with failover)
+- Index: Arweave GraphQL `https://arweave.net/graphql`
+- Permanence: an item counts as permanent only when a gateway reports it in a block (GraphQL `block.height`)
 
 **Solana**
 - Purpose: immutable timestamp anchor via SPL Memo
@@ -138,7 +140,7 @@ Rows are tagged with `write_mode` (`local` | `anchored`) and `recall` spans both
 
 **api_keys** — OAuth/Bearer credentials. Key fields: `api_key` PK, `owner_pubkey` (deposit account, legacy), `oauth_pubkey` (links the row to the OAuth user pubkey from `sub` — added by the same migration), `balance_micro_usdc`, `created_at`.
 
-**attestation_costs** — P&L tracking, full mode only. Key fields: `attestation_id` FK, `irys_lamports`, `sol_tx_fee_lamports`, `sol_price_usdc`, `charge_micro_usdc`.
+**attestation_costs** — P&L tracking, full mode only. Key fields: `attestation_id` FK, `storage_cost_micro_usdc`, `sol_tx_fee_lamports`, `sol_price_usdc`, `charge_micro_usdc`.
 
 **blog_posts** — slug-indexed projection over public POST_V1 attestations (added by `webapp-rethink`), so `GET /blog` and `/blog/:slug` are cheap ordered lookups. Key fields: `slug` PK, `title`, `body_markdown`, `tags`, `author` (carries the publishing agent name), `published_at`, plus `attestation_id` / `content_hash` linking back to the immutable ledger row. Re-publishing the same title upserts by slug. No `summary` / `reading_minutes` columns — the webapp derives those client-side (first prose paragraph / `ceil(words/200)`) in `blog.ts` so both the SPA and the prerender get real meta descriptions.
 

@@ -14,7 +14,7 @@ Flipping the storage switch is config + restart, not code:
 # /home/claude/mcp.env — three lines
 STORAGE_MODE=full
 SOLANA_RPC_URL=https://api.mainnet-beta.solana.com   # or Helius for stability
-ARWEAVE_URL=https://uploader.irys.xyz
+ARWEAVE_GATEWAY_URL=https://arweave.net          # reads; uploads go to ArDrive Turbo
 ```
 
 `sudo systemctl restart mnemonic-mcp` — done. The CLI / SDK / MCP-clients see no API change; only `mnemonic_verify` start returning real `arweave_tx` / `solana_tx` instead of the synthetic `local:` IDs, and `mnemonic_sign_memory` latency rises (see below).
@@ -30,7 +30,7 @@ Effort to flip: **~½ dev-day** (config + smoke test).
 | Resource | Where | Amount | Covers |
 |---|---|---|---|
 | Solana keypair `DYVu4Bry3BzGVsR3Hj2iGVT5fNdWFoHw2zRxsdTmrG25` (file at `/home/claude/monorepo/keypair/id.json`) | Send SOL to that address | ~0.1 SOL (~$15–20 at $200/SOL) | ~10–20K SPL Memo txs |
-| Irys credits | irys.xyz dashboard, top up via SOL or USDC | $20–50 | 5–20K attestations of typical ~1KB payload |
+| ArDrive Turbo credits | Top up the operator wallet with Turbo credits | $0 for items up to 105 KiB (10 MiB lifetime free per wallet and per IP); otherwise per-size | Items over 105 KiB, or uploads after the free lifetime limit. Without credits the upload fails with HTTP 402 |
 
 **Total upfront:** **~$50** for a comfortable hackathon-grade demo window.
 
@@ -41,7 +41,7 @@ Effort to flip: **~½ dev-day** (config + smoke test).
 | Component | Cost | Bears | Notes |
 |---|---|---|---|
 | Solana SPL Memo tx fee | ~5,000 lamports ≈ **$0.001** | Operator (sender keypair) | Fixed minimum fee. Anchors blake3(payload) + arweave_tx_id on-chain. |
-| Irys upload (~1KB COSE-signed CBOR) | **$0.001–0.003** | Operator (Irys credit) | Variable with payload size. Bigger embeddings or larger content scale linearly. |
+| Arweave upload through ArDrive Turbo (~1KB COSE-signed CBOR) | **$0** within the free tier; otherwise the Turbo quote | Operator (Turbo credits) | Free up to 105 KiB per item. Above that, cost scales linearly with payload size. |
 | **Turnkey user-sig** (Phase 1.x onwards) | **~$0.001** | TBD — see pricing model | Per signing op. User-side custody adds ~$0.001 per `sign_memory` + per OAuth login (1h TTL). |
 | Server compute (embed + DB) | ~$0.0001 amortized | Operator (VPS fixed cost) | Constant regardless of attestation rate at the current scale. |
 | **Total per `sign_memory`** | **$0.002–0.004 (LocalSigner)** | | |
@@ -99,7 +99,7 @@ Free tier — "Try it"  ($0/month)
 
 Paid tier — "Verifiable"  ($5/month)
   - LocalSigner OR Turnkey custody (Phase 1.x)
-  - Full STORAGE_MODE=full pipeline: Solana SPL Memo + Arweave/Irys upload
+  - Full STORAGE_MODE=full pipeline: Solana SPL Memo + Arweave upload through ArDrive Turbo
   - verify works end-to-end (third party can independently re-hash + check)
   - Portable across any MCP server with same identity
   - Recovery: Turnkey email/passkey if Turnkey-managed; otherwise self-custody backup
@@ -109,13 +109,13 @@ Paid tier — "Verifiable"  ($5/month)
 Enterprise (custom)
   - Self-hosted MCP option (zero operator cost, license-based pricing)
   - Hosted with custom quotas / SLAs / dedicated VPS / dedicated Turnkey Org
-  - Bring-your-own Turnkey Sub-Org / Irys account / Solana keypair
+  - Bring-your-own Turnkey Sub-Org / Turbo credits / Solana keypair
   - Pricing: per-seat or per-attestation contract
 ```
 
 ### Why this design works
 
-- **Free tier marginal cost is essentially zero.** SQL row storage at ~5KB (content + 1.5KB f32 embedding) means 1000 signs/user/mo = ~6MB/user/year. 10K free users = 60GB/year — trivial on VPS. No Solana fees, no Irys credits consumed.
+- **Free tier marginal cost is essentially zero.** SQL row storage at ~5KB (content + 1.5KB f32 embedding) means 1000 signs/user/mo = ~6MB/user/year. 10K free users = 60GB/year — trivial on VPS. No Solana fees, no Turbo credits consumed.
 - **Free tier "no guarantee" disclaimer is honest** — we keep rows as long as operator is healthy, no eviction policy is the default, but no contractual durability promise. If user wants durability → pay.
 - **Paid tier value prop is unambiguous:** the on-chain anchor is the protocol's headline feature. Without it, `verify` is theatrical. Free tier explicitly opts out of verifiability.
 - **No customer cannibalization:** free user who needs verifiability has a clear forced upgrade. No middle-ground "kinda anchored" tier to confuse the message.
@@ -141,12 +141,12 @@ When a free user upgrades, two questions:
 
 | MAU | Free ratio | Paid ratio | Free signs/user/mo | Paid signs/user/mo | Operator marginal cost | Subscription revenue | Net |
 |---|---|---|---|---|---|---|---|
-| 100 | 80% | 20% | 100 | 50 | $20 (paid only — Solana+Irys) | $100 | **+$80** |
+| 100 | 80% | 20% | 100 | 50 | $20 (paid only — Solana+Arweave) | $100 | **+$80** |
 | 1,000 | 70% | 30% | 100 | 100 | $300 | $1,500 | **+$1,200** |
 | 10,000 | 60% | 40% | 80 | 150 | $4,500 | $20,000 | **+$15,500** |
 | 100,000 | 50% | 50% | 80 | 200 | $50,000 | $250,000 | **+$200,000** |
 
-Free-tier cost is negligible (just SQL storage) — operator burn comes from paid users (~$3-4/user/mo Solana+Irys+Turnkey). Subscription revenue covers it with comfortable margin.
+Free-tier cost is negligible (just SQL storage) — operator burn comes from paid users (~$3-4/user/mo Solana+Arweave+Turnkey). Subscription revenue covers it with comfortable margin.
 
 ---
 
@@ -180,7 +180,7 @@ $5/mo entry, no $0 tier. Stripe + waitlist before launch.
 
 ### Self-sovereign (Option D from earlier)
 
-User brings own Turnkey Sub-Org, own Irys account, own Solana keypair. Mnemonic operator only charges for compute (server / RPC / monitoring) flat-fee.
+User brings own Turnkey Sub-Org, own Turbo credits, own Solana keypair. Mnemonic operator only charges for compute (server / RPC / monitoring) flat-fee.
 
 **Why we didn't pick as default:** UX is rough — multi-vendor signup, three account creations before first `sign`. Most users want hosted convenience.
 
@@ -190,7 +190,7 @@ User brings own Turnkey Sub-Org, own Irys account, own Solana keypair. Mnemonic 
 
 Charge by total stored memory size, not by signing count. $5/mo for 100MB equivalent, $20 for 1GB.
 
-**Why we didn't pick:** doesn't track the real costs. A 1KB-memory and a 100KB-memory cost roughly the same on Solana (fixed fee) but very different on Irys (linear). Storage-based billing under-charges power users and over-charges casual users.
+**Why we didn't pick:** doesn't track the real costs. A 1KB-memory and a 100KB-memory cost roughly the same on Solana (fixed fee) but very different on Arweave (linear above the free tier). Storage-based billing under-charges power users and over-charges casual users.
 
 **When to revisit:** if attestation sizes start varying wildly (e.g., users start signing PDFs / images). Right now they're all small text + 1.5KB embedding.
 
@@ -198,9 +198,9 @@ Charge by total stored memory size, not by signing count. $5/mo for 100MB equiva
 
 $0.001 per "memory unit", where unit = ~1KB content + embedding. Bills predictably regardless of underlying tx fees.
 
-**Why we didn't pick:** abstracts away the Solana/Irys cost — when fees spike, operator eats it. When fees drop, operator pockets margin. Adds opacity vs the cleaner "cost + 30% margin" model.
+**Why we didn't pick:** abstracts away the Solana/Arweave cost — when fees spike, operator eats it. When fees drop, operator pockets margin. Adds opacity vs the cleaner "cost + 30% margin" model.
 
-**When to revisit:** if Solana/Irys pricing becomes too volatile to pass through directly. Stable-coin pricing layer is industry-standard for this.
+**When to revisit:** if Solana/Arweave pricing becomes too volatile to pass through directly. Stable-coin pricing layer is industry-standard for this.
 
 ### "Crypto-native" pricing (token / NFT gated)
 
@@ -226,7 +226,7 @@ User flagged interest in this — expanding to make it concrete.
 - **Crypto-native builders** — DAOs, web3 protocols. Want their own Solana keypair, treasury, no operator dependency.
 - **Sovereign deploys** — governments, NGOs. Independence from any single hosted operator.
 
-Enterprise self-host removes Mnemonic operator from the per-sign cost loop entirely. The customer runs the binary on their infra, brings their own Solana keypair / Irys account / optional Turnkey Org.
+Enterprise self-host removes Mnemonic operator from the per-sign cost loop entirely. The customer runs the binary on their infra, brings their own Solana keypair / Turbo credits / optional Turnkey Org.
 
 ### What's already built (Phase 1 ready)
 
@@ -287,7 +287,7 @@ Some Mnemonic operators today (running `mnemonic-mcp` for their own AI agents) m
 Three orthogonal cost layers should be modeled separately in `attestation_costs` and any future billing report:
 
 1. **Operator-fixed** — server compute, RPC subscription, monitoring. Monthly OpEx (~$50–200/mo at current VPS scale; scales to ~$500–1500/mo at 10K-user scale with Helius RPC).
-2. **On-chain anchor** — Solana fee + Irys per attestation. Linear in `sign_memory` count. Already tracked in `attestation_costs` table.
+2. **On-chain anchor** — Solana fee + Arweave storage (Turbo quote) per attestation. Linear in `sign_memory` count. Already tracked in `attestation_costs` table.
 3. **Custody fee** — Turnkey per signing op (Phase 1.x onwards). Currently NOT tracked. Need new column `turnkey_lamports_or_usdc_cents` or similar when Phase 1.x lands.
 
 ---
@@ -297,7 +297,7 @@ Three orthogonal cost layers should be modeled separately in `attestation_costs`
 | Mode | `sign_memory` typical | `recall` | `verify` |
 |---|---|---|---|
 | local | <500ms | <300ms | <100ms (re-hash only) |
-| full (sync) | **3–5s** (Solana confirmation block + Irys upload) | <300ms | 1–3s (Solana RPC + Arweave fetch) |
+| full (sync) | **3–5s** (Solana confirmation block + Turbo upload) | <300ms | 1–3s (Solana RPC + Arweave fetch) |
 | full (async, **not yet implemented**) | <500ms (write to SQLite immediately, on-chain in background, status via `verify` later) | <300ms | 1–3s |
 
 **Optional optimization:** async write path. Server returns `attestation_id` + `status: pending` immediately, queues Arweave + Solana writes, exposes `/api/attestations/{id}/anchor-status` for clients to poll. Estimated cost: **~1 dev-day**. Worth it if demo UX is important, otherwise users tolerate 3–5s.
@@ -337,11 +337,11 @@ Cons: kills the "open MCP server anyone can connect" pitch.
 
 ## Risks of operating in full mode
 
-- **Funding alerts:** monitor SOL balance + Irys balance. Without alerts, the server silently starts returning errors when one runs out. ~1 hour of work for cron + Telegram bot.
-- **Graceful degradation:** if SOL or Irys runs dry, `sign_memory` should return a structured `503` with retry-after header, not a 500. Backlog item.
+- **Funding alerts:** monitor SOL balance + Turbo credit balance. Without alerts, the server silently starts returning errors when one runs out. ~1 hour of work for cron + Telegram bot.
+- **Graceful degradation:** if SOL or Turbo credits run dry, `sign_memory` should return a structured `503` with retry-after header, not a 500. Backlog item.
 - **RPC reliability:** mainnet-beta is rate-limited and flaky under load. Helius (paid) gives ~100K req/day for $50/mo, much better tail latency. Worth budgeting.
 - **Tx fee volatility:** Solana fees can spike during congestion (rare for SPL Memo, but possible). Cap by setting `solana::priority_fee_micro_lamports = 0` (already default) and accept variable confirmation time.
-- **Irys vs Arweave directly:** currently using Irys (fastest UX, ~5s confirmation). Direct Arweave (`arweave.net`) is cheaper (~30%) but slower (~30 min confirmation). Stay on Irys for hackathon, evaluate native Arweave for cost reduction post-launch.
+- **Upload path:** uploads go through ArDrive Turbo, which bundles data items into Arweave transactions. A test item reached an Arweave block in about 10 minutes. An upload counts as permanent only when a gateway reports it in a block (GraphQL `block.height`). Turbo has no test network, so every upload is permanent on Arweave mainnet.
 
 ---
 
@@ -350,17 +350,17 @@ Cons: kills the "open MCP server anyone can connect" pitch.
 These are the things that need proper deliberation before flipping the switch in production:
 
 1. **Pricing surface to user.** When `mnemonic sign "..."` costs $0.003 (LocalSigner) or $0.004 (Turnkey), do we surface that or hide it under a flat-rate tier? Per-call pricing has cognitive friction; flat-rate ($5/mo for 1000 signs) is cleaner UX but exposes the operator to abuse. **Recommended hybrid above** picks flat-rate for paid tier + free LocalSigner tier.
-2. **Margin & sustainability.** Free tier with rate limits absorbs ~$0.30/user/mo. Paid tier $5/mo charges ~$4 in costs (Solana + Irys + Turnkey + margin) → ~$1/user/mo margin. At 10K paying users → $10K/mo margin. At 100K → $100K/mo. Need to build to ~5K paying users before sustainability.
+2. **Margin & sustainability.** Free tier with rate limits absorbs ~$0.30/user/mo. Paid tier $5/mo charges ~$4 in costs (Solana + Arweave + Turnkey + margin) → ~$1/user/mo margin. At 10K paying users → $10K/mo margin. At 100K → $100K/mo. Need to build to ~5K paying users before sustainability.
 3. **Free tier abuse.** LocalSigner+rate-limit gates casual abuse (5/min, 100/day, 100/month). But coordinated multi-account abuse possible. Need: per-IP rate limit on signup; CAPTCHA on `/oauth/register`; KYC-lite for identities crossing thresholds (>$10/mo equivalent).
 4. **Free tier shape.** 100 signs/mo, 5/min rate, 100/day cap — first cut. Tunable per usage telemetry. Recall stays free (read-only, no on-chain cost). Verify free.
 5. **Refund-on-error semantics.** If Solana confirmation times out but Arweave succeeds, do we refund? Charge half? Retry async? `payment.rs::refund_balance` exists but is currently called only on full failure.
 6. **KYC threshold.** Spending >$50/mo or >5000 signs/mo → require email verification + stronger identity. Current Turnkey email-passkey flow naturally gates this.
-7. **Cross-tenant cost attribution.** `attestation_costs` row has `irys_lamports`, `sol_tx_fee_lamports`, `sol_price_usdc`, `charge_micro_usdc`. Need new `turnkey_micro_usdc` column for Phase 1.x. Then per-user invoicing dashboard. Backlog.
+7. **Cross-tenant cost attribution.** `attestation_costs` row has `storage_cost_micro_usdc`, `sol_tx_fee_lamports`, `sol_price_usdc`, `charge_micro_usdc`. Need new `turnkey_micro_usdc` column for Phase 1.x. Then per-user invoicing dashboard. Backlog.
 8. **Treasury management.** Where do collected USDC go? Operator multisig (recommended for protocol legitimacy). Auto-swap to fiat or stable? Stripe payouts vs direct USDC retention? Decision deferred until Phase 1.5 billing UX lands.
 9. **Demo vs product mode.** Hackathon demo: `STORAGE_MODE=full + PAYMENT_MODE=none + RATE_LIMIT=on` works for ~hour-long demo, $50 budget. Real product: requires PAYMENT_MODE=balance + treasury + monitoring + support docs.
 10. **Turnkey vendor cost passthrough vs absorption.** Even at "free LocalSigner" tier, if a free user opts to use Turnkey for recovery without paying, who eats the $0.001/sig? Current recommended hybrid forces paid tier for Turnkey use — locks the vendor cost into the paid line item. Alternative: free Turnkey for first N signs, then forced upgrade.
 11. **Self-sovereign escape hatch.** Can a user export their Turnkey-managed key to a `LocalSigner` profile and switch tiers retroactively? Turnkey supports export — need UX flow + tier-downgrade logic.
-12. **Enterprise self-host.** Companies running their own MCP server pay zero per-sign costs (their own keypair, their own Irys account, their own Turnkey Sub-Org). Mnemonic charges enterprise license per seat or contract-based. UX flow: docker-compose + config docs + support tier.
+12. **Enterprise self-host.** Companies running their own MCP server pay zero per-sign costs (their own keypair, their own Turbo credits, their own Turnkey Sub-Org). Mnemonic charges enterprise license per seat or contract-based. UX flow: docker-compose + config docs + support tier.
 
 ---
 

@@ -15,7 +15,7 @@ settled exact payment whose external delivery is delayed or permanently fails.
 ## Scope
 
 - Document ownership and secret references for facilitator receipt signing,
-  EVM settlement, Solana relay, Irys funding, and staging endpoints.
+  EVM settlement, Solana relay, Turbo credits, and staging endpoints.
 - Define health/readiness checks and redacted metrics for payment settlement,
   delivery attempts, retry age, abandonment, relay balances, and
   receipt/delivery mismatches.

@@ -52,7 +52,7 @@
       "fixes_verified": [
         "health_check mock correctly described as GET /info (not GET /)",
         "read() mock correctly described as GET /{tx_id} with no /tx/ prefix or /data suffix",
-        "is_local() bypass handled via new_for_test constructor with force_irys field — present in What to do step 4, TDD Anchor, and Details"
+        "is_local() bypass handled via new_for_test constructor with force_bundler field — present in What to do step 4, TDD Anchor, and Details"
       ]
     },
     "8": {

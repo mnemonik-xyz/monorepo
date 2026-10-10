@@ -107,7 +107,7 @@ hosted-operator dependency), B3 bridge-only (denies pure-browser users publishin
   Mnemonic operator. `payment_mode` does not govern browser participate.
 - **Wallet management is net-new browser scope:** the Ed25519 *identity* key (signs
   the COSE artifact) is distinct from the **funding wallet(s)** — an Arweave wallet
-  (or a bundler like Irys/Turbo that accepts SOL) + a SOL-funded Solana fee-payer.
+  (or a bundler like Turbo that accepts SOL) + a SOL-funded Solana fee-payer.
   Likely "connect your wallet" (e.g. Phantom) rather than a hot key in the extension.
 - **Delivery guarantee still holds** via read-back + verify (fetch the anchored COSE
   bytes, re-check blake3 + Ed25519 against the Solana anchor) — this does **not**

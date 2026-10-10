@@ -11,7 +11,7 @@ Preserve existing signed formats and verification rules.
 This specification adds service contracts around existing formats.
 It does not replace [A2A recovery](../sealed-memories/a2a-recovery-spec.md).
 
-The first backend remains the repository's supported Arweave/Irys path.
+The first backend remains the repository's supported Arweave path (ArDrive Turbo upload, gateway reads).
 Backend independence is an interface goal. It is not proof that every provider is supported.
 Each adapter MUST declare fetch, discovery, size, consistency and retention capabilities.
 Unsupported discovery MUST be explicit. Known-locator recovery can still work separately.
