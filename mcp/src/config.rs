@@ -54,6 +54,10 @@ pub struct Config {
     /// Optional configured object-storage origin for migrated A2A parent bytes.
     /// Parent locators select only a digest, never an arbitrary URL.
     pub parent_blob_origin: Option<String>,
+    /// Read-only gateways tried, in order, when `arweave_url` refuses a read.
+    /// `ARWEAVE_FALLBACK_GATEWAYS` (comma-separated origins) overrides the
+    /// default; an empty value disables failover. Local gateways get none.
+    pub arweave_fallback_gateways: Vec<String>,
     /// Raw environment value, parsed and validated at startup so invalid
     /// values fail closed rather than silently falling back to mainnet.
     pub anchoring_network: String,
@@ -288,7 +292,7 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         let home = dirs_home();
-        Self {
+        let mut cfg = Self {
             transport: env_or("MCP_TRANSPORT", "http"),
             http_host: env_or("MCP_HTTP_HOST", "0.0.0.0"),
             http_port: env_or("MCP_HTTP_PORT", "3000").parse().unwrap_or(3000),
@@ -301,6 +305,7 @@ impl Config {
             parent_blob_origin: std::env::var("MNEMONIC_PARENT_BLOB_ORIGIN")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
+            arweave_fallback_gateways: Vec::new(),
             anchoring_network: env_or("ANCHORING_NETWORK", "mainnet"),
             database_path: expand_path(&env_or(
                 "DATABASE_PATH",
@@ -416,7 +421,12 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .filter(|&n| n > 0),
-        }
+        };
+        cfg.arweave_fallback_gateways = fallback_gateways(
+            std::env::var("ARWEAVE_FALLBACK_GATEWAYS").ok().as_deref(),
+            &cfg.arweave_url,
+        );
+        cfg
     }
 
     /// Validate `ollama_url` against the allowed whitelist.
@@ -559,6 +569,32 @@ fn staging_is_loopback(url: &str) -> bool {
         || lower.contains("//[::1]")
 }
 
+/// Default read fallbacks: independent gateways that serve Arweave data.
+pub const DEFAULT_ARWEAVE_FALLBACK_GATEWAYS: &[&str] = &[
+    "https://arweave.net",
+    "https://ar-io.dev",
+    "https://turbo-gateway.com",
+];
+
+/// Resolve the fallback list from the raw env value and the primary gateway.
+pub fn fallback_gateways(raw: Option<&str>, primary: &str) -> Vec<String> {
+    if primary.contains("localhost") || primary.contains("127.0.0.1") {
+        return Vec::new();
+    }
+    match raw {
+        Some(value) => value
+            .split(',')
+            .map(str::trim)
+            .filter(|origin| !origin.is_empty())
+            .map(str::to_string)
+            .collect(),
+        None => DEFAULT_ARWEAVE_FALLBACK_GATEWAYS
+            .iter()
+            .map(|origin| origin.to_string())
+            .collect(),
+    }
+}
+
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -601,6 +637,21 @@ fn dirs_home() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_gateways_default_override_disable_and_local() {
+        let primary = "https://gateway.example.com";
+        assert_eq!(
+            fallback_gateways(None, primary).len(),
+            DEFAULT_ARWEAVE_FALLBACK_GATEWAYS.len()
+        );
+        assert_eq!(
+            fallback_gateways(Some(" https://a.example , ,https://b.example "), primary),
+            vec!["https://a.example", "https://b.example"]
+        );
+        assert!(fallback_gateways(Some(""), primary).is_empty());
+        assert!(fallback_gateways(None, "http://localhost:1984").is_empty());
+    }
 
     #[test]
     fn accepts_localhost_with_port() {

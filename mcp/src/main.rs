@@ -352,7 +352,8 @@ async fn main() -> anyhow::Result<()> {
 
         let solana = SolanaClient::new(&cfg.solana_rpc_url);
         let gateway = ArweaveClient::new(&cfg.arweave_url)
-            .try_with_parent_blob_origin(cfg.parent_blob_origin.as_deref())?;
+            .try_with_parent_blob_origin(cfg.parent_blob_origin.as_deref())?
+            .try_with_fallback_gateways(&cfg.arweave_fallback_gateways)?;
         // NOTE the two distinct config fields, which are easy to confuse:
         //   `chain_stats_graphql_url` — the GraphQL INDEX endpoint
         //                               (`https://arweave.net/graphql`).
@@ -1072,7 +1073,8 @@ async fn main() -> anyhow::Result<()> {
         keypair,
         solana: solana::SolanaClient::new(&cfg.solana_rpc_url),
         arweave: arweave::ArweaveClient::new_with_network(&cfg.arweave_url, irys_network)
-            .try_with_parent_blob_origin(cfg.parent_blob_origin.as_deref())?,
+            .try_with_parent_blob_origin(cfg.parent_blob_origin.as_deref())?
+            .try_with_fallback_gateways(&cfg.arweave_fallback_gateways)?,
         store: std::sync::Mutex::new(store),
         embedder,
         compressor,
