@@ -26,7 +26,7 @@ A separate, open, read-only indexer service:
   unknown authors last.
 - It never reads private content.
 - The earlier draft specifications (`protocol-indexer`, `signed-header`) need rework for
-  Arweave and author signing; `irys-fixes` is superseded by 0002.
+  Arweave and author signing; the earlier draft that fixed the previous bundler is superseded by 0002.
 
 ## Alternatives considered
 
