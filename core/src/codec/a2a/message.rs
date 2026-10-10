@@ -73,7 +73,7 @@ mod tests {
     #[test]
     fn roundtrip_envelope_signs_and_verifies() {
         use crate::codec::sign::verify_artifact;
-        use solana_sdk::signature::{Keypair, Signer as _};
+        use solana_sdk::signature::Keypair;
 
         let kp = Keypair::new();
         let msg = sample_message();

@@ -27,7 +27,7 @@ use axum::{
     Router,
 };
 use http_body_util::BodyExt;
-use mnemonic_core::{codec::sign::sign_cose, embed::Embedder, storage::AttestationStore};
+use mnemonic_core::storage::AttestationStore;
 use mnemonic_mcp::{
     api::{get_pending_handler, sign_callback_handler},
     mcp::{mcp_handler, McpState},
@@ -71,89 +71,6 @@ async fn post_jsonrpc(app: &Router, body: Value, token: Option<&str>) -> (Status
     (status, parsed)
 }
 
-async fn get_pending(app: &Router, cid: &str, token: &str) -> Vec<u8> {
-    let req = Request::builder()
-        .method("GET")
-        .uri(format!("/api/pending/{cid}"))
-        .header("authorization", format!("Bearer {token}"))
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "GET pending failed");
-    resp.into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes()
-        .to_vec()
-}
-
-async fn callback(app: &Router, cid: &str, cose_b64: &str, signer: &str, token: &str) {
-    let req = Request::builder()
-        .method("POST")
-        .uri("/api/sign-callback")
-        .header("content-type", "application/json")
-        .header("authorization", format!("Bearer {token}"))
-        .body(Body::from(
-            serde_json::to_vec(&serde_json::json!({
-                "correlation_id": cid,
-                "cose_signed_bytes": cose_b64,
-                "signer_pubkey": signer,
-            }))
-            .unwrap(),
-        ))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "sign-callback failed");
-}
-
-fn extract_correlation_id(body: &Value) -> String {
-    let text_blob = body["result"]["content"][0]["text"]
-        .as_str()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| body["result"].to_string());
-    let inner: Value = serde_json::from_str(&text_blob).unwrap_or(body["result"].clone());
-    inner["correlation_id"]
-        .as_str()
-        .expect("correlation_id missing")
-        .to_string()
-}
-
-/// Drive one full deferred-sign cycle: sign_memory → fetch pending → sign
-/// locally → callback.
-///
-/// Uses the default visibility (private = sealed). For the recall-isolation
-/// test, memories are seeded directly via `save_attestation` so they appear
-/// in the embedding index (sealed rows are not vector-searchable by design).
-async fn _one_attestation_sealed(
-    app: &Router,
-    kp: &Keypair,
-    token: &str,
-    pubkey: &str,
-    content: &str,
-) {
-    let body = post_jsonrpc(
-        app,
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {
-                "name": "mnemonic_sign_memory",
-                "arguments": {"content": content, "tags": []},
-            },
-            "id": 1,
-        }),
-        Some(token),
-    )
-    .await
-    .1;
-    let cid = extract_correlation_id(&body);
-    let cbor = get_pending(app, &cid, token).await;
-    let cose = sign_cose(&cbor, kp).expect("sign_cose");
-    let cose_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &cose);
-    callback(app, &cid, &cose_b64, pubkey, token).await;
-}
-
 /// Pull recall results out of the MCP envelope. Returns the inner JSON
 /// (which is the `recall` tool's `serde_json::Value` — typically a
 /// `{matches: [...]}` shape).
@@ -173,7 +90,6 @@ async fn test_recall_filters_by_owner_pubkey_and_anonymous_returns_401() {
 
     let alice_kp = Keypair::new();
     let alice = alice_kp.pubkey().to_string();
-    let alice_token = oauth::issue_jwt(&oauth_state, &alice).expect("issue_jwt alice");
 
     let bob_kp = Keypair::new();
     let bob = bob_kp.pubkey().to_string();

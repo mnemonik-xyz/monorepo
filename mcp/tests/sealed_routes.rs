@@ -377,14 +377,12 @@ async fn mnemonic_verify_returns_sealed_for_sealed_row() {
         .unwrap_or("");
     let result: Value = serde_json::from_str(result_text).unwrap_or_default();
 
-    assert_eq!(
+    assert!(
         result["sealed"].as_bool().unwrap_or(false),
-        true,
         "mnemonic_verify must return sealed=true for sealed rows: {result}"
     );
-    assert_eq!(
-        result["readable"].as_bool().unwrap_or(true),
-        false,
+    assert!(
+        !result["readable"].as_bool().unwrap_or(true),
         "mnemonic_verify must return readable=false for sealed rows: {result}"
     );
 }

@@ -23,8 +23,7 @@
 //!
 //! - **Solana memo history.** Authoritative for historical items.
 //!   `core/src/arweave/recovery.rs` records a live check from 2026-07-09: 16
-//!   memos and 0 gateway-GraphQL hits, because gateways never indexed the old
-//!   Irys-bundled items.
+//!   memos and 0 gateway-GraphQL hits for items no Arweave gateway indexed.
 //! - **Gateway GraphQL.** Catches items whose memo write failed after the
 //!   upload, and everything tagged going forward.
 //!

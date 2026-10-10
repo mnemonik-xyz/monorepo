@@ -4,9 +4,9 @@
 //!
 //! 1. **Solana memo history** — authoritative for the historical items:
 //!    every `anchored` write left an SPL Memo naming its Arweave tx,
-//!    and `getSignaturesForAddress` enumerates them even though the
-//!    gateways' GraphQL never indexed the old Irys-bundled items
-//!    (verified live 2026-07-09: 16 memos, 0 GraphQL hits).
+//!    and `getSignaturesForAddress` enumerates them even for items that
+//!    no Arweave gateway index lists (verified live 2026-07-09: 16 memos,
+//!    0 GraphQL hits).
 //! 2. **Gateway GraphQL** ([`super::graphql`]) — catches items whose memo
 //!    is missing (e.g. a Solana write failed after the Arweave upload)
 //!    and future tagged uploads.

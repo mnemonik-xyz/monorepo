@@ -217,7 +217,7 @@ async fn admin_stats(
             "pricing": {
                 "current_price_micro_usdc": state.pricing.current_price(),
                 "current_sol_price_usdc": state.pricing.current_sol_price(),
-                "current_irys_lamports": state.pricing.current_irys_lamports(),
+                "current_storage_cost_micro_usdc": state.pricing.current_storage_cost_micro_usdc(),
             },
         }))
         .into_response(),
@@ -334,9 +334,7 @@ async fn main() -> anyhow::Result<()> {
     // because it needs the gateway, RPC and database paths, and before any
     // server wiring because it exits when done.
     if let Some(Command::Restore { dry_run }) = cli.command {
-        use mnemonic_core::arweave::graphql::{
-            flavour_from_url, solana_pubkey_to_arweave_address, GatewayFlavour, GraphQlClient,
-        };
+        use mnemonic_core::arweave::graphql::{solana_pubkey_to_arweave_address, GraphQlClient};
         use mnemonic_core::arweave::ArweaveClient;
         use mnemonic_core::solana::SolanaClient;
 
@@ -358,29 +356,22 @@ async fn main() -> anyhow::Result<()> {
         //   `chain_stats_graphql_url` — the GraphQL INDEX endpoint
         //                               (`https://arweave.net/graphql`).
         //   `chain_stats_gateway_url` — the PAYLOAD-FETCH gateway
-        //                               (`https://gateway.irys.xyz`), because
-        //                               arweave.net serves HTML placeholders for
-        //                               Irys-bundled items.
+        //                               (`https://arweave.net`).
         // Passing the gateway URL here silently enumerates nothing: the payload
         // host answers a GraphQL POST with an empty body, and an empty index is
         // indistinguishable from a failed query.
-        let flavour = flavour_from_url(&cfg.chain_stats_graphql_url);
-        let gql = GraphQlClient::new_with_flavour(&cfg.chain_stats_graphql_url, flavour);
+        let gql = GraphQlClient::new(&cfg.chain_stats_graphql_url);
         // A gateway owner filter is an optimisation, not a requirement: the memo
         // history already enumerates the historical items, and `list_anchored`
         // treats an empty address list as "tag-only". So a derivation failure
         // degrades the search rather than aborting the restore.
-        let arweave_addresses: Vec<String> = if flavour == GatewayFlavour::Irys {
-            vec![owner.clone()]
-        } else {
-            match solana_pubkey_to_arweave_address(&owner) {
-                Ok(addr) => vec![addr],
-                Err(e) => {
-                    eprintln!(
+        let arweave_addresses: Vec<String> = match solana_pubkey_to_arweave_address(&owner) {
+            Ok(addr) => vec![addr],
+            Err(e) => {
+                eprintln!(
                     "mnemonic: could not derive the Arweave address ({e}); enumerating by tag only"
                 );
-                    Vec::new()
-                }
+                Vec::new()
             }
         };
 
@@ -778,11 +769,8 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         }
     };
-    let irys_network = cfg
-        .irys_network()
-        .expect("anchoring network was validated immediately above");
     tracing::info!(
-        "Anchoring network: {:?} (Solana RPC: {}, Irys gateway: {})",
+        "Anchoring network: {:?} (Solana RPC: {}, Arweave gateway: {}, uploads via ArDrive Turbo)",
         anchoring_network,
         cfg.solana_rpc_url,
         cfg.arweave_url
@@ -805,7 +793,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Test-mode env guard — review round 2 finding F-1
     // (agent-native-distribution test-reviewer). The initial + background
-    // pricing.refresh() calls reach out to uploader.irys.xyz and
+    // pricing.refresh() calls reach out to the Turbo price API and
     // api.coingecko.com on startup; each has a 10s reqwest timeout, so on
     // a sandboxed CI runner the binary takes ~20s+ to settle into
     // `run_stdio` and the spawned-binary integration tests time out.
@@ -1072,7 +1060,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(mcp::McpState {
         keypair,
         solana: solana::SolanaClient::new(&cfg.solana_rpc_url),
-        arweave: arweave::ArweaveClient::new_with_network(&cfg.arweave_url, irys_network)
+        arweave: arweave::ArweaveClient::new(&cfg.arweave_url)
             .try_with_parent_blob_origin(cfg.parent_blob_origin.as_deref())?
             .try_with_fallback_gateways(&cfg.arweave_fallback_gateways)?,
         store: std::sync::Mutex::new(store),

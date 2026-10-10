@@ -72,10 +72,9 @@ impl ChainStatsCache {
     /// Re-enumerate the chain. Errors are returned (caller logs and keeps
     /// the previous snapshot — a gateway outage must not zero the page).
     ///
-    /// The Solana memo history is the primary source: gateways never
-    /// indexed the historical Irys-bundled items, so GraphQL alone returns
-    /// zero for them (verified live 2026-07-09 — 16 memos, 0 GraphQL
-    /// hits). GraphQL still runs to catch memo-less uploads and future
+    /// The Solana memo history is the primary source: gateways do not list
+    /// every historical item, so GraphQL alone can return zero for them
+    /// (verified live 2026-07-09 — 16 memos, 0 GraphQL hits). GraphQL still runs to catch memo-less uploads and future
     /// tagged items.
     pub async fn refresh(&self) -> anyhow::Result<usize> {
         let mut anchors = Vec::new();

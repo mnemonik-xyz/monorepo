@@ -203,7 +203,7 @@ async fn catalogue_embedder_invalid() {
     let resolved = resolve_write_mode(None, "local").unwrap();
 
     let cost_hint = mnemonic_mcp::pricing::CostHint {
-        irys_lamports: 0,
+        storage_cost_micro_usdc: 0,
         sol_tx_fee_lamports: 0,
         sol_price_usdc: 0.0,
         charge_micro_usdc: 0,

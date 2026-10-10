@@ -114,7 +114,7 @@ async fn anchored_write_makes_no_solana_rpc_call() {
     let pending = Arc::new(mnemonic_mcp::pending::PendingBundles::with_defaults());
     let store_mutex = std::sync::Mutex::new(store);
     let cost_hint = mnemonic_mcp::pricing::CostHint {
-        irys_lamports: 0,
+        storage_cost_micro_usdc: 0,
         sol_tx_fee_lamports: 0,
         sol_price_usdc: 0.0,
         charge_micro_usdc: 0,
@@ -241,7 +241,7 @@ async fn legacy_row_with_real_solana_tx_still_verifies() {
             "turbo_bits": 4,
             "embedding_compressed": base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
-                &[0u8; 4],
+                [0u8; 4],
             ),
         },
     });
@@ -310,7 +310,7 @@ async fn legacy_row_with_real_solana_tx_still_verifies() {
                 "2026-01-01T00:00:00Z",
                 WriteMode::Anchored,
                 Visibility::Private,
-                &vec![0.1f32; 8],
+                &[0.1f32; 8],
             )
             .expect("seed legacy row");
     }
@@ -431,10 +431,14 @@ async fn restore_covers_memo_and_no_memo_rows() {
     let gql = GraphQlClient::new(&format!("{}/graphql", server.base_url()));
     let gateway = ArweaveClient::new(&server.base_url());
 
-    let ChainSnapshot { items } =
-        snapshot_chain(&gql, &gateway, &[owner_did.clone()], &memo_anchors)
-            .await
-            .expect("snapshot_chain must succeed");
+    let ChainSnapshot { items } = snapshot_chain(
+        &gql,
+        &gateway,
+        std::slice::from_ref(&owner_did),
+        &memo_anchors,
+    )
+    .await
+    .expect("snapshot_chain must succeed");
 
     assert_eq!(
         items.len(),

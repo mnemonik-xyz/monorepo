@@ -803,7 +803,8 @@ mod envelope_pricing_tests {
             typical_payload_bytes: 2048,
             sol_tx_fee_lamports: 0,
         };
-        engine.apply_quote(300_000, 100.0, &cfg).expect("quote");
+        // 30_000 µUSDC storage, no memo fee, no margin.
+        engine.apply_quote(30_000, 100.0, &cfg).expect("quote");
 
         let live = Envelope::from_config("full", "x402", 1000).with_live_pricing(&engine);
         let c = live.anchored_cost.expect("cost");
@@ -1205,7 +1206,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "mnemonic_attest_a2a",
-            "description": "Verify a client-signed A2A binding and upload original bytes to Arweave/Irys. Hosted SQL keeps delivery receipts only. Returns attestation_id, blake3, locator and sealed flag.",
+            "description": "Verify a client-signed A2A binding and upload original bytes to Arweave. Hosted SQL keeps delivery receipts only. Returns attestation_id, blake3, locator and sealed flag.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2492,7 +2493,14 @@ async fn handle_tool_call(
                 .as_str()
                 .ok_or_else(|| JsonRpcError::simple(-32603, "correlation_id required"))?
                 .to_string();
-            tools::check_pending(&state.pending, &state.store, &state.arweave, &cid).await
+            tools::check_pending(
+                &state.pending,
+                &state.store,
+                &state.solana,
+                &state.arweave,
+                &cid,
+            )
+            .await
         }
         // request_public_write_confirmation — Decision 5b. Mints an
         // HMAC-bound, single-use confirmation token for a specific
