@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { DeliveryStatus } from "../components/DeliveryStatus";
+import { isArweaveId } from "../lib/delivery";
 import { Decoder } from "cbor-x";
 import ContentPreview from "../components/ContentPreview";
 import {
@@ -45,10 +47,7 @@ type Status =
   | {
       kind: "success";
       attestationId: string | null;
-      solanaTx: string | null;
       arweaveTx: string | null;
-      solanaExplorerUrl: string | null;
-      arweaveUrl: string | null;
     }
   | { kind: "rejected" }
   | { kind: "error"; message: string };
@@ -263,30 +262,11 @@ export default function Sign() {
           body && typeof body.attestation_id === "string"
             ? body.attestation_id
             : null;
-        const solanaTx =
-          body && typeof body.solana_tx === "string" ? body.solana_tx : null;
         const arweaveTx =
-          body && typeof body.arweave_tx === "string" ? body.arweave_tx : null;
-        const solanaExplorerUrl =
-          body &&
-          typeof body.solana_explorer_url === "string" &&
-          body.solana_explorer_url.length > 0
-            ? body.solana_explorer_url
+          body && typeof body.arweave_tx === "string" && body.arweave_tx.length > 0
+            ? body.arweave_tx
             : null;
-        const arweaveUrl =
-          body &&
-          typeof body.arweave_url === "string" &&
-          body.arweave_url.length > 0
-            ? body.arweave_url
-            : null;
-        setStatus({
-          kind: "success",
-          attestationId,
-          solanaTx,
-          arweaveTx,
-          solanaExplorerUrl,
-          arweaveUrl,
-        });
+        setStatus({ kind: "success", attestationId, arweaveTx });
         return;
       }
       if (res.status === 410) {
@@ -422,8 +402,8 @@ export default function Sign() {
             data-testid="sign-success"
           >
             <div className="font-medium">
-              Saved. Return to your AI tool and ask it to recall — or follow the
-              on-chain trail below.
+              Signed and saved. Your AI tool can continue now; delivery to
+              Arweave finishes in the background.
             </div>
 
             {status.attestationId && (
@@ -432,15 +412,6 @@ export default function Sign() {
                 data-testid="sign-success-attestation-id"
               >
                 attestation_id: {status.attestationId}
-              </div>
-            )}
-
-            {status.solanaTx && (
-              <div
-                className="font-mono text-xs break-all"
-                data-testid="sign-success-solana-tx"
-              >
-                solana_tx: {status.solanaTx}
               </div>
             )}
 
@@ -453,31 +424,14 @@ export default function Sign() {
               </div>
             )}
 
-            {(status.solanaExplorerUrl || status.arweaveUrl) && (
-              <div className="flex flex-wrap gap-2 pt-2">
-                {status.solanaExplorerUrl && (
-                  <a
-                    href={status.solanaExplorerUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="rounded border border-success/40 bg-success/20 px-3 py-1 text-xs font-medium hover:border-success/70 hover:bg-success/30"
-                    data-testid="sign-success-solscan-link"
-                  >
-                    View on Solscan
-                  </a>
-                )}
-                {status.arweaveUrl && (
-                  <a
-                    href={status.arweaveUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="rounded border border-success/40 bg-success/20 px-3 py-1 text-xs font-medium hover:border-success/70 hover:bg-success/30"
-                    data-testid="sign-success-arweave-link"
-                  >
-                    View on Arweave
-                  </a>
-                )}
-              </div>
+            {status.arweaveTx && isArweaveId(status.arweaveTx) ? (
+              <DeliveryStatus arweaveTx={status.arweaveTx} />
+            ) : (
+              status.arweaveTx && (
+                <div className="text-xs" data-testid="sign-success-local">
+                  Stored by this operator only; it is not delivered to Arweave.
+                </div>
+              )
             )}
           </div>
         )}
