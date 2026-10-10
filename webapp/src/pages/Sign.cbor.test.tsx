@@ -3,6 +3,8 @@ import { Encoder } from "cbor-x";
 import {
   __test__decodeContentFromCbor,
   __test__decodeEmbeddingFromCbor,
+  __test__isOwnerMismatch,
+  __test__peekProducerPubkey,
 } from "./Sign";
 
 /**
@@ -88,5 +90,25 @@ describe("Sign.tsx CBOR decoders", () => {
     const garbage = new Uint8Array([0xff, 0xff, 0xff, 0xff]);
     const got = __test__decodeContentFromCbor(garbage);
     expect(got).toMatch(/decode failed|preview unavailable|bundle: 4 bytes/);
+  });
+
+  it("peekProducerPubkey returns the base58 key from did:sol producer", () => {
+    const fixture = buildArtifactCbor("c", "AAEC");
+    expect(__test__peekProducerPubkey(fixture)).toBe("TestPubKey");
+  });
+
+  it("peekProducerPubkey returns null for a non did:sol producer or bad bytes", () => {
+    const other = encoder.encode({ type: "memory", producer: "did:key:z6Mk" });
+    expect(__test__peekProducerPubkey(other)).toBeNull();
+    const empty = encoder.encode({ type: "memory", producer: "did:sol:" });
+    expect(__test__peekProducerPubkey(empty)).toBeNull();
+    expect(__test__peekProducerPubkey(new Uint8Array([0xff]))).toBeNull();
+  });
+
+  it("isOwnerMismatch is true only when both keys are known and differ", () => {
+    expect(__test__isOwnerMismatch("A", "B")).toBe(true);
+    expect(__test__isOwnerMismatch("A", "A")).toBe(false);
+    expect(__test__isOwnerMismatch(null, "B")).toBe(false);
+    expect(__test__isOwnerMismatch("A", null)).toBe(false);
   });
 });

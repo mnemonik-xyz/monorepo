@@ -163,6 +163,12 @@ choose before attempting a write that might be rejected or charged.
     "pricing_status": "fallback",
     "payment_methods": ["x402"]
   },
+  "caller": {                      // HTTP with a valid token only
+    "public_key": "<base58 Ed25519>",
+    "did_sol": "did:sol:<base58>",
+    "did_key": "did:key:z6Mk...",
+    "attestation_count": 7
+  },
   "free_anchors": {                // HTTP + PAYMENT_MODE=x402 only
     "eligible": true,
     "per_day": 10,
@@ -177,6 +183,15 @@ choose before attempting a write that might be rejected or charged.
 
 `storage_mode` reflects the operator's *capability*, not a global switch — see
 [Write modes](#write-modes-local-vs-anchored).
+
+The top-level `public_key`, `did_sol`, `did_key` and `attestation_count` describe
+the server operator's key. On stdio, the operator key is your own identity.
+
+Over HTTP, `caller` describes your identity: the subject of your access token
+(available now). Your memories belong to this key. An approval link accepts a
+signature from this key only. If your browser holds a different key, the
+approval fails with `pending bundle owner mismatch`. The `caller` block is not
+present for anonymous calls.
 
 **`anchored_cost` fields:**
 
@@ -313,6 +328,14 @@ Complete it one of two ways:
    and `POST {correlation_id, signed}` to `/api/sign-callback`, then call
    `mnemonic_check_pending`. The SDK's `MnemonicClient.signMemory()` does this
    for you.
+
+Only the key in the bundle's `producer` field can sign it. This is the
+`caller` key from `mnemonic_whoami`. The sign page compares that key with the
+key in your browser before it signs (available now). If the keys are
+different, the page shows both keys and does not send the signature. A
+signature from a different key gets HTTP 403 `pending bundle owner mismatch`.
+The response body also contains `expected_signer`, the key that the bundle
+needs.
 
 A pending signature does not establish external delivery. Arweave is the
 single record of an anchored memory. Financial replay metadata may exist before

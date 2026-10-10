@@ -179,3 +179,49 @@ async fn test_tools_list_6_tools_and_sign_memory_returns_awaiting_signature() {
         "expires_in should be 300s (Decision 12 TTL)"
     );
 }
+
+/// `whoami` over HTTP reports two identities. The top level is the
+/// operator's key; `caller` is the JWT subject, which owns the caller's
+/// memories and must sign its pending bundles.
+#[tokio::test]
+async fn test_whoami_http_reports_caller_identity_separately() {
+    let state = mock_state();
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
+    let app = build_router(state.clone(), oauth_state.clone());
+
+    let user_pubkey = Keypair::new().pubkey().to_string();
+    let token = oauth::issue_jwt(&oauth_state, &user_pubkey).expect("issue_jwt");
+
+    let (status, body) = post_jsonrpc(
+        &app,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "mnemonic_whoami", "arguments": {}},
+            "id": 1,
+        }),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "whoami failed: {body}");
+    let text_blob = body["result"]["content"][0]["text"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| body["result"].to_string());
+    let inner: Value = serde_json::from_str(&text_blob).unwrap_or(body["result"].clone());
+
+    assert_eq!(inner["public_key"], state.keypair.pubkey_base58().as_str());
+    assert_ne!(inner["public_key"], user_pubkey.as_str());
+    let caller = &inner["caller"];
+    assert_eq!(
+        caller["public_key"],
+        user_pubkey.as_str(),
+        "caller: {inner}"
+    );
+    assert_eq!(caller["did_sol"], format!("did:sol:{user_pubkey}"));
+    assert!(caller["did_key"]
+        .as_str()
+        .unwrap_or("")
+        .starts_with("did:key:z"));
+    assert_eq!(caller["attestation_count"], 0);
+}

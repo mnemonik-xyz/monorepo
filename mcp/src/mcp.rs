@@ -1084,7 +1084,7 @@ fn tool_definitions() -> Value {
     let mut defs = serde_json::json!([
         {
             "name": "mnemonic_whoami",
-            "description": "Returns this agent's cryptographic identity: Solana public key, did:sol, did:key, attestation count",
+            "description": "Returns the server operator's identity (Solana public key, did:sol, did:key, attestation count), write modes and pricing. Over HTTP, `caller` holds the connected user's identity: the key that owns the user's memories and must sign approval links",
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
@@ -2179,7 +2179,16 @@ async fn handle_tool_call(
             let envelope = state.envelope.with_live_pricing(&state.pricing);
             let mut out = {
                 let store = state.store.lock().unwrap();
-                tools::whoami(&state.keypair, &store, &state.storage_mode, &envelope)
+                let mut out = tools::whoami(&state.keypair, &store, &state.storage_mode, &envelope);
+                // The top-level identity is the operator's key. Over HTTP the
+                // caller is a different identity (the JWT subject): the key
+                // that owns its memories and must sign its pending bundles.
+                if transport == crate::tools::Transport::Http {
+                    if let (Some(sub), Some(map)) = (jwt_sub, out.as_object_mut()) {
+                        map.insert("caller".into(), tools::caller_identity(sub, &store));
+                    }
+                }
+                out
             };
             // Free daily anchor quota for the caller (JWT subject). HTTP only:
             // stdio is never gated, so the block would mean nothing there.

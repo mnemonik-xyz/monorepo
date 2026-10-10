@@ -323,6 +323,30 @@ pub fn whoami(
     out
 }
 
+/// The `caller` block of `whoami` on HTTP: the JWT subject's identity and
+/// its own row count. This key owns the caller's memories and must sign its
+/// pending bundles. The DIDs are omitted when `sub` is not a valid pubkey.
+pub fn caller_identity(sub: &str, store: &SqliteStore) -> serde_json::Value {
+    let mut out = serde_json::json!({
+        "public_key": sub,
+        "attestation_count": store.count(sub).unwrap_or(0),
+    });
+    if let (Ok(pk), Some(map)) = (
+        sub.parse::<solana_sdk::pubkey::Pubkey>(),
+        out.as_object_mut(),
+    ) {
+        map.insert(
+            "did_sol".into(),
+            mnemonic_core::identity::did_sol_from_pubkey(&pk).into(),
+        );
+        map.insert(
+            "did_key".into(),
+            mnemonic_core::identity::did_key_from_pubkey(&pk).into(),
+        );
+    }
+    out
+}
+
 /// Tool 2: sign_memory — branches on `jwt_sub`, the resolved write mode and
 /// the `transport`.
 ///

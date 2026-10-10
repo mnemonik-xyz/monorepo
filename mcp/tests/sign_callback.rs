@@ -285,6 +285,12 @@ async fn test_sign_callback_validates_signer_pubkey_eq_jwt_sub() {
 
     let (status, body) = post_callback(&app, &token, &cid, &cose_b64, &bogus).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "body={body}");
+    assert_eq!(
+        body["error"], "pending bundle owner mismatch",
+        "body={body}"
+    );
+    // The client can tell the user which key the request needs.
+    assert_eq!(body["expected_signer"], pubkey.as_str(), "body={body}");
 }
 
 #[tokio::test]

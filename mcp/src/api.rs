@@ -12,7 +12,7 @@
 //!   `{"correlation_id": String, "cose_signed_bytes": base64, "signer_pubkey": base58}`.
 //!   Validation order:
 //!   1. lookup pending (410 if missing/expired/consumed)
-//!   2. assert `signer_pubkey == jwt.sub` (403 otherwise)
+//!   2. assert `signer_pubkey == jwt.sub` (403 with `expected_signer` otherwise)
 //!   3. verify COSE_Sign1 against `entry.content_hash` (401 otherwise)
 //!   4. atomically `consume` (single-use; replay → 410)
 //!   5. persist via `AttestationStore::save_attestation(... owner_pubkey = jwt.sub)`
@@ -220,7 +220,18 @@ pub async fn sign_callback_handler(
     };
 
     if entry.jwt_sub != req.signer_pubkey {
-        return error_resp(StatusCode::FORBIDDEN, "pending bundle owner mismatch");
+        // `expected_signer` is the owner's public key. The artifact's
+        // `producer` field already carries it, so this discloses nothing new;
+        // it lets the client say which key the request needs.
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": "pending bundle owner mismatch",
+                "expected_signer": entry.jwt_sub,
+            })),
+        )
+            .into_response();
     }
 
     // 4. Verify COSE before a quote can be created. A bad signature cannot

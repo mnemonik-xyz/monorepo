@@ -68,6 +68,12 @@ interface PendingBundle {
    * decrypted in the browser before display (tech-spec §8.1 step 5).
    */
   isSealed?: boolean;
+  /**
+   * Base58 pubkey from the artifact's `producer` (`did:sol:<base58>`), or
+   * null when the bundle carries no readable producer. The server only
+   * accepts a signature from this key (`api.rs::sign_callback_handler`).
+   */
+  producerPubkey: string | null;
 }
 
 /** UUID v4 shape — used to validate the path param before hitting the API. */
@@ -171,11 +177,20 @@ export default function Sign() {
         // showing the content to the user.
         const artifactType = peekArtifactType(buf);
         const isSealed = artifactType === "sealed";
+        const producerPubkey = peekProducerPubkey(buf);
+        const ownerMismatch = isOwnerMismatch(
+          producerPubkey,
+          readIdentity()?.pubkey_base58 ?? null,
+        );
 
         let content: string;
         const embeddingBytes = decodeEmbeddingFromCbor(buf);
 
-        if (isSealed) {
+        if (isSealed && ownerMismatch) {
+          // Sealed to the owner's key: this browser's key cannot open it.
+          content =
+            "[Sealed memory — this browser does not hold the owner key, so it cannot show the content.]";
+        } else if (isSealed) {
           // Decrypt the sealed bundle in the browser so the user sees the
           // plaintext they are about to commit to (tech-spec §8.1 step 5,
           // S4 attack mitigation).
@@ -194,6 +209,7 @@ export default function Sign() {
             expiresAtMs,
             embeddingBytes,
             isSealed,
+            producerPubkey,
           },
         });
       } catch (e) {
@@ -226,6 +242,10 @@ export default function Sign() {
     // JWT is optional — capability via correlation_id + keypair-signed COSE
     // is the auth path for cross-tool flow (see api.rs::sign_callback_handler).
     if (!identity || !correlationId) return;
+    // The server rejects any other key; do not send a doomed signature.
+    if (isOwnerMismatch(status.bundle.producerPubkey, identity.pubkey_base58)) {
+      return;
+    }
 
     setStatus({ kind: "signing" });
 
@@ -280,6 +300,9 @@ export default function Sign() {
       try {
         const body = await res.json();
         if (body && typeof body.error === "string") detail = body.error;
+        if (body && typeof body.expected_signer === "string") {
+          detail += `. This request needs the key ${body.expected_signer}; this browser holds ${identity.pubkey_base58}`;
+        }
       } catch {
         // ignore parse error
       }
@@ -302,6 +325,14 @@ export default function Sign() {
         : null;
   const remainingMs = expiresAtMs !== null ? Math.max(0, expiresAtMs - now) : 0;
   const remainingLabel = formatMmSs(remainingMs);
+
+  // This browser's pubkey when it differs from the bundle owner, else null.
+  const localPubkey = useMemo(() => readIdentity()?.pubkey_base58 ?? null, []);
+  const ownerMismatchKey =
+    status.kind === "ready" &&
+    isOwnerMismatch(status.bundle.producerPubkey, localPubkey)
+      ? localPubkey
+      : null;
 
   // Auto-flip to expired state when the timer hits zero.
   useEffect(() => {
@@ -368,15 +399,45 @@ export default function Sign() {
             >
               Expires in {remainingLabel}
             </p>
-            <div className="flex flex-wrap gap-3">
-              <button
-                type="button"
-                onClick={handleSign}
-                className="rounded-md bg-accent-primary px-5 py-2.5 text-sm font-semibold text-background transition-opacity hover:opacity-90"
-                data-testid="sign-approve"
+            {ownerMismatchKey && (
+              <div
+                className="space-y-2 rounded-md border border-error/30 bg-error/10 p-4 text-sm text-error"
+                role="alert"
+                data-testid="sign-owner-mismatch"
               >
-                Sign with my Mnemonic identity
-              </button>
+                <div className="font-medium">
+                  This request belongs to a different Mnemonic identity. You
+                  cannot sign it in this browser.
+                </div>
+                <div className="font-mono text-xs break-all">
+                  Request owner: did:sol:{status.bundle.producerPubkey}
+                </div>
+                <div className="font-mono text-xs break-all">
+                  This browser: did:sol:{ownerMismatchKey}
+                </div>
+                <ul className="list-disc space-y-1 pl-5">
+                  <li>
+                    Open this link in the browser where you connected your AI
+                    tool to Mnemonik.
+                  </li>
+                  <li>
+                    Or connect your AI tool again from this browser. New
+                    requests then use the key in this browser.
+                  </li>
+                </ul>
+              </div>
+            )}
+            <div className="flex flex-wrap gap-3">
+              {!ownerMismatchKey && (
+                <button
+                  type="button"
+                  onClick={handleSign}
+                  className="rounded-md bg-accent-primary px-5 py-2.5 text-sm font-semibold text-background transition-opacity hover:opacity-90"
+                  data-testid="sign-approve"
+                >
+                  Sign with my Mnemonic identity
+                </button>
+              )}
               <button
                 type="button"
                 onClick={handleReject}
@@ -604,6 +665,35 @@ function peekArtifactType(buf: Uint8Array): string {
 }
 
 /**
+ * Read the base58 pubkey from the artifact's `producer` field
+ * (`did:sol:<base58>`). Returns null when the field is missing, is not a
+ * `did:sol:` DID, or the bytes do not decode.
+ */
+function peekProducerPubkey(buf: Uint8Array): string | null {
+  try {
+    const producer = decodeArtifactFromCbor(buf).producer;
+    if (typeof producer !== "string") return null;
+    const prefix = "did:sol:";
+    if (!producer.startsWith(prefix)) return null;
+    const pubkey = producer.slice(prefix.length);
+    return pubkey.length > 0 ? pubkey : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True only when both keys are known and differ. An unknown producer or a
+ * missing local key is not a mismatch: the server stays the authority.
+ */
+function isOwnerMismatch(
+  producerPubkey: string | null,
+  localPubkey: string | null,
+): boolean {
+  return producerPubkey !== null && localPubkey !== null && producerPubkey !== localPubkey;
+}
+
+/**
  * Attempt browser-side decryption of a SEALED_V1 bundle.
  *
  * Uses WASM `open_memory(sealed_cbor, keypair_json)` when available (tasks 1-5).
@@ -641,6 +731,8 @@ async function decryptSealedContent(buf: Uint8Array): Promise<string> {
 export const __test__decodeContentFromCbor = decodeContentFromCbor;
 export const __test__decodeEmbeddingFromCbor = decodeEmbeddingFromCbor;
 export const __test__peekArtifactType = peekArtifactType;
+export const __test__peekProducerPubkey = peekProducerPubkey;
+export const __test__isOwnerMismatch = isOwnerMismatch;
 
 function ErrorShell({
   title,

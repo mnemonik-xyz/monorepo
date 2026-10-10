@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { Encoder } from "cbor-x";
 import {
   afterEach,
   beforeEach,
@@ -149,5 +150,45 @@ describe("Sign page", () => {
     const { url, headers } = firstFetch();
     expect(url).toBe(`${MCP_BASE}/api/pending/${TEST_UUID}`);
     expect(headers.Authorization).toMatch(/^Bearer /);
+  });
+
+  function serveBundleFrom(producer: string) {
+    fetchMock.mockImplementation(async () => {
+      const expiresAtSec = Math.floor(mockNow / 1000) + 5 * 60;
+      const cbor = new Encoder().encode({
+        type: "memory",
+        content: "owner check bundle",
+        producer,
+      });
+      return new Response(cbor, {
+        status: 200,
+        headers: {
+          "content-type": "application/cbor",
+          "x-mnemonic-content-hash": "deadbeef",
+          "x-mnemonic-expires-at": expiresAtSec.toString(),
+        },
+      });
+    });
+  }
+
+  it("blocks signing when the bundle owner is not this browser's key", async () => {
+    serveBundleFrom("did:sol:SomeOtherOwnerKey");
+    renderSign(`/sign/${TEST_UUID}`);
+    const alert = await screen.findByTestId(
+      "sign-owner-mismatch",
+      {},
+      { timeout: 3000 },
+    );
+    expect(alert.textContent).toContain("did:sol:SomeOtherOwnerKey");
+    expect(alert.textContent).toContain("did:sol:TestSubPubKey123");
+    expect(screen.queryByTestId("sign-approve")).toBeNull();
+    expect(screen.getByTestId("sign-reject")).toBeTruthy();
+  });
+
+  it("offers signing when the bundle owner is this browser's key", async () => {
+    serveBundleFrom("did:sol:TestSubPubKey123");
+    renderSign(`/sign/${TEST_UUID}`);
+    await screen.findByTestId("sign-approve", {}, { timeout: 3000 });
+    expect(screen.queryByTestId("sign-owner-mismatch")).toBeNull();
   });
 });
