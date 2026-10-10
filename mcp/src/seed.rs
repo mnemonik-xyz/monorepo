@@ -423,7 +423,6 @@ pub async fn run(state: &McpState) -> Result<()> {
             let seed_args = serde_json::json!({});
             let result = tools::sign_memory(
                 &state.keypair,
-                &state.solana,
                 &state.arweave,
                 &state.store,
                 state.embedder.as_ref(),

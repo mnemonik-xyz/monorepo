@@ -90,16 +90,15 @@ signed_at:      2026-05-02T10:00:00Z
 status:         anchored
 write_mode:     anchored
 content_hash:   <blake3 of your content>
-solana_tx:      <real Solana SPL Memo tx>      ← anchor on mainnet
 arweave_tx:     <real Arweave tx>              ← bytes preserved
 ```
 
-`--anchor` (alias `--anchored`) reads your private key and signs the memory locally. The server then anchors it on Arweave and Solana. This write can be paid. It is the only memory write that reads the private key.
+`--anchor` (alias `--anchored`) reads your private key and signs the memory locally. The server then anchors it on Arweave. This write can be paid. It is the only memory write that reads the private key.
 
 An anchored memory:
 
 - Anyone can semantically search.
-- Anyone with the `solana_tx` can independently verify (no Mnemonic-server dependency).
+- Anyone with the `arweave_tx` can independently verify (no Mnemonic-server dependency).
 - Will outlive the laptop you signed it on.
 
 ### 4. Recall semantically (1 second)
@@ -124,9 +123,6 @@ curl -sS "https://arweave.net/<arweave_tx>" -o memory.cose
 
 # Recompute the hash + verify the COSE signature
 # (sample verifier code in packages/sdk/src/verify.ts)
-
-# Confirm Solana SPL Memo tx contains the same hash
-solana confirm <solana_tx> --url https://api.mainnet-beta.solana.com
 ```
 
 The point of the protocol is that your claim ("I signed this memory at this time") is third-party-verifiable — no central authority required.
@@ -162,7 +158,7 @@ const note = await client.signMemory("first memory", { mode: "local", tags: ["de
 console.log(note.attestationId, note.status);             // "stored", no key used
 
 const claim = await client.signMemory("public claim", { mode: "anchored" });
-console.log(claim.attestationId, claim.solanaTx, claim.arweaveTx);
+console.log(claim.attestationId, claim.arweaveTx);
 
 const hits = await client.recall("first");
 console.log(hits);

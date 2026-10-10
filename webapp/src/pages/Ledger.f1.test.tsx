@@ -28,7 +28,6 @@ const PLAINTEXT_ANCHORED: Artifact = {
   content: "Old anchored memory written before encryption.",
   content_hash: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
   tags: [],
-  solana_tx: "5Nf5h5x2qQk8wq7Yk3J9p1d2c3b4a5n6m7l8k9j0",
   arweave_tx: "kTQ7t1f9c2X3v4B5n6M7l8K9j0I1h2G3f",
   created_at: "2026-01-01T00:00:00.000Z",
   write_mode: "anchored",
@@ -54,7 +53,6 @@ const LOCAL_PLAINTEXT: Artifact = {
   id: "f1-test-0004-4a00-9c01-000000000004",
   content: "Local only memory.",
   write_mode: "local",
-  solana_tx: null,
   arweave_tx: null,
   privacy: "plaintext",
 };

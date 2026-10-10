@@ -23,7 +23,6 @@ struct InMemRow {
     attestation_id: String,
     content: String,
     content_hash: String,
-    solana_tx: String,
     arweave_tx: String,
     signer_pubkey: String,
     context_id: Option<String>,
@@ -51,7 +50,7 @@ impl AttestationStore for InMemoryA2aStore {
         content: &str,
         content_hash: &str,
         _tags: &[String],
-        solana_tx: &str,
+        _solana_tx: &str,
         arweave_tx: &str,
         signer_pubkey: &str,
         _owner_pubkey: &str,
@@ -71,7 +70,6 @@ impl AttestationStore for InMemoryA2aStore {
                 attestation_id: attestation_id.to_string(),
                 content: content.to_string(),
                 content_hash: content_hash.to_string(),
-                solana_tx: solana_tx.to_string(),
                 arweave_tx: arweave_tx.to_string(),
                 signer_pubkey: signer_pubkey.to_string(),
                 context_id: existing_ctx,
@@ -88,12 +86,11 @@ impl AttestationStore for InMemoryA2aStore {
     ) -> anyhow::Result<Option<AttestationRow>> {
         let map = self.rows.lock().unwrap();
         for row in map.values() {
-            if row.solana_tx == tx_id || row.arweave_tx == tx_id {
+            if row.arweave_tx == tx_id {
                 return Ok(Some(AttestationRow {
                     attestation_id: row.attestation_id.clone(),
                     content: row.content.clone(),
                     content_hash: row.content_hash.clone(),
-                    solana_tx: row.solana_tx.clone(),
                     arweave_tx: row.arweave_tx.clone(),
                     signer_pubkey: row.signer_pubkey.clone(),
                 }));
@@ -152,7 +149,6 @@ impl AttestationStore for InMemoryA2aStore {
                 attestation_id: r.attestation_id.clone(),
                 content: r.content.clone(),
                 content_hash: r.content_hash.clone(),
-                solana_tx: r.solana_tx.clone(),
                 arweave_tx: r.arweave_tx.clone(),
                 signer_pubkey: r.signer_pubkey.clone(),
             })

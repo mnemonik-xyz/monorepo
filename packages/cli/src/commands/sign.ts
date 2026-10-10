@@ -171,7 +171,6 @@ async function runSignPublic(
     if (result.writeMode) lines.push(`write_mode:     ${result.writeMode}`);
     if (result.contentHash) lines.push(`content_hash:   ${result.contentHash}`);
     if (result.arweaveTx) lines.push(`arweave_tx:     ${result.arweaveTx}`);
-    if (result.solanaTx) lines.push(`solana_tx:      ${result.solanaTx}`);
     return lines.join("\n");
   });
 }

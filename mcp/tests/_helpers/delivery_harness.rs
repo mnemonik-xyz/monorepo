@@ -20,10 +20,8 @@
 //! - `happy` → all stages pass (anchor + GET return identical bytes;
 //!   recall depends on the embedder which is deterministic).
 //!
-//! The Solana mock always returns a canned `getLatestBlockhash` +
-//! `sendTransaction` + `getSignatureStatuses(confirmed)` so `write_memo`
-//! succeeds; we treat the chain anchor as orthogonal to T3's delivery
-//! check.
+//! The Solana mock serves the x402 USDC payment lookups. Memory records
+//! are not written to Solana; delivery failure modes are on the Arweave side.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -208,9 +206,9 @@ impl MockArweave {
     }
 }
 
-/// Steerable Solana JSON-RPC mock. Always returns canned responses so
-/// `write_memo` succeeds. The chain anchor is orthogonal to T3's delivery
-/// check — we focus failure modes on the Arweave side.
+/// Steerable Solana JSON-RPC mock for x402 USDC payment verification.
+/// Memory records are not written to Solana — failure modes focus on the
+/// Arweave side.
 pub struct MockSolana {
     pub server: MockServer,
 }

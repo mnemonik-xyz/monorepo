@@ -141,7 +141,9 @@ async fn artifacts_plain_list_returns_public_rows_only_with_shape() {
     assert_eq!(row["content"], "public ledger row");
     assert_eq!(row["content_hash"], "hash-pub");
     assert_eq!(row["tags"], serde_json::json!(["release"]));
-    assert_eq!(row["solana_tx"], "5NfSolanaPubSig");
+    // Arweave is the single record: no Solana field on the wire, even for a
+    // row whose legacy `solana_tx` column is not empty.
+    assert!(row.get("solana_tx").is_none(), "{row}");
     assert_eq!(row["arweave_tx"], "ArweavePubTx");
     assert_eq!(row["created_at"], "2026-06-10T00:00:00Z");
     assert_eq!(row["write_mode"], "anchored");
@@ -205,7 +207,6 @@ fn chain_item(
 ) -> RecoveredItem {
     RecoveredItem {
         arweave_tx: tx.to_string(),
-        solana_tx: Some(format!("sol-{tx}")),
         content_hash: Some(hash.to_string()),
         content: Some(content.to_string()),
         tags: Vec::new(),
@@ -269,7 +270,7 @@ async fn artifacts_recall_finds_chain_recovered_items_with_empty_db() {
         let text_row = &body["artifacts"][pos("tx-text").unwrap()];
         assert_eq!(text_row["write_mode"], "anchored");
         assert_eq!(text_row["content_hash"], "h3");
-        assert_eq!(text_row["solana_tx"], "sol-tx-text");
+        assert!(text_row.get("solana_tx").is_none(), "{text_row}");
     }
 
     // `limit` still caps the combined page.

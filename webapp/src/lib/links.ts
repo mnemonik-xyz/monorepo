@@ -25,16 +25,10 @@ export const EXTERNAL_LINKS = {
 export type ExternalLinkKey = keyof typeof EXTERNAL_LINKS;
 
 /**
- * External URL builders for the on-chain anchors and storage receipts attached
- * to an attestation. `local:`-prefixed ids are synthetic (offline / on-node
- * only) and have no external page.
- */
-export function solanaTxUrl(tx: string | null | undefined): string | null {
-  if (!tx || tx.startsWith("local:")) return null;
-  return `https://explorer.solana.com/tx/${encodeURIComponent(tx)}`;
-}
-
-/**
+ * External URL builder for the Arweave copy of an attestation. Arweave is the
+ * single record of an anchored memory. `local:`-prefixed ids are synthetic
+ * (offline / on-node only) and have no external page.
+ *
  * Production storage returns an ANS-104 data item id (43-char base64url),
  * uploaded through ArDrive Turbo. Data items are not Arweave L1 transactions,
  * so ViewBlock returns 404 for these ids; the retrieval URL is an Arweave

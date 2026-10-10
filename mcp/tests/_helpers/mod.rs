@@ -459,7 +459,7 @@ impl TestServer {
     }
 
     /// Read the persisted `write_mode` column for an attestation by its
-    /// Solana tx id. Returns the lowercase string straight from the
+    /// Arweave tx id. Returns the lowercase string straight from the
     /// SQLite cell so a test can `assert_eq!(..., "local")`. Tests need
     /// this because `AttestationRow` does not (yet) surface `write_mode`
     /// — surfacing it through the public type is T4's job (it adds
@@ -468,7 +468,7 @@ impl TestServer {
         let store = self.state.store.lock().expect("store mutex");
         let conn = store.conn();
         let result: rusqlite::Result<String> = conn.query_row(
-            "SELECT write_mode FROM attestations WHERE solana_tx = ?",
+            "SELECT write_mode FROM attestations WHERE arweave_tx = ?",
             rusqlite::params![tx_id],
             |row| row.get::<_, String>(0),
         );

@@ -1,15 +1,8 @@
 //! Chain recovery — rebuild traction facts from the chain after DB loss.
 //!
-//! Two enumeration sources, unioned by `arweave_tx`:
-//!
-//! 1. **Solana memo history** — authoritative for the historical items:
-//!    every `anchored` write left an SPL Memo naming its Arweave tx,
-//!    and `getSignaturesForAddress` enumerates them even for items that
-//!    no Arweave gateway index lists (verified live 2026-07-09: 16 memos,
-//!    0 GraphQL hits).
-//! 2. **Gateway GraphQL** ([`super::graphql`]) — catches items whose memo
-//!    is missing (e.g. a Solana write failed after the Arweave upload)
-//!    and future tagged uploads.
+//! Gateway GraphQL ([`super::graphql`]) enumerates the items that the
+//! configured owners uploaded to Arweave. Each item is then fetched from a
+//! gateway and decoded.
 //!
 //! The producer identity of each memory lives in the COSE_Sign1 payload
 //! (`producer = "did:sol:<sub>"`). New uploads carry a `Producer` tag so
@@ -18,17 +11,13 @@
 
 use super::graphql::GraphQlClient;
 use super::ArweaveClient;
-use crate::solana::MemoAnchor;
 use coset::CborSerializable;
 
 /// One anchored memory with everything traction stats need.
 #[derive(Debug, Clone)]
 pub struct RecoveredItem {
     pub arweave_tx: String,
-    /// Solana transaction containing the anchor memo, when recovered from
-    /// memo history. GraphQL-only Arweave items may not have one.
-    pub solana_tx: Option<String>,
-    /// Blake3 hash from the Solana memo, or recomputed from the COSE payload.
+    /// Blake3 hash recomputed from the COSE payload.
     pub content_hash: Option<String>,
     /// Decoded artifact `content` from the COSE payload, when fetchable.
     pub content: Option<String>,
@@ -62,88 +51,45 @@ pub struct ChainSnapshot {
     pub items: Vec<RecoveredItem>,
 }
 
-/// Internal staging record while we union memo anchors and GraphQL items.
-/// Named struct instead of a 5-tuple to keep clippy::type_complexity happy.
-#[derive(Debug, Clone)]
-struct PendingItem {
-    arweave_tx: String,
-    solana_tx: Option<String>,
-    content_hash: Option<String>,
-    block_time: Option<i64>,
-    producer: Option<String>,
-}
-
-/// Union memo anchors and GraphQL items into the anchored ledger, then
-/// backfill producers by fetching + decoding COSE payloads where no
-/// `Producer` tag was indexed. A single unreadable payload downgrades that
-/// item's producer to `None` (still counted in totals) rather than failing
-/// the whole snapshot.
+/// List the anchored ledger through GraphQL, then backfill producers by
+/// fetching + decoding COSE payloads where no `Producer` tag was indexed. A
+/// single unreadable payload downgrades that item's producer to `None` (still
+/// counted in totals) rather than failing the whole snapshot.
 pub async fn snapshot_chain(
     gql: &GraphQlClient,
     gateway: &ArweaveClient,
     owner_addresses: &[String],
-    memo_anchors: &[MemoAnchor],
 ) -> anyhow::Result<ChainSnapshot> {
     let anchored = gql.list_anchored(owner_addresses).await?;
 
-    // Memo anchors first (they carry the memo-write time, closer to the user
-    // action than the item's own block), GraphQL items add anything the memo
-    // history missed.
     let mut seen = std::collections::HashSet::new();
-    let mut pending: Vec<PendingItem> = Vec::new();
-    for m in memo_anchors {
-        if seen.insert(m.arweave_tx.clone()) {
-            pending.push(PendingItem {
-                arweave_tx: m.arweave_tx.clone(),
-                solana_tx: Some(m.solana_tx.clone()),
-                content_hash: Some(m.content_hash.clone()),
-                block_time: m.block_time,
-                producer: None,
-            });
-        }
-    }
+    let mut items = Vec::with_capacity(anchored.len());
     for a in anchored {
-        if seen.insert(a.arweave_tx.clone()) {
-            pending.push(PendingItem {
-                arweave_tx: a.arweave_tx,
-                solana_tx: None,
-                content_hash: None,
-                block_time: a.block_time,
-                producer: a.producer,
-            });
+        if !seen.insert(a.arweave_tx.clone()) {
+            continue;
         }
-    }
-
-    let mut items = Vec::with_capacity(pending.len());
-    for PendingItem {
-        arweave_tx,
-        solana_tx,
-        content_hash: memo_hash,
-        block_time,
-        producer: tagged_producer,
-    } in pending
-    {
-        let decoded = match gateway.read(&arweave_tx).await {
+        let decoded = match gateway.read(&a.arweave_tx).await {
             Ok(bytes) => artifact_from_cose(&bytes),
             Err(e) => {
-                tracing::warn!("chain recovery: payload fetch failed for {arweave_tx}: {e}");
+                tracing::warn!(
+                    "chain recovery: payload fetch failed for {}: {e}",
+                    a.arweave_tx
+                );
                 None
             }
         };
-        let producer = match (tagged_producer, decoded.as_ref()) {
+        let producer = match (a.producer, decoded.as_ref()) {
             (Some(p), _) => Some(p),
-            (None, Some(a)) => a.producer.clone(),
+            (None, Some(d)) => d.producer.clone(),
             (None, None) => None,
         };
         items.push(RecoveredItem {
-            arweave_tx,
-            solana_tx,
-            content_hash: memo_hash
-                .or_else(|| decoded.as_ref().and_then(|a| a.content_hash.clone())),
-            content: decoded.as_ref().and_then(|a| a.content.clone()),
-            embedding: decoded.as_ref().and_then(|a| a.embedding.clone()),
-            tags: decoded.map(|a| a.tags).unwrap_or_default(),
-            day: block_time.and_then(day_from_unix),
+            arweave_tx: a.arweave_tx,
+            content_hash: decoded.as_ref().and_then(|d| d.content_hash.clone()),
+            content: decoded.as_ref().and_then(|d| d.content.clone()),
+            embedding: decoded.as_ref().and_then(|d| d.embedding.clone()),
+            tags: decoded.map(|d| d.tags).unwrap_or_default(),
+            day: a.block_time.and_then(day_from_unix),
             producer,
         });
     }
@@ -365,7 +311,7 @@ mod tests {
 
         let gql = GraphQlClient::new(&format!("{}/graphql", server.base_url()));
         let gateway = ArweaveClient::new(&server.base_url());
-        let snap = snapshot_chain(&gql, &gateway, &[], &[]).await.unwrap();
+        let snap = snapshot_chain(&gql, &gateway, &[]).await.unwrap();
 
         assert_eq!(snap.items.len(), 2);
         assert_eq!(
@@ -379,65 +325,5 @@ mod tests {
         );
         assert_eq!(snap.items[1].day, None);
         payload_mock.assert();
-    }
-
-    #[tokio::test]
-    async fn memo_anchors_union_with_graphql_and_backfill_producers() {
-        // Production shape (verified live): the memo history knows every
-        // anchor, GraphQL knows none of the old ones. One tx appears in
-        // both sources and must not double-count; the memo-only item gets
-        // its producer from the payload.
-        let server = MockServer::start();
-        let cose = signed_memory_cose("did:sol:memo-user");
-
-        server.mock(|when, then| {
-            when.method(POST).path("/graphql");
-            then.status(200).json_body(serde_json::json!({
-                "data": { "transactions": {
-                    "pageInfo": { "hasNextPage": false },
-                    "edges": [
-                        { "cursor": "c1", "node": { "id": "shared-tx",
-                          "block": {"timestamp": 1_700_000_000},
-                          "tags": [{"name": "Producer", "value": "did:sol:tagged-user"}] } },
-                    ],
-                }}
-            }));
-        });
-        server.mock(|when, then| {
-            when.method(GET).path("/memo-only-tx");
-            then.status(200).body(cose.clone());
-        });
-        // The shared tx also needs a payload fetch: the memo anchor comes
-        // first in the union and carries no producer tag.
-        server.mock(|when, then| {
-            when.method(GET).path("/shared-tx");
-            then.status(200)
-                .body(signed_memory_cose("did:sol:tagged-user"));
-        });
-
-        let anchors = vec![
-            MemoAnchor {
-                solana_tx: "sig1".into(),
-                arweave_tx: "memo-only-tx".into(),
-                content_hash: "h1".into(),
-                block_time: Some(1_746_144_000), // 2025-05-02
-            },
-            MemoAnchor {
-                solana_tx: "sig2".into(),
-                arweave_tx: "shared-tx".into(),
-                content_hash: "h2".into(),
-                block_time: Some(1_700_000_000),
-            },
-        ];
-
-        let gql = GraphQlClient::new(&format!("{}/graphql", server.base_url()));
-        let gateway = ArweaveClient::new(&server.base_url());
-        let snap = snapshot_chain(&gql, &gateway, &[], &anchors).await.unwrap();
-
-        assert_eq!(snap.items.len(), 2, "shared tx must not double-count");
-        assert_eq!(snap.items[0].arweave_tx, "memo-only-tx");
-        assert_eq!(snap.items[0].producer.as_deref(), Some("did:sol:memo-user"));
-        assert_eq!(snap.items[0].day.as_deref(), Some("2025-05-02"));
-        assert_eq!(snap.items[1].arweave_tx, "shared-tx");
     }
 }

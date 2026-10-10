@@ -66,7 +66,7 @@ Server logs use a narrow forensic-field whitelist per Decision 14 (`outcome`, `b
 
 ### Graceful sample-fallback API clients (webapp public pages)
 
-The `webapp-rethink` public pages (`/ledger`, `/analytics`, `/blog`) ship and render before — or when disconnected from — the backend. Each typed client in `webapp/src/lib/{ledger,blog}.ts` fetches its mcp read route and, on any non-OK / timeout / parse failure, returns representative data tagged `sample: true`; pages MUST surface a visible "sample · not live" indicator when that flag is set (Decision 2). Clients use `VITE_MCP_BASE` only — never a hardcoded origin. Two live-wiring seams the sample path masks: the backend emits `attestation_id` where the webapp `Artifact` type uses `id` (remapped in `ledger.ts`), and `solana_tx`/`arweave_tx` are always strings (`local:`-prefixed when not anchored, never JSON null — `links.ts` treats the `local:` prefix as "not anchored").
+The `webapp-rethink` public pages (`/ledger`, `/analytics`, `/blog`) ship and render before — or when disconnected from — the backend. Each typed client in `webapp/src/lib/{ledger,blog}.ts` fetches its mcp read route and, on any non-OK / timeout / parse failure, returns representative data tagged `sample: true`; pages MUST surface a visible "sample · not live" indicator when that flag is set (Decision 2). Clients use `VITE_MCP_BASE` only — never a hardcoded origin. Two live-wiring seams the sample path masks: the backend emits `attestation_id` where the webapp `Artifact` type uses `id` (remapped in `ledger.ts`), and `arweave_tx` is always a string (`local:`-prefixed when not anchored, never JSON null — `links.ts` treats the `local:` prefix as "not anchored"). The read routes no longer emit `solana_tx`.
 
 ### Webapp-side derivation of omitted post fields
 
@@ -106,7 +106,7 @@ Pre-commit: Gitleaks scans for secrets — API keys, private keys, tokens. Commi
 
 ## Testing & Verification
 
-`cargo test --workspace` runs all unit and integration tests from the repo root. WASM tests run with `wasm-pack test --headless --chrome` inside `core/`. Benchmarks run with `cargo bench -p mnemonic-core`. Full-mode integration tests require arlocal on `:1984` and `solana-test-validator` on `:8899`; set `STORAGE_MODE=local` to skip blockchain in all other tests. **`cargo test -p mnemonic-mcp` REQUIRES `--features test-support`** — several integration suites (e.g. the `webapp-rethink` public-read / publish tests) are gated behind that feature and plain `cargo test -p mnemonic-mcp` will not compile them; CI uses the feature flag, so QA must too. See each submodule's README for full invocation details and smoke test procedures.
+`cargo test --workspace` runs all unit and integration tests from the repo root. WASM tests run with `wasm-pack test --headless --chrome` inside `core/`. Benchmarks run with `cargo bench -p mnemonic-core`. Full-mode integration tests require arlocal on `:1984`; set `STORAGE_MODE=local` to skip blockchain in all other tests. **`cargo test -p mnemonic-mcp` REQUIRES `--features test-support`** — several integration suites (e.g. the `webapp-rethink` public-read / publish tests) are gated behind that feature and plain `cargo test -p mnemonic-mcp` will not compile them; CI uses the feature flag, so QA must too. See each submodule's README for full invocation details and smoke test procedures.
 
 ---
 

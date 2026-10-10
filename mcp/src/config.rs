@@ -1,29 +1,4 @@
 use std::path::PathBuf;
-use std::str::FromStr;
-
-/// Selects the Solana network for memo anchors. Artifact storage is always
-/// Arweave mainnet through ArDrive Turbo (there is no Turbo test network), so
-/// this setting never changes where bytes are stored. `devnet` is strict: it
-/// must never accept a production Solana endpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AnchoringNetwork {
-    Mainnet,
-    Devnet,
-}
-
-impl FromStr for AnchoringNetwork {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "mainnet" => Ok(Self::Mainnet),
-            "devnet" => Ok(Self::Devnet),
-            _ => Err(format!(
-                "ANCHORING_NETWORK must be 'mainnet' or 'devnet', got: {value}"
-            )),
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct Config {
@@ -37,6 +12,7 @@ pub struct Config {
     /// See `http_host` — mirrors MCP_HTTP_PORT for env-level inspection.
     #[allow(dead_code)]
     pub http_port: u16,
+    /// Solana JSON-RPC endpoint. Used only to verify x402 Solana USDC payments.
     pub solana_rpc_url: String,
     /// Primary Arweave read gateway. Env: `ARWEAVE_GATEWAY_URL`, with
     /// `ARWEAVE_URL` as the older name.
@@ -48,9 +24,6 @@ pub struct Config {
     /// `ARWEAVE_FALLBACK_GATEWAYS` (comma-separated origins) overrides the
     /// default; an empty value disables failover. Local gateways get none.
     pub arweave_fallback_gateways: Vec<String>,
-    /// Raw environment value, parsed and validated at startup so invalid
-    /// values fail closed rather than silently falling back to mainnet.
-    pub anchoring_network: String,
     pub database_path: PathBuf,
     /// "hash" (default, offline) or "openai" (requires OPENAI_API_KEY)
     pub embed_provider: String,
@@ -294,7 +267,6 @@ impl Config {
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
             arweave_fallback_gateways: Vec::new(),
-            anchoring_network: env_or("ANCHORING_NETWORK", "mainnet"),
             database_path: expand_path(&env_or(
                 "DATABASE_PATH",
                 &format!("{}/.mnemonic/attestations.db", home),
@@ -424,27 +396,6 @@ impl Config {
     /// human-readable message on failure -- caller should treat this as fatal.
     pub fn validate_ollama_url(&self) -> Result<(), String> {
         validate_ollama_url(&self.ollama_url)
-    }
-
-    /// Resolve the requested anchoring network. Kept separate from
-    /// `from_env` so startup can emit a clear fatal configuration error.
-    pub fn resolved_anchoring_network(&self) -> Result<AnchoringNetwork, String> {
-        self.anchoring_network.parse()
-    }
-
-    /// In Devnet mode the Solana endpoint is fixed and non-production. This is
-    /// deliberately stricter than mainnet, which supports custom RPCs and local
-    /// test rigs. Storage is unaffected: it is always Arweave mainnet.
-    pub fn validate_anchoring_config(&self) -> Result<AnchoringNetwork, String> {
-        let network = self.resolved_anchoring_network()?;
-        if network == AnchoringNetwork::Devnet {
-            validate_exact_https_origin(
-                "SOLANA_RPC_URL",
-                &self.solana_rpc_url,
-                "https://api.devnet.solana.com",
-            )?;
-        }
-        Ok(network)
     }
 }
 
@@ -584,23 +535,6 @@ fn env_or_fallback(preferred_key: &str, legacy_key: &str, default: &str) -> Stri
         .unwrap_or_else(|_| default.to_string())
 }
 
-fn validate_exact_https_origin(key: &str, value: &str, expected: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(value)
-        .map_err(|error| format!("{key} is not a valid URL ({value}): {error}"))?;
-    let normalized = parsed.origin().ascii_serialization();
-    if parsed.scheme() != "https"
-        || normalized != expected
-        || parsed.path() != "/"
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-    {
-        return Err(format!(
-            "ANCHORING_NETWORK=devnet requires {key}={expected}, got: {value}"
-        ));
-    }
-    Ok(())
-}
-
 fn expand_path(p: &str) -> PathBuf {
     if p.starts_with('~') {
         PathBuf::from(p.replacen('~', &dirs_home(), 1))
@@ -684,44 +618,6 @@ mod tests {
         // 127.0.0.1 is semantically localhost but must use the hostname form
         let result = validate_ollama_url("http://127.0.0.1:11434");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn resolves_supported_anchoring_networks() {
-        assert_eq!(
-            "mainnet".parse::<AnchoringNetwork>(),
-            Ok(AnchoringNetwork::Mainnet)
-        );
-        assert_eq!(
-            "devnet".parse::<AnchoringNetwork>(),
-            Ok(AnchoringNetwork::Devnet)
-        );
-        assert!("testnet".parse::<AnchoringNetwork>().is_err());
-    }
-
-    #[test]
-    fn devnet_rejects_production_and_custom_endpoints() {
-        let mut cfg = Config::from_env();
-        cfg.anchoring_network = "devnet".to_string();
-        cfg.solana_rpc_url = "https://api.mainnet-beta.solana.com".to_string();
-        assert!(cfg.validate_anchoring_config().is_err());
-
-        cfg.solana_rpc_url = "https://api.devnet.solana.com".to_string();
-        cfg.arweave_url = "https://arweave.net".to_string();
-        assert_eq!(
-            cfg.validate_anchoring_config(),
-            Ok(AnchoringNetwork::Devnet)
-        );
-
-        // A trailing slash is semantically the same origin, but a path must
-        // not be accepted: it could point at an unexpected API.
-        cfg.solana_rpc_url = "https://api.devnet.solana.com/".to_string();
-        assert_eq!(
-            cfg.validate_anchoring_config(),
-            Ok(AnchoringNetwork::Devnet)
-        );
-        cfg.solana_rpc_url = "https://api.devnet.solana.com/custom".to_string();
-        assert!(cfg.validate_anchoring_config().is_err());
     }
 
     /// T07a: staging validate — fail-closed when required config is absent,

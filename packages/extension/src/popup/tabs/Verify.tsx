@@ -168,9 +168,6 @@ function Outcome({ value }: { value: VerifyOutcome }): JSX.Element {
         <span>created: {value.created_at}</span>
         <span>hash: {truncateMiddle(value.content_hash, 8, 8)}</span>
         {value.source ? <span>source: {value.source.platform}</span> : null}
-        {value.solana_tx ? (
-          <span>sol: {truncateMiddle(value.solana_tx, 6, 6)}</span>
-        ) : null}
         {value.arweave_tx ? (
           <span>ar: {truncateMiddle(value.arweave_tx, 6, 6)}</span>
         ) : null}

@@ -10,13 +10,13 @@ import {
   type AttestationTimeline,
   type TimeRange,
 } from "../lib/ledger";
-import { arweaveDataUrl, solanaTxUrl } from "../lib/links";
+import { arweaveDataUrl } from "../lib/links";
 import { Seo } from "../lib/seo";
 
 /**
  * `/analytics` — attestations over time (Scenario 2 of the Evidence Ledger
  * rethink). A bespoke SVG time-series splits on-node (mint) from on-chain
- * (Solana-purple), with a range toggle and summary counters.
+ * (accent colour), with a range toggle and summary counters.
  *
  * Data comes from the live `fetchAttestationTimeline` endpoint; a fetch failure
  * shows an error state, never fabricated data. Tone per ux-guidelines: factual,
@@ -116,8 +116,8 @@ export default function Analytics() {
           </h1>
           <p className="max-w-2xl text-text-muted">
             Every signed memory is an attestation. On-node records live on the
-            operator&rsquo;s node; on-chain records are additionally anchored on
-            Solana, with signed bytes retrievable from Arweave. The split below
+            operator&rsquo;s node; on-chain records are additionally stored on
+            Arweave, where anyone can retrieve the signed bytes. The split below
             tracks both across the{" "}
             {windowLabel}.
           </p>
@@ -206,7 +206,6 @@ function AnchoredReferences({
 }
 
 function AnchoredReference({ artifact }: { artifact: Artifact }) {
-  const solUrl = solanaTxUrl(artifact.solana_tx);
   const arUrl = arweaveDataUrl(artifact.arweave_tx);
 
   return (
@@ -215,7 +214,6 @@ function AnchoredReference({ artifact }: { artifact: Artifact }) {
         {artifact.content}
       </p>
       <dl className="mt-3 space-y-1.5">
-        <ReferenceLink label="Solana" tx={artifact.solana_tx} url={solUrl} />
         <ReferenceLink label="Arweave data" tx={artifact.arweave_tx} url={arUrl} />
       </dl>
     </article>
@@ -256,9 +254,7 @@ function ReferenceLink({
 }
 
 function isAnchored(artifact: Artifact): boolean {
-  return Boolean(
-    solanaTxUrl(artifact.solana_tx) || arweaveDataUrl(artifact.arweave_tx),
-  );
+  return Boolean(arweaveDataUrl(artifact.arweave_tx));
 }
 
 function truncateMiddle(value: string, start: number, end: number): string {

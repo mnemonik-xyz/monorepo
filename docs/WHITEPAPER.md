@@ -84,8 +84,7 @@ Explicit hosted local writes are rejected.
 Current shared ingestion uploads original signed bytes and verifies exact read-back.
 The operator uploads through ArDrive Turbo, which bundles data items into Arweave transactions.
 An upload counts as permanent only when an Arweave gateway reports it in a block.
-It does not require a new Solana memo.
-Historical Solana memo verification and discovery remain available.
+Arweave is the single record of each anchored memory.
 
 A signature alone does not establish a trusted date.
 An artifact's own timestamp is an author claim.

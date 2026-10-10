@@ -88,7 +88,6 @@ async fn default_no_silent_escalation() {
 
     let result = sign_memory(
         &mnemonic_core::identity::LazyKeypair::ready(kp.insecure_clone()),
-        &state.solana,
         &state.arweave,
         &state.store,
         state.embedder.as_ref(),
@@ -177,7 +176,6 @@ async fn opt_in_escalation_returns_escalated_field() {
 
     let result = sign_memory(
         &mnemonic_core::identity::LazyKeypair::ready(kp.insecure_clone()),
-        &state.solana,
         &state.arweave,
         &state.store,
         state.embedder.as_ref(),
@@ -270,7 +268,6 @@ async fn opt_in_escalation_no_confirmation_token() {
 
     let result = sign_memory(
         &mnemonic_core::identity::LazyKeypair::ready(kp.insecure_clone()),
-        &state.solana,
         &state.arweave,
         &state.store,
         state.embedder.as_ref(),
@@ -365,7 +362,6 @@ async fn opt_in_escalation_with_valid_confirmation_token_reaches_hosted() {
 
     let result = sign_memory(
         &mnemonic_core::identity::LazyKeypair::ready(kp.insecure_clone()),
-        &state.solana,
         &state.arweave,
         &state.store,
         state.embedder.as_ref(),
@@ -435,7 +431,6 @@ async fn opt_in_escalation_no_network() {
 
     let result = sign_memory(
         &mnemonic_core::identity::LazyKeypair::ready(kp.insecure_clone()),
-        &state.solana,
         &state.arweave,
         &state.store,
         state.embedder.as_ref(),
@@ -521,7 +516,6 @@ async fn opt_in_escalation_hosted_malformed_response_surfaces_hosted_unavailable
 
     let result = sign_memory(
         &mnemonic_core::identity::LazyKeypair::ready(kp.insecure_clone()),
-        &state.solana,
         &state.arweave,
         &state.store,
         state.embedder.as_ref(),
@@ -644,7 +638,6 @@ fn expired_cached_token_surfaces_token_expired_typed_error() {
 
             let result = sign_memory(
                 &mnemonic_core::identity::LazyKeypair::ready(kp.insecure_clone()),
-                &state.solana,
                 &state.arweave,
                 &state.store,
                 state.embedder.as_ref(),
@@ -709,7 +702,6 @@ async fn empty_endpoint_sentinel_propagates_local_error() {
 
     let result = sign_memory(
         &mnemonic_core::identity::LazyKeypair::ready(kp.insecure_clone()),
-        &state.solana,
         &state.arweave,
         &state.store,
         state.embedder.as_ref(),

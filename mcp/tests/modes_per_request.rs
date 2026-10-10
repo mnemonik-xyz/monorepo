@@ -537,11 +537,11 @@ async fn mixed_mode_coexistence_recall_returns_both() {
     // recall result envelope (T4 surfaces write_mode) is out of scope for
     // T2; here we go straight to the DB to assert coexistence.
     assert_eq!(
-        server.write_mode_for_tx("local:abcdef0123456789"),
+        server.write_mode_for_tx("local:abcdef01"),
         Some("local".to_string())
     );
     assert_eq!(
-        server.write_mode_for_tx("5j2K9aRRRRYWfLh8x2y2y9X7Cxe1aN3aN3aN3aN3aN3a"),
+        server.write_mode_for_tx("PdhTPLPmHvX0iE6iAtJ8X5Y0WqQ8MzC8KvU9JhQ0aN0"),
         Some("anchored".to_string())
     );
 }

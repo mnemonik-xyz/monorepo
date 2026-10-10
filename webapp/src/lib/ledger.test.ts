@@ -21,7 +21,6 @@ describe("fetchArtifacts", () => {
       content_hash:
         "abc1230000000000000000000000000000000000000000000000000000000000",
       tags: ["live", "recall"],
-      solana_tx: "local:offline-abcd",
       arweave_tx: "local:offline-abcd",
       created_at: "2026-06-26T12:00:00.000Z",
       write_mode: "local",
@@ -39,8 +38,7 @@ describe("fetchArtifacts", () => {
     expect(a).toBeDefined();
     expect(a!.id).toBe(backendRow.attestation_id);
     expect(a!.content).toBe(backendRow.content);
-    // local:-prefixed anchors pass through verbatim for the explorer-link helper.
-    expect(a!.solana_tx).toBe("local:offline-abcd");
+    // local:-prefixed anchors pass through verbatim for the link helper.
     expect(a!.arweave_tx).toBe("local:offline-abcd");
     // The transient `attestation_id` field is not carried onto the Artifact.
     expect(

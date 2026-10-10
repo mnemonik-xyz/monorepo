@@ -138,7 +138,7 @@ function Hero() {
 
       <dl className="grid w-full max-w-2xl grid-cols-3 gap-4">
         <Stat label="Bits / dim" value="2–4" caption="TurboQuant" />
-        <Stat label="Anchor" value="Solana" caption="SPL Memo" />
+        <Stat label="Signature" value="Ed25519" caption="COSE_Sign1" />
         <Stat label="Storage" value="Arweave" caption="Permanent" />
       </dl>
     </section>
@@ -402,8 +402,8 @@ const HOW_IT_WORKS_STEPS = [
   {
     chip: "Recall",
     title: "Recall and verify across providers",
-    body: "Any tool authenticated with the same keypair can recall by semantic similarity and verify the Arweave + Solana anchors. Tampering is detectable; provenance is cryptographic.",
-    meta: "Arweave + Solana",
+    body: "Any tool authenticated with the same keypair can recall by semantic similarity and verify the signed bytes on Arweave. Tampering is detectable; provenance is cryptographic.",
+    meta: "Arweave",
   },
 ];
 

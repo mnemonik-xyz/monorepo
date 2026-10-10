@@ -360,9 +360,9 @@ async fn mnemonic_verify_returns_sealed_for_sealed_row() {
             .expect("save_sealed_attestation");
     }
 
-    // Call mnemonic_verify with the solana_tx.
+    // Call mnemonic_verify with the arweave_tx.
     let args = serde_json::json!({
-        "solana_tx": solana_tx,
+        "arweave_tx": arweave_tx,
     });
     let (status, envelope) = call_tool(app, &jwt, "mnemonic_verify", args).await;
 

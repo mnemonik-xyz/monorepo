@@ -42,7 +42,7 @@ Arguments:
 
 - `content` (string, required) — the decision or outcome plus the why, in plain prose.
 - `tags` (array of strings, optional) — scope markers (`["module:auth", "decision"]`).
-- `mode` (`"local"` | `"participate"`, optional) — `local` keeps the artifact on the user's machine, free, offline-capable, never network. `participate` anchors on Arweave + Solana, paid, requires OAuth. Default: `local`.
+- `mode` (`"local"` | `"participate"`, optional) — `local` keeps the artifact on the user's machine, free, offline-capable, never network. `participate` anchors on Arweave, paid, requires OAuth. Default: `local`.
 - `visibility` (`"public"`, optional) — ONLY valid when `mode="participate"`. Omit for private. Setting `visibility` on `mode=local` is rejected by the server with an `invalid_params` error.
 - `allow_fallback_to_participate` (bool, optional, default `false`) — explicit opt-in for local-to-participate escalation if the local pipeline fails. Without this flag, local failures surface as loud, typed errors. If you set this to `true`, you accept that on failure the write may be chain-anchored and visible per the visibility flag.
 

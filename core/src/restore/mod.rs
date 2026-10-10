@@ -4,7 +4,7 @@
 //! artifact back into a row; this module finds *which* artifacts belong to an
 //! identity, fetches them, and applies the verified rows to a store. Together
 //! they make the operator's database disposable: lose it, or leave the operator
-//! entirely, and the memories are still recoverable from the chain by whoever
+//! entirely, and the memories are still recoverable from Arweave by whoever
 //! holds the key.
 //!
 //! ## Two phases, on purpose
@@ -18,14 +18,9 @@
 //!
 //! ## Enumeration
 //!
-//! Two independent sources, unioned by `arweave_tx`, because neither is
-//! complete on its own:
-//!
-//! - **Solana memo history.** Authoritative for historical items.
-//!   `core/src/arweave/recovery.rs` records a live check from 2026-07-09: 16
-//!   memos and 0 gateway-GraphQL hits for items no Arweave gateway indexed.
-//! - **Gateway GraphQL.** Catches items whose memo write failed after the
-//!   upload, and everything tagged going forward.
+//! Gateway GraphQL lists the items that the configured owners uploaded,
+//! deduplicated by `arweave_tx`. GraphQL is a discovery source. It does not
+//! prove authorship or completeness.
 //!
 //! ## Trust
 //!
@@ -38,16 +33,11 @@
 use crate::arweave::graphql::GraphQlClient;
 use crate::arweave::ArweaveClient;
 use crate::rebuild::{rebuild_row_self_describing, RebuiltRow};
-use crate::solana::SolanaClient;
 
 /// One anchored artifact, fetched and verified, ready to be written to a store.
 #[derive(Debug, Clone)]
 pub struct RestorableItem {
     pub arweave_tx: String,
-    /// The Solana memo transaction, when enumeration found one. GraphQL-only
-    /// items may have none, which does not make the memory less valid — the
-    /// COSE signature is what proves authorship.
-    pub solana_tx: Option<String>,
     pub row: RebuiltRow,
 }
 
@@ -112,30 +102,22 @@ impl<T> SourceScan<T> {
 }
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct EnumerationReport {
-    pub items: Vec<(String, Option<String>)>,
+    /// Distinct `arweave_tx` ids, in discovery order.
+    pub items: Vec<String>,
     pub sources: Vec<SourceDiagnostic>,
 }
 /// Preserve successful candidates and every source error independently.
 pub async fn enumerate_anchored(
     gql: &GraphQlClient,
-    solana: &SolanaClient,
-    solana_wallet: &str,
     arweave_addresses: &[String],
 ) -> EnumerationReport {
     let mut report = EnumerationReport::default();
     let mut seen = std::collections::HashSet::new();
-    let memos = solana.scan_memo_anchors(solana_wallet, 1000).await;
-    report.sources.push(memos.diagnostic("solana"));
-    for a in memos.items {
-        if seen.insert(a.arweave_tx.clone()) {
-            report.items.push((a.arweave_tx, Some(a.solana_tx)));
-        }
-    }
     let index = gql.scan_anchored(arweave_addresses, 10000).await;
     report.sources.push(index.diagnostic("graphql"));
     for i in index.items {
         if seen.insert(i.arweave_tx.clone()) {
-            report.items.push((i.arweave_tx, None));
+            report.items.push(i.arweave_tx);
         }
     }
     report
@@ -146,11 +128,11 @@ pub async fn enumerate_anchored(
 /// Items that fail to fetch or verify land in `failed` and are skipped.
 pub async fn fetch_restorable(
     gateway: &ArweaveClient,
-    enumerated: &[(String, Option<String>)],
+    enumerated: &[String],
 ) -> (Vec<RestorableItem>, Vec<(String, String)>) {
     let mut items = Vec::new();
     let mut failed = Vec::new();
-    for (arweave_tx, solana_tx) in enumerated {
+    for arweave_tx in enumerated {
         let bytes = match gateway.read(arweave_tx).await {
             Ok(b) => b,
             Err(e) => {
@@ -207,7 +189,6 @@ pub async fn fetch_restorable(
         match rebuild_row_self_describing(&bytes) {
             Ok(row) => items.push(RestorableItem {
                 arweave_tx: arweave_tx.clone(),
-                solana_tx: solana_tx.clone(),
                 row,
             }),
             Err(e) => failed.push((arweave_tx.clone(), e)),
@@ -268,17 +249,12 @@ pub fn apply_restore(
             None => Visibility::Private,
         };
 
-        // An empty `solana_tx` is the existing convention for "no memo id"
-        // (see `RowFact` in core/src/storage/sqlite.rs). The COSE signature,
-        // not the memo, is what proves authorship.
-        let solana_tx = item.solana_tx.clone().unwrap_or_default();
-
         match store.save_attestation(
             &item.row.attestation_id,
             &item.row.content,
             &item.row.content_hash,
             &item.row.tags,
-            &solana_tx,
+            "",
             &item.arweave_tx,
             &item.row.signer_pubkey,
             &item.row.owner_pubkey,

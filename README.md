@@ -70,7 +70,7 @@ node packages/cli/dist/bin/mnemonic.js sign "A public claim" --public --anchor
 ```
 
 Public plaintext writes use the legacy server-prepared flow, which sends content to the operator.
-Current external delivery uploads to Arweave through ArDrive Turbo. Any Arweave gateway can read the stored bytes. New writes do not require a Solana memo; historical memo verification and discovery remain available.
+Current external delivery uploads to Arweave through ArDrive Turbo. Any Arweave gateway can read the stored bytes. Arweave is the single record of each anchored memory.
 
 ## Recovery and portability
 

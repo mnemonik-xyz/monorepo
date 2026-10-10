@@ -135,22 +135,16 @@ pub async fn resume_due_paid_deliveries(_state: Arc<McpState>) -> usize {
 
 /// Successful response of `POST /api/sign-callback`.
 ///
-/// Includes the on-chain anchor identifiers so the webapp's success page can
-/// render Solscan / Arweave links without an extra round-trip. In `local`
-/// storage mode both fields carry synthetic `local:<...>` prefixes; in
-/// `full` mode they are real Solana SPL Memo signatures + Arweave tx ids.
+/// Includes the Arweave anchor identifier so the webapp's success page can
+/// render an Arweave link without an extra round-trip. In `local` storage
+/// mode `arweave_tx` carries a synthetic `local:<...>` prefix; in `full`
+/// mode it is a real Arweave tx id.
 #[derive(Debug, Serialize)]
 pub struct SignCallbackResponse {
     pub status: &'static str,
     pub attestation_id: String,
     pub content_hash: String,
-    pub solana_tx: String,
     pub arweave_tx: String,
-    /// `mainnet`, `devnet`, or `local`, so clients do not mix anchor
-    /// environments in one view.
-    pub anchoring_network: &'static str,
-    /// Convenience cluster-aware explorer URL; empty for synthetic local ids.
-    pub solana_explorer_url: String,
     /// Convenience Arweave gateway URL; empty for synthetic local ids.
     pub arweave_url: String,
     /// True when this artifact (same `content_hash`) was already anchored:
@@ -622,7 +616,7 @@ pub async fn sign_callback_handler(
         }
         Err(_) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable"),
     };
-    if let Some((existing_id, solana_tx, arweave_tx)) = existing_anchor {
+    if let Some((existing_id, arweave_tx)) = existing_anchor {
         if crate::tools::perform_delivery_check(
             &state.arweave,
             &arweave_tx,
@@ -650,7 +644,7 @@ pub async fn sign_callback_handler(
         if let Some(attempt) = &delivery_attempt {
             if let Ok(store) = state.store.lock() {
                 if let Err(error) =
-                    paid_artifact::mark_delivery_completed(store.conn(), attempt, &solana_tx, &now)
+                    paid_artifact::mark_delivery_completed(store.conn(), attempt, &now)
                 {
                     tracing::error!(correlation_id = %req.correlation_id, error = %error, "complete replayed paid delivery failed");
                 }
@@ -661,16 +655,12 @@ pub async fn sign_callback_handler(
             content_hash = %entry.content_hash,
             "sign-callback for an artifact that is already anchored; returning the existing anchor"
         );
-        let links =
-            crate::tools::anchor_links(&state.solana, &state.arweave, &solana_tx, &arweave_tx);
+        let links = crate::tools::anchor_links(&state.arweave, &arweave_tx);
         let body = SignCallbackResponse {
             status: "ok",
             attestation_id: existing_id,
             content_hash: entry.content_hash,
-            solana_tx,
             arweave_tx,
-            anchoring_network: links.network,
-            solana_explorer_url: links.solana_explorer_url,
             arweave_url: links.arweave_url,
             already_anchored: true,
         };
@@ -702,10 +692,8 @@ pub async fn sign_callback_handler(
     let is_local_write = state.storage_mode == "local"
         || entry.write_mode == WriteMode::Local
         || force_synthetic_anchor;
-    let (solana_tx, arweave_tx) = if is_local_write {
-        let local_ar = format!("local:{}", &attestation_id[..8]);
-        let local_sol = format!("local:{}", &entry.content_hash[..16]);
-        (local_sol, local_ar)
+    let arweave_tx = if is_local_write {
+        format!("local:{}", &attestation_id[..8])
     } else {
         // Arweave upload of the COSE_Sign1 envelope bytes. `Producer` /
         // `Created-At` tags mirror fields already public inside the payload
@@ -858,13 +846,7 @@ pub async fn sign_callback_handler(
         };
         // No-op for production Turbo uploads (mine() only writes against arlocal).
         let _ = state.arweave.mine().await;
-
-        // Stage 2 (chain-agnostic/decisions.md): WriteMode::Anchored no
-        // longer writes an SPL Memo. New rows store solana_tx = '' (empty
-        // string, already a valid RowFact state). Memo readers
-        // (read_memo, list_memo_anchors, parse_anchor_memo) stay intact
-        // forever for legacy-row enumeration and verification.
-        (String::new(), ar_tx)
+        ar_tx
     };
 
     let persist_res = {
@@ -920,7 +902,7 @@ pub async fn sign_callback_handler(
                 &attestation_id,
                 &entry.content_hash,
                 &entry.tags,
-                &solana_tx,
+                "", // legacy `solana_tx` column, unused
                 &arweave_tx,
                 &req.signer_pubkey, // signer = pubkey we just verified
                 &req.signer_pubkey, // owner = same pubkey
@@ -936,12 +918,12 @@ pub async fn sign_callback_handler(
             // Plain path (public or non-sealed private).
             // work/arweave-as-source-of-truth D-2: the operator stores no
             // memory for an anchored write. Arweave holds the bytes and the
-            // Solana memo holds the hash, so persisting the text here would
+            // signed hash, so persisting the text here would
             // make the operator a custodian of content it does not need and
             // cannot be trusted with.
             //
-            // What stays is an ANCHOR INDEX: the id, the content hash, the two
-            // transaction ids, the owner, the timestamp and the labels.
+            // What stays is an ANCHOR INDEX: the id, the content hash, the
+            // Arweave transaction id, the owner, the timestamp and the labels.
             //
             // The embedding goes too, and deliberately: a vector inverts to an
             // approximation of its source text, so keeping it would keep the
@@ -957,7 +939,7 @@ pub async fn sign_callback_handler(
                 stored_content,
                 &entry.content_hash,
                 &entry.tags,
-                &solana_tx,
+                "", // legacy `solana_tx` column, unused
                 &arweave_tx,
                 &req.signer_pubkey, // signer = pubkey we just verified via COSE
                 &req.signer_pubkey, // owner = same pubkey (Decision 9 — webapp flow uses keypair as identity)
@@ -1010,7 +992,6 @@ pub async fn sign_callback_handler(
             content: &entry.content,
             content_hash: &entry.content_hash,
             tags: &entry.tags,
-            solana_tx: &solana_tx,
             arweave_tx: &arweave_tx,
             signer_pubkey: &req.signer_pubkey,
             owner_pubkey: &req.signer_pubkey,
@@ -1036,7 +1017,6 @@ pub async fn sign_callback_handler(
                 tracing::warn!(
                     attestation_id = %attestation_id,
                     arweave_tx = %arweave_tx,
-                    solana_tx = %solana_tx,
                     stage = %stage,
                     "deferred-path delivery not confirmed — row demoted to local"
                 );
@@ -1051,7 +1031,6 @@ pub async fn sign_callback_handler(
                     "row_demoted_to": "local",
                     "attestation_id": attestation_id,
                     "arweave_tx": arweave_tx,
-                    "solana_tx": solana_tx,
                 });
                 return (StatusCode::OK, Json(body)).into_response();
             }
@@ -1082,24 +1061,20 @@ pub async fn sign_callback_handler(
 
     if let Some(attempt) = &delivery_attempt {
         if let Ok(store) = state.store.lock() {
-            if let Err(error) =
-                paid_artifact::mark_delivery_completed(store.conn(), attempt, &solana_tx, &now)
+            if let Err(error) = paid_artifact::mark_delivery_completed(store.conn(), attempt, &now)
             {
                 tracing::warn!(error=%error,"verified delivery metadata persistence failed");
             }
         }
     }
 
-    let links = crate::tools::anchor_links(&state.solana, &state.arweave, &solana_tx, &arweave_tx);
+    let links = crate::tools::anchor_links(&state.arweave, &arweave_tx);
 
     let body = SignCallbackResponse {
         status: "ok",
         attestation_id,
         content_hash: entry.content_hash,
-        solana_tx,
         arweave_tx,
-        anchoring_network: links.network,
-        solana_explorer_url: links.solana_explorer_url,
         arweave_url: links.arweave_url,
         already_anchored: false,
     };
@@ -1944,8 +1919,8 @@ pub async fn bootstrap_server_pub_handler(State(state): State<Arc<McpState>>) ->
 //
 // Public, unauthenticated counters surfaced on the webapp landing page.
 // Three numbers, no PII: distinct OAuth-resolved owners, total memories
-// persisted by this node, and the subset that landed on Solana (i.e. has a
-// non-`local:` solana_tx). Cached for 60s to keep the landing page from
+// persisted by this node, and the subset anchored on Arweave (i.e. not
+// `local` and with a real, non-`local:` arweave_tx). Cached for 60s to keep the landing page from
 // hammering SQLite under concurrent loads.
 
 #[derive(Clone, Copy, Serialize)]
@@ -2103,7 +2078,6 @@ fn public_artifact_from_search(r: SearchResult) -> PublicArtifact {
         content: r.content,
         content_hash: r.content_hash,
         tags: r.tags,
-        solana_tx: r.solana_tx,
         arweave_tx: r.arweave_tx,
         created_at: r.created_at,
         write_mode: r.write_mode,
@@ -2125,7 +2099,6 @@ fn public_artifact_from_recovered(r: &RecoveredItem) -> PublicArtifact {
         content: r.content.clone().unwrap_or_default(),
         content_hash: r.content_hash.clone().unwrap_or_default(),
         tags: r.tags.clone(),
-        solana_tx: r.solana_tx.clone().unwrap_or_default(),
         arweave_tx: r.arweave_tx.clone(),
         created_at: r
             .day
@@ -3522,15 +3495,9 @@ mod tests {
 
     // ── Chain-recovery merge (Ledger listing) ────────────────────────────────
 
-    fn recovered(
-        arweave_tx: &str,
-        day: Option<&str>,
-        content: Option<&str>,
-        solana_tx: Option<&str>,
-    ) -> RecoveredItem {
+    fn recovered(arweave_tx: &str, day: Option<&str>, content: Option<&str>) -> RecoveredItem {
         RecoveredItem {
             arweave_tx: arweave_tx.to_string(),
-            solana_tx: solana_tx.map(str::to_string),
             content_hash: Some("deadbeef".to_string()),
             content: content.map(str::to_string),
             tags: Vec::new(),
@@ -3551,7 +3518,6 @@ mod tests {
             content: "db content".to_string(),
             content_hash: "db-hash".to_string(),
             tags: Vec::new(),
-            solana_tx: "sol-db".to_string(),
             arweave_tx: arweave_tx.to_string(),
             created_at: created_at.to_string(),
             write_mode: mode,
@@ -3561,12 +3527,11 @@ mod tests {
 
     #[test]
     fn recovered_item_maps_to_public_artifact() {
-        let r = recovered("tx1", Some("2026-06-01"), Some("hello chain"), Some("sol1"));
+        let r = recovered("tx1", Some("2026-06-01"), Some("hello chain"));
         let a = public_artifact_from_recovered(&r);
         assert_eq!(a.attestation_id, "tx1");
         assert_eq!(a.arweave_tx, "tx1");
         assert_eq!(a.content, "hello chain");
-        assert_eq!(a.solana_tx, "sol1");
         assert_eq!(a.created_at, "2026-06-01T00:00:00Z");
         assert_eq!(a.write_mode, WriteMode::Anchored);
     }
@@ -3576,13 +3541,8 @@ mod tests {
         // Chain item tx1 is also present in the DB; the chain copy must not
         // duplicate. tx2 is chain-only and must appear.
         let chain = vec![
-            recovered(
-                "tx1",
-                Some("2026-06-02"),
-                Some("chain content"),
-                Some("sol1"),
-            ),
-            recovered("tx2", Some("2026-06-03"), Some("chain only"), Some("sol2")),
+            recovered("tx1", Some("2026-06-02"), Some("chain content")),
+            recovered("tx2", Some("2026-06-03"), Some("chain only")),
         ];
         let db = vec![db_artifact(
             "att-1",
@@ -3603,8 +3563,8 @@ mod tests {
     #[test]
     fn merge_chain_artifacts_respects_limit() {
         let chain = vec![
-            recovered("tx1", Some("2026-06-03"), None, None),
-            recovered("tx2", Some("2026-06-02"), None, None),
+            recovered("tx1", Some("2026-06-03"), None),
+            recovered("tx2", Some("2026-06-02"), None),
         ];
         let db = vec![db_artifact(
             "att-1",
@@ -3639,11 +3599,11 @@ mod tests {
         // tx-priv matches a private DB row by Arweave tx id; tx-hash matches
         // one by content hash. Both must be dropped. tx-open is chain-only
         // (no DB row) and stays: it is already public on Arweave.
-        let mut by_hash = recovered("tx-hash", Some("2026-06-03"), Some("secret 2"), None);
+        let mut by_hash = recovered("tx-hash", Some("2026-06-03"), Some("secret 2"));
         by_hash.content_hash = Some("priv-hash".to_string());
-        let mut open = recovered("tx-open", Some("2026-06-04"), Some("open"), None);
+        let mut open = recovered("tx-open", Some("2026-06-04"), Some("open"));
         open.content_hash = Some("open-hash".to_string());
-        let mut priv_tx = recovered("tx-priv", Some("2026-06-02"), Some("secret 1"), None);
+        let mut priv_tx = recovered("tx-priv", Some("2026-06-02"), Some("secret 1"));
         priv_tx.content_hash = Some("other-hash".to_string());
         let chain = vec![priv_tx, by_hash, open];
 
@@ -3660,9 +3620,9 @@ mod tests {
     #[test]
     fn rank_recall_hits_drops_chain_hits_matching_private_rows() {
         use crate::chain_stats::{ChainHit, MatchKind};
-        let mut priv_item = recovered("tx-priv", Some("2026-06-02"), Some("secret"), None);
+        let mut priv_item = recovered("tx-priv", Some("2026-06-02"), Some("secret"));
         priv_item.content_hash = Some("priv-hash".to_string());
-        let mut open_item = recovered("tx-open", Some("2026-06-03"), Some("open"), None);
+        let mut open_item = recovered("tx-open", Some("2026-06-03"), Some("open"));
         open_item.content_hash = Some("open-hash".to_string());
         let chain = vec![
             ChainHit {

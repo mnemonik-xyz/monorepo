@@ -25,7 +25,6 @@ use mnemonic_core::arweave::recovery::{
 };
 use mnemonic_core::arweave::ArweaveClient;
 use mnemonic_core::compress::{CompressedEmbedding, EmbeddingCompressor};
-use mnemonic_core::solana::SolanaClient;
 use mnemonic_core::storage::sqlite::{RowFact, TimelineBucket};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -33,11 +32,8 @@ use std::sync::{Arc, OnceLock};
 pub struct ChainStatsCache {
     gql: GraphQlClient,
     gateway: ArweaveClient,
-    solana: SolanaClient,
-    /// Base58 Solana pubkeys — enumeration source 1 (memo history).
-    wallets: Vec<String>,
-    /// The same wallets in Arweave owner form — enumeration source 2
-    /// (gateway GraphQL, for indexed/tagged items).
+    /// The configured wallets in Arweave owner form. Gateway GraphQL
+    /// enumerates the items that these owners uploaded.
     owner_addresses: Vec<String>,
     snapshot: tokio::sync::RwLock<Option<Arc<ChainLedger>>>,
 }
@@ -50,7 +46,6 @@ impl ChainStatsCache {
         wallets: &[String],
         graphql_url: &str,
         gateway_url: &str,
-        solana_rpc_url: &str,
     ) -> anyhow::Result<Option<Self>> {
         if wallets.is_empty() {
             return Ok(None);
@@ -62,8 +57,6 @@ impl ChainStatsCache {
         Ok(Some(Self {
             gql: GraphQlClient::new(graphql_url),
             gateway: ArweaveClient::new(gateway_url),
-            solana: SolanaClient::new(solana_rpc_url),
-            wallets: wallets.to_vec(),
             owner_addresses,
             snapshot: tokio::sync::RwLock::new(None),
         }))
@@ -71,18 +64,8 @@ impl ChainStatsCache {
 
     /// Re-enumerate the chain. Errors are returned (caller logs and keeps
     /// the previous snapshot — a gateway outage must not zero the page).
-    ///
-    /// The Solana memo history is the primary source: gateways do not list
-    /// every historical item, so GraphQL alone can return zero for them
-    /// (verified live 2026-07-09 — 16 memos, 0 GraphQL hits). GraphQL still runs to catch memo-less uploads and future
-    /// tagged items.
     pub async fn refresh(&self) -> anyhow::Result<usize> {
-        let mut anchors = Vec::new();
-        for wallet in &self.wallets {
-            anchors.extend(self.solana.list_memo_anchors(wallet).await?);
-        }
-        let snap =
-            snapshot_chain(&self.gql, &self.gateway, &self.owner_addresses, &anchors).await?;
+        let snap = snapshot_chain(&self.gql, &self.gateway, &self.owner_addresses).await?;
         let n = snap.items.len();
         *self.snapshot.write().await = Some(Arc::new(ChainLedger::new(snap.items)));
         Ok(n)
@@ -104,15 +87,13 @@ impl ChainStatsCache {
     }
 
     /// Cache pre-loaded with `items`, for tests that exercise the chain
-    /// merge and recall paths without a Solana / Arweave backend.
+    /// merge and recall paths without an Arweave backend.
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub fn from_items(items: Vec<RecoveredItem>) -> Self {
         Self {
             gql: GraphQlClient::new("http://localhost:0/graphql"),
             gateway: ArweaveClient::new("http://localhost:0"),
-            solana: SolanaClient::new("http://localhost:0"),
-            wallets: Vec::new(),
             owner_addresses: Vec::new(),
             snapshot: tokio::sync::RwLock::new(Some(Arc::new(ChainLedger::new(items)))),
         }
@@ -335,7 +316,6 @@ mod tests {
     fn chain_item(tx: &str, day: Option<&str>, producer: Option<&str>) -> RecoveredItem {
         RecoveredItem {
             arweave_tx: tx.to_string(),
-            solana_tx: None,
             content_hash: None,
             content: None,
             tags: Vec::new(),
