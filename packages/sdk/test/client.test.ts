@@ -401,6 +401,15 @@ describe("verify", () => {
 // ── proveIdentity ──────────────────────────────────────────────────────────
 
 describe("proveIdentity", () => {
+  it("normalizes the current Rust server identity response", async () => {
+    const { client } = await makeClient({ responses: [{ body: mcpResult({
+      public_key: "ServerPub", did_sol: "did:sol:ServerPub", challenge: "ch1", signature: "sig1",
+    }) }] });
+    const out = await client.proveIdentity("ch1");
+    expect(out.pubkey).toBe("ServerPub");
+    expect(out.did).toBe("did:sol:ServerPub");
+  });
+
   it("returns server-provided pubkey/signature", async () => {
     const { client } = await makeClient({
       responses: [

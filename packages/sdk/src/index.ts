@@ -13,6 +13,8 @@
 
 // ── T2: client + signer + keypair + types + errors ──────────────────────────
 export { MnemonicClient } from "./client.js";
+export { parseOperatorList, connectOperator, verifyOperatorIdentity, OPERATOR_PROOF_DOMAIN } from "./operators.js";
+export type { OperatorConfig, OperatorList, OperatorProofOptions } from "./operators.js";
 export { IrysDiscoverySource, ArweaveDiscoverySource, DiscoveryError } from "./discovery.js";
 export type {
   DiscoverySource, DiscoveryScope, DiscoveryCandidate, DiscoveryPage,

@@ -530,12 +530,14 @@ export class MnemonicClient {
     });
     const raw = isRecord(result) ? result : {};
     const out: ProveResult = {
-      pubkey: typeof raw.pubkey === "string" ? raw.pubkey : "",
+      pubkey: typeof raw.public_key === "string" ? raw.public_key :
+        typeof raw.pubkey === "string" ? raw.pubkey : "",
       challenge: typeof raw.challenge === "string" ? raw.challenge : challenge,
       signature: typeof raw.signature === "string" ? raw.signature : "",
       raw,
     };
-    if (typeof raw.did === "string") out.did = raw.did;
+    if (typeof raw.did_sol === "string") out.did = raw.did_sol;
+    else if (typeof raw.did === "string") out.did = raw.did;
     return out;
   }
 

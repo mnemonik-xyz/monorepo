@@ -261,3 +261,40 @@ Task 5 and task 12 release gates remain open. No publication, deployment, paymen
 or customer outreach occurred. See [release evidence](release-evidence.md).
 
 Implementation and recorded candidate evidence: `dbddc5c`.
+
+## 2026-10-03 — Explicit operator selection validation
+
+Added source SDK `parseOperatorList` and `connectOperator`: explicit HTTPS
+origins, independently pinned distinct Ed25519 identities, fresh origin-bound
+proofs, and redirect rejection. Separate clients retain their own credentials;
+an unavailable operator or uncertain write does not trigger cross-operator retry.
+Normalized the current server's `public_key`/`did_sol` identity response while
+retaining legacy field compatibility.
+
+Validation: all 371 SDK tests, TypeScript checking, SDK WASM/browser build, and
+the three local recovery/failure drills passed. Local drills use synthetic
+operators/storage and seeded payment receipts. The separate read-only live
+identity probe has three passing offline tests and consumes origin-bound
+sessions without printing tokens or raw errors.
+
+MCP2's GitHub start run 37137737510 succeeded and its public health endpoint
+responded. Live authenticated identity/recovery checks remain pending valid
+operator-specific sessions and independently obtained pins. No live upload,
+payment, shutdown or npm publication was performed in this validation.
+
+## 2026-10-05 — Credential-free operator proof (PR #274 review)
+
+Review found that `connectOperator` sent the JWT, and could run the token
+refresher, before it verified the pinned key. It also had no bound on the
+identity request. The server now has an anonymous `mnemonic_operator_proof`
+tool. It signs `mnemonic.operator-selection.v1\n<public origin>\n<nonce>`,
+where the nonce is exactly 64 lowercase hex characters. The server composes the
+message, so the anonymous tool is not a signing oracle. `mnemonic_prove_identity`
+still requires a token. The SDK verifies this proof with a bare request that has
+no credentials and a 15-second default timeout (`proofTimeoutMs`, `signal`).
+Only then does it create the authenticated client. The read-only probe needs no
+sessions now. Live operators need a server build with the new tool.
+
+Follow-up, not changed here: `mnemonic_prove_identity` signs any caller-chosen
+bytes with the operator key for every authenticated user. Review whether it
+needs domain separation.

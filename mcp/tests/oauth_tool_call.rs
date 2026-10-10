@@ -53,6 +53,8 @@ const EXPECTED_TOOLS: &[&str] = &[
     // A2A bridge Task 5 — attest + recall A2A objects.
     "mnemonic_attest_a2a",
     "mnemonic_recall_a2a",
+    // Operator selection — anonymous, origin-bound identity proof.
+    "mnemonic_operator_proof",
 ];
 
 fn build_router(state: Arc<McpState>, oauth_state: Arc<OAuthState>) -> Router {
