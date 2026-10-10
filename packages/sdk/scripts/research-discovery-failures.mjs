@@ -80,7 +80,7 @@ export async function runResearchDiscoveryFailures({context, rows, identity, hea
     };
     const client = new MnemonicClient({baseUrl: operator, signer: new LocalSigner(identity),
       jwt: 'SYNTHETIC-MUST-NOT-LEAK', a2aGatewayUrl: gateway, a2aIndexUrl: index,
-      a2aIndexFlavour: 'irys', fetch: request,
+      fetch: request,
       a2aIndex: {list: async () => [...local.values()], put: async row => {local.set(row.attestationId, row);}},
     });
     client.setKeypair(identity);

@@ -48,7 +48,6 @@ export interface SignerInterface {
 export interface MnemonicClientConfig {
   a2aGatewayUrl?: string;
   a2aIndexUrl?: string;
-  a2aIndexFlavour?: "irys" | "arweave";
   a2aIndex?: A2AIndexStore;
   baseUrl: string;
   signer: SignerInterface;

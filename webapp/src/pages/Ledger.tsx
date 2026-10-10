@@ -10,7 +10,7 @@ import {
   type ArtifactSource,
   type WriteMode,
 } from "../lib/ledger";
-import { irysDataUrl, solanaTxUrl } from "../lib/links";
+import { arweaveDataUrl, solanaTxUrl } from "../lib/links";
 
 /**
  * Ledger page (`/ledger`).
@@ -21,7 +21,7 @@ import { irysDataUrl, solanaTxUrl } from "../lib/links";
  *
  * The page never lies about provenance: data comes from the live `/artifacts`
  * endpoint and a fetch failure shows an error state — never fabricated rows.
- * On-chain rows ("anchored") link to Solana and the Irys data gateway; `local:`
+ * On-chain rows ("anchored") link to Solana and the Arweave data gateway; `local:`
  * / unanchored rows render as plain text, never as links (Decision 6 surfaces
  * public rows only).
  */
@@ -95,7 +95,7 @@ export default function Ledger() {
     <div className="relative min-h-screen overflow-hidden">
       <Seo
         title="Ledger"
-        description="A forensic feed of recalled artifacts saved on the node — signed memories, blake3 hashes, Solana anchors, and Irys data receipts."
+        description="A forensic feed of recalled artifacts saved on the node — signed memories, blake3 hashes, Solana anchors, and Arweave data receipts."
         canonical="/ledger"
       />
       <SiteHeader />
@@ -162,7 +162,7 @@ function PageHeader() {
       <p className="max-w-2xl text-text-muted">
         Public, signed memories saved on the node. Each carries a blake3 content
         hash and — when minted on-chain — a Solana anchor plus independently
-        retrievable signed bytes on Irys.
+        retrievable signed bytes on Arweave.
       </p>
     </header>
   );
@@ -255,7 +255,7 @@ function ArtifactCard({ artifact: a }: { artifact: Artifact }) {
   // rename still carries the old spelling, and would render as on-node.
   const onChain = a.write_mode !== "local";
   const solUrl = solanaTxUrl(a.solana_tx);
-  const dataUrl = irysDataUrl(a.arweave_tx);
+  const dataUrl = arweaveDataUrl(a.arweave_tx);
   // F1 label (tech-spec §2, §10): rows with privacy=plaintext that are
   // anchored on-chain must carry an honest disclosure — the bytes are
   // permanently readable on Arweave.
@@ -323,7 +323,7 @@ function ArtifactCard({ artifact: a }: { artifact: Artifact }) {
 
       <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-2 border-t border-white/5 pt-3 sm:grid-cols-2">
         <AnchorRow label="Solana" tx={a.solana_tx} url={solUrl} />
-        <AnchorRow label="Irys data" tx={a.arweave_tx} url={dataUrl} />
+        <AnchorRow label="Arweave data" tx={a.arweave_tx} url={dataUrl} />
       </dl>
     </article>
   );

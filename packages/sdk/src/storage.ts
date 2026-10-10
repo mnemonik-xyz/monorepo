@@ -41,7 +41,7 @@ async function deadline<T>(operation:(signal:AbortSignal)=>Promise<T>):Promise<T
 export class ArweaveStorageAdapter implements StorageAdapter {
   readonly namespace = 'ar' as const;
   readonly identity: string;
-  readonly capabilities = {upload:false,fetch:true,discovery:false,maxBytes:1048576,retention:'External Arweave/Irys policy; availability not guaranteed by this adapter',consistency:'Known-locator gateway reads; index lag is separate',metadataExposure:'Requested locator and original signed bytes are visible to gateway'};
+  readonly capabilities = {upload:false,fetch:true,discovery:false,maxBytes:1048576,retention:'External Arweave policy; availability not guaranteed by this adapter',consistency:'Known-locator gateway reads; index lag is separate',metadataExposure:'Requested locator and original signed bytes are visible to gateway'};
   private readonly origin: string;
   constructor(endpoint: string, private readonly request: typeof fetch = globalThis.fetch) { this.origin=origin(endpoint);this.identity=`arweave-fetch-v1:${this.origin}`; }
   async fetch(locator: string): Promise<Uint8Array> {

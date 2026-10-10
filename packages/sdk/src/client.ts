@@ -119,7 +119,7 @@ export class MnemonicClient {
 
   private a2aIndex!: import("./types.js").A2AIndexStore;
   private a2aGatewayUrl!: string;
-  private a2aDiscoveryConfig!: {url:string;flavour:'irys'|'arweave'};
+  private a2aDiscoveryConfig!: {url:string};
   setA2AIndexStore(store:import("./types.js").A2AIndexStore):void {this.a2aIndex=store;}
   _a2aIndexStore(){return this.a2aIndex;}
   _a2aGateway(){return this.a2aGatewayUrl;}
@@ -144,9 +144,8 @@ export class MnemonicClient {
     this.signer = config.signer;
     const rows=new Map<string,Attestation>();
     this.a2aIndex=config.a2aIndex??{list:async()=>[...rows.values()].map(r=>structuredClone(r)),put:async row=>{rows.set(row.attestationId,structuredClone(row));}};
-    this.a2aGatewayUrl=(config.a2aGatewayUrl??'https://gateway.irys.xyz').replace(/\/+$/,'');
-    if(config.a2aIndexFlavour!==undefined&&!['irys','arweave'].includes(config.a2aIndexFlavour))throw new UserError('invalid A2A index flavour');
-    this.a2aDiscoveryConfig={url:config.a2aIndexUrl??'https://uploader.irys.xyz/graphql',flavour:config.a2aIndexFlavour??'irys'};
+    this.a2aGatewayUrl=(config.a2aGatewayUrl??'https://arweave.net').replace(/\/+$/,'');
+    this.a2aDiscoveryConfig={url:config.a2aIndexUrl??'https://arweave.net/graphql'};
     for(const url of [this.a2aGatewayUrl,this.a2aDiscoveryConfig.url])if(!/^https?:\/\//.test(url))throw new UserError('invalid external A2A endpoint');
     if (config.jwt !== undefined) this.jwt = config.jwt;
     this.fetchImpl = config.fetch ?? globalThis.fetch.bind(globalThis);

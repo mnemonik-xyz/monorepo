@@ -35,11 +35,12 @@ export function solanaTxUrl(tx: string | null | undefined): string | null {
 }
 
 /**
- * Production storage currently returns an Irys ANS-104 DataItem id, not an
- * Arweave L1 transaction id. ViewBlock therefore returns 404 for these ids;
- * the canonical retrieval URL is the Irys gateway.
+ * Production storage returns an ANS-104 data item id (43-char base64url),
+ * uploaded through ArDrive Turbo. Data items are not Arweave L1 transactions,
+ * so ViewBlock returns 404 for these ids; the retrieval URL is an Arweave
+ * gateway, which serves the original signed bytes.
  */
-export function irysDataUrl(tx: string | null | undefined): string | null {
+export function arweaveDataUrl(tx: string | null | undefined): string | null {
   if (!tx || tx.startsWith("local:")) return null;
-  return `https://gateway.irys.xyz/${encodeURIComponent(tx)}`;
+  return `https://arweave.net/${encodeURIComponent(tx)}`;
 }

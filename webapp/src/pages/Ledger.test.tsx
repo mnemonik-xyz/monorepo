@@ -137,16 +137,14 @@ describe("Ledger page", () => {
       expect.stringContaining("noopener"),
     );
 
-    const irysLink = screen
+    const arweaveLink = screen
       .getAllByRole("link")
-      .find((a) =>
-        a.getAttribute("href")?.startsWith("https://gateway.irys.xyz/"),
-      );
-    expect(irysLink).toHaveAttribute(
+      .find((a) => a.getAttribute("href")?.startsWith("https://arweave.net/"));
+    expect(arweaveLink).toHaveAttribute(
       "href",
-      `https://gateway.irys.xyz/${FIXTURE[0]!.arweave_tx}`,
+      `https://arweave.net/${FIXTURE[0]!.arweave_tx}`,
     );
-    expect(irysLink?.getAttribute("href")).not.toContain("viewblock.io");
+    expect(arweaveLink?.getAttribute("href")).not.toContain("viewblock.io");
   });
 
   it("expands_and_collapses_the_recovered_memory", async () => {
