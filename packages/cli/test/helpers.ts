@@ -66,7 +66,7 @@ export function clearWasmMock(): void {
 /** Mock gateway reads of exactly the signed bytes persisted before upload. */
 export function signedDeliveryResponse(url: string): Response | undefined {
   const root = join(process.env.MNEMONIC_CONFIG_DIR!, "sealed");
-  if (!url.endsWith("/api/ingest-artifact") && !url.startsWith("https://gateway.irys.xyz/")) return undefined;
+  if (!url.endsWith("/api/ingest-artifact") && !url.startsWith("https://arweave.net/")) return undefined;
   const author = readdirSync(root)[0]!;
   const row = JSON.parse(readFileSync(join(root,author,readdirSync(join(root,author))[0]!),"utf8"));
   if (url.endsWith("/api/ingest-artifact")) return new Response(JSON.stringify({delivery_status:"verified",locator:`ar://${"a".repeat(43)}`,content_hash:row.memoryHash,author}),{headers:{"content-type":"application/json"}});

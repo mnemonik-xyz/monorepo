@@ -45,7 +45,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// **Network-dependent** — this test spawns the full `mnemonic-mcp` binary,
 /// whose `pricing.refresh().await` at startup makes outbound HTTPS calls
-/// to `uploader.irys.xyz` and `api.coingecko.com` (both with 10s
+/// to `payment.ardrive.io` and `api.coingecko.com` (both with 10s
 /// per-request reqwest timeouts). On a sandboxed runner with no internet,
 /// startup blocks for the full ~20s before falling through to `run_stdio`,
 /// which exceeds CI's preferred per-test budget.

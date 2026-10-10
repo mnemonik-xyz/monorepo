@@ -408,7 +408,7 @@ async fn sign_local_via_stdio(server: &TestServer, content: &str) -> serde_json:
     let resolved =
         resolve_write_mode(Some(&json!("local")), "local").expect("explicit local resolves");
     let cost_hint = mnemonic_mcp::pricing::CostHint {
-        irys_lamports: 0,
+        storage_cost_micro_usdc: 0,
         sol_tx_fee_lamports: 0,
         sol_price_usdc: 0.0,
         charge_micro_usdc: 0,

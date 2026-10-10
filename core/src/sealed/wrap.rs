@@ -387,13 +387,6 @@ mod tests {
         );
     }
 
-    fn hex_to_32(s: &str) -> [u8; 32] {
-        let v = hex::decode(s).expect("valid hex");
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&v);
-        out
-    }
-
     // ── Invalid key material ───────────────────────────────────────────────
 
     #[test]

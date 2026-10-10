@@ -206,7 +206,7 @@ mod tests {
     use super::*;
     use crate::codec::a2a::extension::build_x_mnemonic_extension;
     use crate::sealed::keys::{x25519_public_from_ed25519, x25519_secret_from_ed25519};
-    use crate::sealed::{seal_memory, SealError};
+    use crate::sealed::seal_memory;
     use ed25519_dalek::SigningKey;
     use serde_json::json;
 

@@ -87,7 +87,7 @@ pub fn init_payment_schema(conn: &Connection) -> anyhow::Result<()> {
 
         CREATE TABLE IF NOT EXISTS attestation_costs (
             attestation_id TEXT PRIMARY KEY,
-            irys_cost_lamports INTEGER NOT NULL,
+            storage_cost_micro_usdc INTEGER NOT NULL,
             sol_tx_fee_lamports INTEGER NOT NULL,
             sol_price_usdc REAL NOT NULL,
             earned_micro_usdc INTEGER NOT NULL,
@@ -96,6 +96,8 @@ pub fn init_payment_schema(conn: &Connection) -> anyhow::Result<()> {
         );",
     )
     .context("creating payment tables")?;
+
+    migrate_attestation_costs_to_micro_usdc(conn)?;
 
     // Add oauth_pubkey to api_keys if missing (migrated from
     // `migrate_owner_pubkey_columns` in mnemonic-core — Task 17).
@@ -998,11 +1000,57 @@ pub struct PnlStats {
     pub avg_sol_price_usdc: f64,
 }
 
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Databases created before the move to ArDrive Turbo stored the storage cost
+/// in lamports in the second column of `attestation_costs`. Rename that column
+/// (found by position, so no old name is hardcoded) to
+/// `storage_cost_micro_usdc` and convert each row in place with the SOL/USDC
+/// rate recorded on that row. Rows are not re-inserted, so existing foreign-key
+/// state is untouched. Idempotent.
+fn migrate_attestation_costs_to_micro_usdc(conn: &Connection) -> anyhow::Result<()> {
+    if table_has_column(conn, "attestation_costs", "storage_cost_micro_usdc")? {
+        return Ok(());
+    }
+    let legacy: String = conn
+        .query_row(
+            "SELECT name FROM pragma_table_info('attestation_costs') WHERE cid = 1",
+            [],
+            |row| row.get(0),
+        )
+        .context("reading the legacy storage-cost column")?;
+    anyhow::ensure!(
+        legacy
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+        "unexpected attestation_costs column name"
+    );
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(&format!(
+        "ALTER TABLE attestation_costs RENAME COLUMN {legacy} TO storage_cost_micro_usdc;
+         UPDATE attestation_costs
+           SET storage_cost_micro_usdc =
+             CAST(ROUND(storage_cost_micro_usdc * sol_price_usdc / 1000.0) AS INTEGER);"
+    ))?;
+    tx.commit()
+        .context("migrating attestation_costs storage cost to micro-USDC")
+}
+
 /// Record actual server costs alongside each completed attestation.
 pub fn record_attestation_cost(
     store: &SqliteStore,
     attestation_id: &str,
-    irys_lamports: u64,
+    storage_cost_micro_usdc: u64,
     sol_tx_fee_lamports: u64,
     sol_price_usdc: f64,
     earned_micro_usdc: i64,
@@ -1010,11 +1058,11 @@ pub fn record_attestation_cost(
     let now = chrono::Utc::now().to_rfc3339();
     store.conn().execute(
         "INSERT OR IGNORE INTO attestation_costs
-         (attestation_id, irys_cost_lamports, sol_tx_fee_lamports, sol_price_usdc, earned_micro_usdc, created_at)
+         (attestation_id, storage_cost_micro_usdc, sol_tx_fee_lamports, sol_price_usdc, earned_micro_usdc, created_at)
          VALUES (?,?,?,?,?,?)",
         params![
             attestation_id,
-            irys_lamports as i64,
+            storage_cost_micro_usdc as i64,
             sol_tx_fee_lamports as i64,
             sol_price_usdc,
             earned_micro_usdc,
@@ -1031,8 +1079,8 @@ pub fn get_pnl_stats(store: &SqliteStore, days: u64) -> anyhow::Result<PnlStats>
         "SELECT
             COUNT(*),
             COALESCE(SUM(earned_micro_usdc), 0),
-            COALESCE(SUM(irys_cost_lamports + sol_tx_fee_lamports), 0),
-            COALESCE(SUM((irys_cost_lamports + sol_tx_fee_lamports) * sol_price_usdc / 1000.0), 0.0),
+            COALESCE(SUM(sol_tx_fee_lamports), 0),
+            COALESCE(SUM(storage_cost_micro_usdc + sol_tx_fee_lamports * sol_price_usdc / 1000.0), 0.0),
             COALESCE(AVG(sol_price_usdc), 0.0)
          FROM attestation_costs
          WHERE created_at > datetime('now', ?1)",
@@ -2205,6 +2253,55 @@ mod tests {
     // ── Free daily anchor quota ─────────────────────────────────────────────
 
     const DAY: &str = "2026-09-27";
+
+    #[test]
+    fn attestation_costs_migrate_lamports_to_micro_usdc_once() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Pre-Turbo layout: the second column held the storage cost in lamports.
+        // `attestations` exists in every real database (foreign-key target).
+        conn.execute_batch(
+            "CREATE TABLE attestations (attestation_id TEXT PRIMARY KEY);
+             INSERT INTO attestations VALUES ('a1');
+             CREATE TABLE attestation_costs (
+                attestation_id TEXT PRIMARY KEY,
+                storage_cost_lamports_legacy INTEGER NOT NULL,
+                sol_tx_fee_lamports INTEGER NOT NULL,
+                sol_price_usdc REAL NOT NULL,
+                earned_micro_usdc INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (attestation_id) REFERENCES attestations(attestation_id)
+             );
+             INSERT INTO attestation_costs VALUES ('a1', 2000000, 5000, 150.0, 400000, '2026-09-01T00:00:00Z');",
+        )
+        .unwrap();
+        migrate_attestation_costs_to_micro_usdc(&conn).unwrap();
+        // 2_000_000 lamports at $150/SOL = 300_000 micro-USDC.
+        let row: (i64, i64, f64, i64, String) = conn
+            .query_row(
+                "SELECT storage_cost_micro_usdc, sol_tx_fee_lamports, sol_price_usdc, earned_micro_usdc, created_at
+                 FROM attestation_costs WHERE attestation_id = 'a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (300_000, 5000, 150.0, 400_000, "2026-09-01T00:00:00Z".into())
+        );
+        // Idempotent: a second run leaves the converted value alone.
+        migrate_attestation_costs_to_micro_usdc(&conn).unwrap();
+        let again: i64 = conn
+            .query_row(
+                "SELECT storage_cost_micro_usdc FROM attestation_costs",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(again, 300_000);
+        assert!(
+            !table_has_column(&conn, "attestation_costs", "storage_cost_lamports_legacy").unwrap()
+        );
+    }
 
     fn quota_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

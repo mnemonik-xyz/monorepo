@@ -6,27 +6,26 @@ const submission = { submitted_at: submitted };
 function sample(status, present, seconds = 2, verified = true) {
   return { fixture: { status: verified ? 'verified' : 'unverified',
     verified_at: `2026-10-02T00:00:0${seconds}.000Z`, indexes: {
-      irys: { status, expected_locator_present: present, finished_at: `2026-10-02T00:00:0${seconds-1}.000Z` },
+      arweave: { status, expected_locator_present: present, finished_at: `2026-10-02T00:00:0${seconds-1}.000Z` },
     } } };
 }
 test('absent then found records conservative completed-verification upper bound', () => {
   const result = summarizeVisibility([sample('exhausted',false),sample('exhausted',true,4)],submission);
   assert.equal(result.eventually_observed,true);
-  assert.deepEqual(result.providers.irys.sample_states,['not_observed_in_exhausted_scan','verified_present']);
-  assert.equal(result.providers.irys.visibility_latency_upper_bound_ms,4000);
-  assert.equal(result.providers.irys.initial_sample_positive,false);
+  assert.deepEqual(result.providers.arweave.sample_states,['not_observed_in_exhausted_scan','verified_present']);
+  assert.equal(result.providers.arweave.visibility_latency_upper_bound_ms,4000);
+  assert.equal(result.providers.arweave.initial_sample_positive,false);
 });
 test('outage and budget exhaustion remain unknown, then known presence can recover', () => {
   const result = summarizeVisibility([sample('unavailable',undefined),sample('budget_exhausted',false),sample('budget_exhausted',true,5)],submission);
-  assert.deepEqual(result.providers.irys.sample_states,['unknown','unknown','verified_present']);
-  assert.equal(result.providers.irys.visibility_latency_upper_bound_ms,5000);
-  assert.equal(result.providers.arweave.eventually_observed,false);
-  assert.equal(result.providers.arweave.visibility_latency_upper_bound_ms,null);
+  assert.deepEqual(result.providers.arweave.sample_states,['unknown','unknown','verified_present']);
+  assert.equal(result.providers.arweave.visibility_latency_upper_bound_ms,5000);
+  assert.deepEqual(Object.keys(result.providers),['arweave']);
 });
 test('initial visibility has upper bound only; no submission means no latency value', () => {
   const first = [sample('exhausted',true)];
-  assert.equal(summarizeVisibility(first,submission).providers.irys.initial_sample_positive,true);
-  assert.equal(summarizeVisibility(first,null).providers.irys.visibility_latency_upper_bound_ms,null);
+  assert.equal(summarizeVisibility(first,submission).providers.arweave.initial_sample_positive,true);
+  assert.equal(summarizeVisibility(first,null).providers.arweave.visibility_latency_upper_bound_ms,null);
   assert.equal(summarizeVisibility([sample('exhausted',true,2,false)],submission).eventually_observed,false);
 });
 test('submission validates full pins, paired provenance, exact UTC, nonfuture clock and digest', () => {

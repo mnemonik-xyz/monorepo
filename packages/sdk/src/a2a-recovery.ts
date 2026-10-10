@@ -1,5 +1,5 @@
 /** External A2A discovery: indexes supply hints; only original signatures establish trust. */
-import { IrysDiscoverySource, ArweaveDiscoverySource, DiscoveryError } from './discovery.js';
+import { ArweaveDiscoverySource, DiscoveryError } from './discovery.js';
 import { IntegrityError, UserError } from './errors.js';
 import { verifyA2AAttestation } from './a2a.js';
 import type { Attestation, A2AIndexStore, A2ARestoreOptions, A2ARestoreReport } from './types.js';
@@ -8,7 +8,7 @@ export interface RecoveryHost {
   _a2aIndexStore(): A2AIndexStore;
   _a2aExternal(url:string, init?:RequestInit): Promise<Response>;
   _a2aGateway(): string;
-  _a2aDiscovery(): {url:string; flavour:'irys'|'arweave'};
+  _a2aDiscovery(): {url:string};
 }
 const MAX=1048576;
 export function envelopeHex(bytes:Uint8Array):string { return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join(''); }
@@ -59,9 +59,7 @@ export async function verifyParent(child:Attestation,parent:Attestation):Promise
 export async function restoreA2AContext(this:RecoveryHost,context:string,opts:A2ARestoreOptions):Promise<A2ARestoreReport> {
   if(!context||!opts.expectedAuthors.length||opts.expectedAuthors.some(a=>!a))throw new UserError('context and pinned authors required');
   const authors=[...new Set(opts.expectedAuthors)].sort();const cfg=this._a2aDiscovery();
-  const source=opts.discoverySource === false ? undefined : opts.discoverySource ?? (cfg.flavour === 'irys'
-    ? new IrysDiscoverySource(cfg.url, this._a2aExternal.bind(this))
-    : new ArweaveDiscoverySource(cfg.url, this._a2aExternal.bind(this)));
+  const source=opts.discoverySource === false ? undefined : opts.discoverySource ?? new ArweaveDiscoverySource(cfg.url, this._a2aExternal.bind(this));
   const scope=JSON.stringify(['a2a',context,authors,source?.identity??'disabled',source?.supportedBackends??[]]);
   if(opts.checkpoint && opts.checkpoint.scope!==scope)throw new UserError('checkpoint scope mismatch');
   const maxPages=opts.maxPages??100,maxCandidates=opts.maxCandidates??10000;

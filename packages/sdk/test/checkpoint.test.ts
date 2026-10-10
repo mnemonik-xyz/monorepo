@@ -13,7 +13,7 @@ const kp=new Keypair(v.author),signer=new LocalSigner(kp), locator=`ar://${'A'.r
 const signedBytes=Uint8Array.from(v.stream.match(/../g)!.map(x=>parseInt(x,16)));
 const binding=JSON.parse(wasm.verify_a2a(signedBytes,v.author.pubkey_base58));
 const id=`a2a:${binding.content_hash}`;
-const spec=():RecoveryCheckpoint=>({version:1,artifactKind:'a2a',scope:v.context_id,expectedAuthors:[v.author.pubkey_base58],heads:[id],locators:[{artifactId:id,author:v.author.pubkey_base58,locator}],backendHints:['irys'],createdAt:'2026-10-02T00:00:00.000Z'});
+const spec=():RecoveryCheckpoint=>({version:1,artifactKind:'a2a',scope:v.context_id,expectedAuthors:[v.author.pubkey_base58],heads:[id],locators:[{artifactId:id,author:v.author.pubkey_base58,locator}],backendHints:['arweave'],createdAt:'2026-10-02T00:00:00.000Z'});
 beforeAll(()=>{globalThis.self=globalThis as any;__setWasmForTesting(wasm);});
 afterAll(()=>__setWasmForTesting(null));
 describe('authenticated recovery checkpoints',()=>{

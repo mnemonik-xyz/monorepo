@@ -183,9 +183,9 @@ export async function runA2AVerify(opts: A2AVerifyOptions): Promise<void> {
   return runVerify(opts.attestation, { ...opts });
 }
 
-export interface A2ARestoreOptions extends OutputOptions {context:string;authors:string[];heads?:string[];baseUrl?:string;gatewayUrl?:string;indexUrl?:string;indexFlavour?:"irys"|"arweave";}
+export interface A2ARestoreOptions extends OutputOptions {context:string;authors:string[];heads?:string[];baseUrl?:string;gatewayUrl?:string;indexUrl?:string;}
 export async function runA2ARestore(opts:A2ARestoreOptions):Promise<void>{
- const signer=lazyIdentitySigner();const client=new MnemonicClient({baseUrl:opts.baseUrl??DEFAULT_BASE_URL,signer,a2aIndex:fileA2AIndex(signer.pubkey),...(opts.gatewayUrl?{a2aGatewayUrl:opts.gatewayUrl}:{}),...(opts.indexUrl?{a2aIndexUrl:opts.indexUrl}:{}),...(opts.indexFlavour?{a2aIndexFlavour:opts.indexFlavour}:{})});
+ const signer=lazyIdentitySigner();const client=new MnemonicClient({baseUrl:opts.baseUrl??DEFAULT_BASE_URL,signer,a2aIndex:fileA2AIndex(signer.pubkey),...(opts.gatewayUrl?{a2aGatewayUrl:opts.gatewayUrl}:{}),...(opts.indexUrl?{a2aIndexUrl:opts.indexUrl}:{})});
  const report=await client.restoreA2AContext(opts.context,{expectedAuthors:opts.authors,...(opts.heads?{heads:opts.heads}:{})});
  format(report,opts,()=>`${report.attestations.length} verified artifacts; completeness: ${report.completeness}`);
  if(report.error||report.budgetExhausted||report.missingParents.length)throw new UserError('restoration partial; inspect JSON report');

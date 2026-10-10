@@ -438,7 +438,8 @@ come from your trust configuration. See [Sealed A2A](../../docs/sealed-a2a.md).
 A2A artifacts are signed on the client and stored externally on Arweave.
 Hosted MCP returns metadata receipts; clients fetch, verify and decrypt locally.
 SDK `restoreA2AContext(context, {expectedAuthors, heads})` needs no MCP login.
-Configure the payload gateway and the Arweave GraphQL index URL separately. Completeness
+Configure the payload gateway and the Arweave GraphQL index URL separately
+(defaults: `https://arweave.net` and `https://arweave.net/graphql`). Completeness
 means verified ancestry to pinned heads, not exhaustive index enumeration.
 Local mode uses an agent-owned index; SDK defaults to session-only memory.
 CLI provides `a2a attest --mode local`, `a2a recall --mode local`, and

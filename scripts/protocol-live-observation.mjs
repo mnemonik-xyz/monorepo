@@ -26,7 +26,7 @@ export function validateSubmission(values, pinned, now = Date.now()) {
 
 export function summarizeVisibility(observations, submission) {
   const providers = {};
-  for (const provider of ['irys', 'arweave']) {
+  for (const provider of ['arweave']) {
     const samples = observations.map(({fixture}) => {
       const index = fixture?.indexes?.[provider];
       if (fixture?.status === 'verified' && index?.expected_locator_present === true) {

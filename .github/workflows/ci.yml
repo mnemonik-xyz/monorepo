@@ -179,7 +179,7 @@ jobs:
   # Optional opt-in job: runs the network-touching `stdio_backward_compat`
   # integration test that's `#[ignore]`d by default. Triggered manually via
   # workflow_dispatch or scheduled (daily) — not on every PR — because it
-  # depends on outbound HTTPS to uploader.irys.xyz + api.coingecko.com.
+  # depends on outbound HTTPS to payment.ardrive.io + api.coingecko.com.
   test-stdio:
     name: test-stdio (ignored)
     runs-on: ubuntu-latest

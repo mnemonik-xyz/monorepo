@@ -423,9 +423,8 @@ export function buildProgram(): Command {
     .requiredOption("--context <id>","context")
     .requiredOption("--authors <keys...>","independently trusted authors")
     .option("--heads <ids...>","pinned heads to prove ancestry")
-    .option("--gateway-url <url>","payload gateway")
-    .option("--index-url <url>","GraphQL index")
-    .option("--index-flavour <flavour>","irys or arweave","irys")
+    .option("--gateway-url <url>","Arweave payload gateway (default https://arweave.net)")
+    .option("--index-url <url>","Arweave GraphQL index (default https://arweave.net/graphql)")
     .action(async(opts)=>runA2ARestore({...rootOpts(program),...opts}));
 
   a2a

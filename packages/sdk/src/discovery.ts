@@ -3,7 +3,7 @@ export interface DiscoveryScope { artifactKind: 'a2a'; context: string; expected
 export interface DiscoveryCandidate { backend: string; locator: string; metadata?: Record<string, string[]>; }
 export interface DiscoveryPage { candidates: DiscoveryCandidate[]; nextCursor?: string; }
 export interface DiscoverySource {
-  /** Stable identity including endpoint, flavour, and configuration version. */
+  /** Stable identity including endpoint, index schema, and configuration version. */
   readonly identity: string;
   readonly supportedBackends: readonly string[];
   page(scope: DiscoveryScope, cursor?: string, signal?: AbortSignal): Promise<DiscoveryPage>;
@@ -34,13 +34,14 @@ async function readJson(response: Response, signal: AbortSignal): Promise<any> {
   try { return JSON.parse(new TextDecoder().decode(bytes)); }
   catch { throw new DiscoveryError('malformed', 'invalid index JSON'); }
 }
-class GraphqlDiscoverySource implements DiscoverySource {
+/** Arweave indexes use explicit ascending block-height ordering. */
+export class ArweaveDiscoverySource implements DiscoverySource {
   readonly identity: string;
   readonly supportedBackends = ['arweave'] as const;
-  constructor(readonly endpoint: string, readonly flavour: 'irys' | 'arweave', private readonly request: (url: string, init?: RequestInit) => Promise<Response> = globalThis.fetch) {
+  constructor(readonly endpoint: string, private readonly request: (url: string, init?: RequestInit) => Promise<Response> = globalThis.fetch) {
     const url = new URL(endpoint);
     if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw new Error('invalid discovery endpoint');
-    this.identity = JSON.stringify(['graphql-v1', endpoint, flavour]);
+    this.identity = JSON.stringify(['graphql-v1', endpoint, 'arweave']);
   }
   async page(scope: DiscoveryScope, cursor?: string, signal?: AbortSignal): Promise<DiscoveryPage> {
     signal?.throwIfAborted();
@@ -51,7 +52,7 @@ class GraphqlDiscoverySource implements DiscoverySource {
     try {
     const tags = [ {name:'App-Name',values:['mnemonic-protocol']}, {name:'Mnemonic-Type',values:[scope.artifactKind]},
       {name:'Context-Id',values:[scope.context]}, {name:'Producer',values:scope.expectedAuthors} ];
-    const query = `query($tags:[TagFilter!]!,$after:String){transactions(first:100,tags:$tags,after:$after${this.flavour === 'arweave' ? ',sort:HEIGHT_ASC' : ''}){edges{cursor node{id tags{name value}}}pageInfo{hasNextPage}}}`;
+    const query = `query($tags:[TagFilter!]!,$after:String){transactions(first:100,tags:$tags,after:$after,sort:HEIGHT_ASC){edges{cursor node{id tags{name value}}}pageInfo{hasNextPage}}}`;
     let response: Response;
     try { response = await withAbort(this.request(this.endpoint, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,variables:{tags,after:cursor??null}}),signal:controller.signal,redirect:'error',credentials:'omit'}),controller.signal); }
     catch (e) { if (signal?.aborted) throw e; throw new DiscoveryError('unavailable', String(e)); }
@@ -71,12 +72,4 @@ class GraphqlDiscoverySource implements DiscoverySource {
     return {candidates, ...(tx.pageInfo.hasNextPage ? {nextCursor:next} : {})};
     } finally { clearTimeout(timeout); signal?.removeEventListener('abort', abort); }
   }
-}
-/** Irys schema deliberately omits Arweave sort/block fields. */
-export class IrysDiscoverySource extends GraphqlDiscoverySource {
-  constructor(endpoint: string, request?: (url: string, init?: RequestInit) => Promise<Response>) { super(endpoint, 'irys', request); }
-}
-/** Arweave indexes use explicit ascending block-height ordering. */
-export class ArweaveDiscoverySource extends GraphqlDiscoverySource {
-  constructor(endpoint: string, request?: (url: string, init?: RequestInit) => Promise<Response>) { super(endpoint, 'arweave', request); }
 }
