@@ -44,7 +44,7 @@ mod _helpers;
 use _helpers::TestServer;
 use mnemonic_core::storage::{AttestationStore, Visibility, WriteMode};
 use serde_json::json;
-use solana_sdk::signature::{Keypair, Signer as _};
+use solana_sdk::signature::Signer as _;
 
 // ── 1. local-mode write against a full-mode + paid server is free ──────────
 
@@ -389,11 +389,11 @@ async fn whoami_tracks_live_pricing_engine_state() {
         typical_payload_bytes: 2048,
         sol_tx_fee_lamports: 0,
     };
-    // 200_000 lamports at $100/SOL = 20_000 µUSDC = 2 cents.
+    // 20_000 µUSDC storage, no memo fee = 2 cents.
     server
         .state
         .pricing
-        .apply_quote(200_000, 100.0, &pricing_cfg)
+        .apply_quote(20_000, 100.0, &pricing_cfg)
         .expect("valid quote");
 
     let result = server

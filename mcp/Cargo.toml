@@ -67,7 +67,7 @@ lru = "0.18"
 # `governor 0.10`, producing a duplicate major. Logged in decisions.md.
 tower_governor = "=0.7.0"
 
-# HTTP client (used by pricing.rs for Irys + SOL/USDC price fetches)
+# HTTP client (used by pricing.rs for storage + SOL/USDC price fetches)
 reqwest = { version = "0.12", features = ["json"] }
 
 # Serialization

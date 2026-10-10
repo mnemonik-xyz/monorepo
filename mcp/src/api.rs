@@ -151,7 +151,7 @@ pub struct SignCallbackResponse {
     pub anchoring_network: &'static str,
     /// Convenience cluster-aware explorer URL; empty for synthetic local ids.
     pub solana_explorer_url: String,
-    /// Convenience configured Irys gateway URL; empty for synthetic local ids.
+    /// Convenience Arweave gateway URL; empty for synthetic local ids.
     pub arweave_url: String,
     /// True when this artifact (same `content_hash`) was already anchored:
     /// the ids are the existing anchor, and nothing new was written, charged
@@ -661,7 +661,8 @@ pub async fn sign_callback_handler(
             content_hash = %entry.content_hash,
             "sign-callback for an artifact that is already anchored; returning the existing anchor"
         );
-        let links = crate::tools::anchor_links(&state.arweave, &solana_tx, &arweave_tx);
+        let links =
+            crate::tools::anchor_links(&state.solana, &state.arweave, &solana_tx, &arweave_tx);
         let body = SignCallbackResponse {
             status: "ok",
             attestation_id: existing_id,
@@ -855,7 +856,7 @@ pub async fn sign_callback_handler(
             }
             uploaded
         };
-        // No-op for production Irys (mine() only writes against arlocal).
+        // No-op for production Turbo uploads (mine() only writes against arlocal).
         let _ = state.arweave.mine().await;
 
         // Stage 2 (chain-agnostic/decisions.md): WriteMode::Anchored no
@@ -1089,7 +1090,7 @@ pub async fn sign_callback_handler(
         }
     }
 
-    let links = crate::tools::anchor_links(&state.arweave, &solana_tx, &arweave_tx);
+    let links = crate::tools::anchor_links(&state.solana, &state.arweave, &solana_tx, &arweave_tx);
 
     let body = SignCallbackResponse {
         status: "ok",

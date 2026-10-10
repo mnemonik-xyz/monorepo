@@ -447,7 +447,7 @@ fn settled_operation(server: &TestServer, owner: &str, bytes: &[u8], operation: 
         store.conn(),
         paid_operation::NewPaidOperation {
             operation_id: operation,
-            subject_hash: &blake3::hash(owner.as_bytes()).to_hex().to_string(),
+            subject_hash: blake3::hash(owner.as_bytes()).to_hex().as_ref(),
             artifact_hash: &digest,
             created_at: "2026-10-02T00:00:00Z",
         },
@@ -707,7 +707,7 @@ async fn paid_a2a_uses_same_durable_operation_after_settlement_crash() {
             store.conn(),
             paid_operation::NewPaidOperation {
                 operation_id: &operation,
-                subject_hash: &blake3::hash(owner.as_bytes()).to_hex().to_string(),
+                subject_hash: blake3::hash(owner.as_bytes()).to_hex().as_ref(),
                 artifact_hash: &digest,
                 created_at: "now",
             },

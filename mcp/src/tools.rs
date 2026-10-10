@@ -9,7 +9,7 @@ use solana_sdk::signature::Keypair;
 
 use std::time::Duration;
 
-use mnemonic_core::arweave::{ArweaveClient, IrysNetwork};
+use mnemonic_core::arweave::ArweaveClient;
 use mnemonic_core::codec::{
     canonical::{from_canonical_cbor, to_canonical_cbor},
     hash::hash_bytes as blake3_hash,
@@ -32,8 +32,9 @@ use crate::pending::PendingBundles;
 use crate::{payment, pricing::CostHint};
 
 /// Public anchor metadata returned after a successful signing/delivery flow.
-/// It is derived from the configured Irys client rather than hard-coded, so a
-/// separate Devnet MCP cannot direct users to production explorers or data.
+/// The Solana cluster comes from the configured Solana client, so a devnet MCP
+/// cannot direct users to production explorers. Artifacts always live on
+/// Arweave mainnet and are linked through the configured read gateway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnchorLinks {
     pub network: &'static str,
@@ -41,7 +42,12 @@ pub struct AnchorLinks {
     pub arweave_url: String,
 }
 
-pub fn anchor_links(arweave: &ArweaveClient, solana_tx: &str, arweave_tx: &str) -> AnchorLinks {
+pub fn anchor_links(
+    solana: &SolanaClient,
+    arweave: &ArweaveClient,
+    solana_tx: &str,
+    arweave_tx: &str,
+) -> AnchorLinks {
     if solana_tx.starts_with("local:") || arweave_tx.starts_with("local:") {
         return AnchorLinks {
             network: "local",
@@ -49,20 +55,21 @@ pub fn anchor_links(arweave: &ArweaveClient, solana_tx: &str, arweave_tx: &str) 
             arweave_url: String::new(),
         };
     }
-
-    match arweave.network() {
-        IrysNetwork::Mainnet => AnchorLinks {
-            network: "mainnet",
-            solana_explorer_url: format!("https://explorer.solana.com/tx/{solana_tx}"),
-            arweave_url: format!("{}/{arweave_tx}", arweave.gateway_url()),
-        },
-        IrysNetwork::Devnet => AnchorLinks {
+    let arweave_url = format!("{}/{arweave_tx}", arweave.gateway_url());
+    if solana.is_devnet() {
+        AnchorLinks {
             network: "devnet",
             solana_explorer_url: format!(
                 "https://explorer.solana.com/tx/{solana_tx}?cluster=devnet"
             ),
-            arweave_url: format!("{}/{arweave_tx}", arweave.gateway_url()),
-        },
+            arweave_url,
+        }
+    } else {
+        AnchorLinks {
+            network: "mainnet",
+            solana_explorer_url: format!("https://explorer.solana.com/tx/{solana_tx}"),
+            arweave_url,
+        }
     }
 }
 
@@ -1269,6 +1276,7 @@ fn sign_memory_local_sealed(
 pub async fn check_pending(
     pending: &PendingBundles,
     store: &std::sync::Mutex<SqliteStore>,
+    solana: &SolanaClient,
     arweave: &ArweaveClient,
     correlation_id: &str,
 ) -> serde_json::Value {
@@ -1292,7 +1300,7 @@ pub async fn check_pending(
     if let Some((attestation_id, content_hash, solana_tx, arweave_tx, signer_pubkey, created_at)) =
         signed
     {
-        let links = anchor_links(arweave, &solana_tx, &arweave_tx);
+        let links = anchor_links(solana, arweave, &solana_tx, &arweave_tx);
         return serde_json::json!({
             "status": "signed",
             "attestation_id": attestation_id,
@@ -1654,7 +1662,7 @@ async fn sign_memory_inline(
         let _ = payment::record_attestation_cost(
             &store,
             &attestation_id,
-            cost_hint.irys_lamports,
+            cost_hint.storage_cost_micro_usdc,
             cost_hint.sol_tx_fee_lamports,
             cost_hint.sol_price_usdc,
             cost_hint.charge_micro_usdc,
@@ -3113,7 +3121,7 @@ mod sign_memory_tests {
         let comp = EmbeddingCompressor::new(8, 4, 42);
         let pending = PendingBundles::with_defaults();
         let hint = crate::pricing::CostHint {
-            irys_lamports: 0,
+            storage_cost_micro_usdc: 0,
             sol_tx_fee_lamports: 0,
             sol_price_usdc: 0.0,
             charge_micro_usdc: 0,
@@ -3361,7 +3369,7 @@ mod sign_memory_tests {
         let ar = ArweaveClient::new("http://localhost:0");
         let comp = EmbeddingCompressor::new(8, 4, 42);
         let hint = crate::pricing::CostHint {
-            irys_lamports: 0,
+            storage_cost_micro_usdc: 0,
             sol_tx_fee_lamports: 0,
             sol_price_usdc: 0.0,
             charge_micro_usdc: 0,
@@ -3578,7 +3586,7 @@ mod sign_memory_tests {
         // Defense in depth: the inline function itself refuses as well.
         let comp = EmbeddingCompressor::new(8, 4, 42);
         let hint = crate::pricing::CostHint {
-            irys_lamports: 0,
+            storage_cost_micro_usdc: 0,
             sol_tx_fee_lamports: 0,
             sol_price_usdc: 0.0,
             charge_micro_usdc: 0,
@@ -3980,23 +3988,36 @@ mod anchor_links_tests {
     use super::*;
 
     #[test]
-    fn devnet_links_use_devnet_cluster_and_gateway() {
-        let arweave =
-            ArweaveClient::new_with_network("https://devnet.irys.xyz/", IrysNetwork::Devnet);
-        let links = anchor_links(&arweave, "solana-signature", "irys-data-item");
+    fn devnet_links_use_devnet_cluster_and_arweave_gateway() {
+        let solana = SolanaClient::new("https://api.devnet.solana.com");
+        let arweave = ArweaveClient::new("https://arweave.net/");
+        let links = anchor_links(&solana, &arweave, "solana-signature", "data-item");
 
         assert_eq!(links.network, "devnet");
         assert_eq!(
             links.solana_explorer_url,
             "https://explorer.solana.com/tx/solana-signature?cluster=devnet"
         );
-        assert_eq!(links.arweave_url, "https://devnet.irys.xyz/irys-data-item");
+        assert_eq!(links.arweave_url, "https://arweave.net/data-item");
+    }
+
+    #[test]
+    fn mainnet_links_use_mainnet_explorer() {
+        let solana = SolanaClient::new("https://api.mainnet-beta.solana.com");
+        let arweave = ArweaveClient::new("https://arweave.net");
+        let links = anchor_links(&solana, &arweave, "sig", "item");
+        assert_eq!(links.network, "mainnet");
+        assert_eq!(
+            links.solana_explorer_url,
+            "https://explorer.solana.com/tx/sig"
+        );
     }
 
     #[test]
     fn local_ids_have_no_external_links() {
-        let arweave = ArweaveClient::new("https://gateway.irys.xyz");
-        let links = anchor_links(&arweave, "local:solana", "local:irys");
+        let arweave = ArweaveClient::new("https://arweave.net");
+        let solana = SolanaClient::new("https://api.mainnet-beta.solana.com");
+        let links = anchor_links(&solana, &arweave, "local:solana", "local:item");
 
         assert_eq!(links.network, "local");
         assert!(links.solana_explorer_url.is_empty());

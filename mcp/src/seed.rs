@@ -341,7 +341,7 @@ pub async fn run(state: &McpState) -> Result<()> {
 
     // sign_memory needs a CostHint even in local mode (values are ignored)
     let cost_hint = CostHint {
-        irys_lamports: 0,
+        storage_cost_micro_usdc: 0,
         sol_tx_fee_lamports: state.sol_tx_fee_lamports,
         sol_price_usdc: 0.0,
         charge_micro_usdc: 0,

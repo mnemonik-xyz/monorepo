@@ -6,8 +6,6 @@
 //! - Audit log contains start/end events but no RK or content.
 //! - `mnemonic_recall` during session returns opened sealed rows.
 
-use std::sync::Arc;
-
 use mnemonic_core::identity::recall_key::{generate_rk, wrap_rk};
 use mnemonic_mcp::api::{get_active_rk, RecallSession};
 use mnemonic_mcp::test_support::mock_state;

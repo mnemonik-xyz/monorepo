@@ -1,24 +1,14 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use mnemonic_core::arweave::IrysNetwork;
-
-/// Selects where a full-storage MCP writes its Irys bundle items and Solana
-/// memo anchors. `devnet` is intentionally strict: it is the non-billable
-/// staging mode and must never accept a production endpoint.
+/// Selects the Solana network for memo anchors. Artifact storage is always
+/// Arweave mainnet through ArDrive Turbo (there is no Turbo test network), so
+/// this setting never changes where bytes are stored. `devnet` is strict: it
+/// must never accept a production Solana endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnchoringNetwork {
     Mainnet,
     Devnet,
-}
-
-impl AnchoringNetwork {
-    fn as_irys_network(self) -> IrysNetwork {
-        match self {
-            Self::Mainnet => IrysNetwork::Mainnet,
-            Self::Devnet => IrysNetwork::Devnet,
-        }
-    }
 }
 
 impl FromStr for AnchoringNetwork {
@@ -48,8 +38,8 @@ pub struct Config {
     #[allow(dead_code)]
     pub http_port: u16,
     pub solana_rpc_url: String,
-    /// Irys read gateway. `IRYS_GATEWAY_URL` is the preferred name;
-    /// `ARWEAVE_URL` remains a backwards-compatible fallback.
+    /// Primary Arweave read gateway. Env: `ARWEAVE_GATEWAY_URL`, with
+    /// `ARWEAVE_URL` as the older name.
     pub arweave_url: String,
     /// Optional configured object-storage origin for migrated A2A parent bytes.
     /// Parent locators select only a digest, never an arbitrary URL.
@@ -140,11 +130,11 @@ pub struct Config {
     pub approval_chain_currency_decimals: u8,
 
     // ── Dynamic pricing ───────────────────────────────────────────────────────
-    /// How often to refresh Irys + SOL prices (seconds). Default 1800 (30 min).
+    /// How often to refresh storage + SOL prices (seconds). Default 1800 (30 min).
     pub price_refresh_secs: u64,
     /// Profit margin above break-even in basis points (2000 = 20 %).
     pub pricing_margin_bps: u64,
-    /// Typical mnemonic_sign_memory payload size used for Irys price quotes (bytes).
+    /// Typical mnemonic_sign_memory payload size used for storage price quotes (bytes).
     pub typical_payload_bytes: usize,
     /// Solana memo tx fee in lamports (~5 000 on mainnet).
     pub sol_tx_fee_lamports: u64,
@@ -279,9 +269,7 @@ pub struct Config {
     /// Env: `CHAIN_STATS_GRAPHQL_URL`.
     pub chain_stats_graphql_url: String,
     /// Gateway base URL for fetching item payloads (legacy producer
-    /// backfill). Defaults to the Irys gateway: this node uploads via
-    /// Irys, and arweave.net serves an HTML placeholder page (HTTP 200!)
-    /// for Irys-bundled items it never indexed — verified live 2026-07-09.
+    /// backfill). Defaults to arweave.net.
     /// Env: `CHAIN_STATS_GATEWAY_URL`.
     pub chain_stats_gateway_url: String,
     /// Snapshot refresh interval in seconds. Default 3600.
@@ -298,7 +286,7 @@ impl Config {
             http_port: env_or("MCP_HTTP_PORT", "3000").parse().unwrap_or(3000),
             solana_rpc_url: env_or("SOLANA_RPC_URL", "http://localhost:8899"),
             arweave_url: env_or_fallback(
-                "IRYS_GATEWAY_URL",
+                "ARWEAVE_GATEWAY_URL",
                 "ARWEAVE_URL",
                 "http://localhost:1984",
             ),
@@ -411,9 +399,9 @@ impl Config {
                 .collect(),
             chain_stats_graphql_url: env_or(
                 "CHAIN_STATS_GRAPHQL_URL",
-                "https://uploader.irys.xyz/graphql",
+                "https://arweave.net/graphql",
             ),
-            chain_stats_gateway_url: env_or("CHAIN_STATS_GATEWAY_URL", "https://gateway.irys.xyz"),
+            chain_stats_gateway_url: env_or("CHAIN_STATS_GATEWAY_URL", "https://arweave.net"),
             chain_stats_refresh_secs: env_or("CHAIN_STATS_REFRESH_SECS", "3600")
                 .parse()
                 .unwrap_or(3600),
@@ -444,9 +432,9 @@ impl Config {
         self.anchoring_network.parse()
     }
 
-    /// In Devnet mode, every external anchoring endpoint is fixed and
-    /// non-production. This is deliberately stricter than the legacy mainnet
-    /// configuration, which supports custom gateways and local test rigs.
+    /// In Devnet mode the Solana endpoint is fixed and non-production. This is
+    /// deliberately stricter than mainnet, which supports custom RPCs and local
+    /// test rigs. Storage is unaffected: it is always Arweave mainnet.
     pub fn validate_anchoring_config(&self) -> Result<AnchoringNetwork, String> {
         let network = self.resolved_anchoring_network()?;
         if network == AnchoringNetwork::Devnet {
@@ -455,17 +443,8 @@ impl Config {
                 &self.solana_rpc_url,
                 "https://api.devnet.solana.com",
             )?;
-            validate_exact_https_origin(
-                "IRYS_GATEWAY_URL",
-                &self.arweave_url,
-                "https://devnet.irys.xyz",
-            )?;
         }
         Ok(network)
-    }
-
-    pub fn irys_network(&self) -> Result<IrysNetwork, String> {
-        Ok(self.resolved_anchoring_network()?.as_irys_network())
     }
 }
 
@@ -541,7 +520,7 @@ pub fn validate_staging_config(cfg: &Config) -> Result<(), Vec<String>> {
         errors.push("PAYMENT_MODE must be 'x402' for staging".to_string());
     }
     // Reject loopback endpoints for the Universal Paywall URL only —
-    // other endpoints (Solana RPC, Irys) may legitimately use local URLs
+    // other endpoints (Solana RPC, Arweave gateway) may legitimately use local URLs
     // during development.
     if !cfg.universal_paywall_url.is_empty() && staging_is_loopback(&cfg.universal_paywall_url) {
         errors.push("UNIVERSAL_PAYWALL_URL must not be a loopback address for staging".to_string());
@@ -725,24 +704,23 @@ mod tests {
         let mut cfg = Config::from_env();
         cfg.anchoring_network = "devnet".to_string();
         cfg.solana_rpc_url = "https://api.mainnet-beta.solana.com".to_string();
-        cfg.arweave_url = "https://gateway.irys.xyz".to_string();
         assert!(cfg.validate_anchoring_config().is_err());
 
         cfg.solana_rpc_url = "https://api.devnet.solana.com".to_string();
-        cfg.arweave_url = "https://devnet.irys.xyz".to_string();
+        cfg.arweave_url = "https://arweave.net".to_string();
         assert_eq!(
             cfg.validate_anchoring_config(),
             Ok(AnchoringNetwork::Devnet)
         );
 
         // A trailing slash is semantically the same origin, but a path must
-        // not be accepted: it could point uploads/reads at an unexpected API.
-        cfg.arweave_url = "https://devnet.irys.xyz/".to_string();
+        // not be accepted: it could point at an unexpected API.
+        cfg.solana_rpc_url = "https://api.devnet.solana.com/".to_string();
         assert_eq!(
             cfg.validate_anchoring_config(),
             Ok(AnchoringNetwork::Devnet)
         );
-        cfg.arweave_url = "https://devnet.irys.xyz/custom".to_string();
+        cfg.solana_rpc_url = "https://api.devnet.solana.com/custom".to_string();
         assert!(cfg.validate_anchoring_config().is_err());
     }
 
@@ -791,7 +769,7 @@ mod tests {
         cfg.universal_paywall_url = "https://paywall.staging.mnemonik.xyz".to_string();
         cfg.universal_paywall_network = "eip155:31337".to_string();
         cfg.solana_rpc_url = "https://api.devnet.solana.com".to_string();
-        cfg.arweave_url = "https://devnet.irys.xyz".to_string();
+        cfg.arweave_url = "https://arweave.net".to_string();
         cfg.approval_chain_rpc_url = "https://base-sepolia-rpc.publicnode.com".to_string();
         let result = validate_staging_config(&cfg);
         assert!(result.is_err());

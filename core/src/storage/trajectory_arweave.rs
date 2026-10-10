@@ -3,10 +3,10 @@
 //! Per `work/verifiable-trajectories/decisions.md` the canonical store is the
 //! permaweb and the MCP server is stateless. Steps/verdicts are written as
 //! tagged ANS-104 data items (one bundled write per checkpoint in production via
-//! Irys) and read back by **GraphQL tag query** — no server database.
+//! ArDrive Turbo) and read back by **GraphQL tag query** — no server database.
 //!
 //! - **Writes** (`write_step` / `write_verdict`) are async, via [`ArweaveClient`]
-//!   (Irys in prod, arlocal in dev), tagging each item with `Trajectory-Id` /
+//!   (Turbo in prod, arlocal in dev), tagging each item with `Trajectory-Id` /
 //!   `Seq` / `Content-Hash` / `Producer` (steps) or `Step-Hash` / `Status` /
 //!   `Judge` (verdicts).
 //! - **Reads** implement the sync [`TrajectoryStore`] trait using a *blocking*

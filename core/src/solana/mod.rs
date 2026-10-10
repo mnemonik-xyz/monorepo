@@ -51,6 +51,13 @@ fn parse_anchor_memo(memo: Option<&str>) -> Option<(String, String)> {
 }
 
 impl SolanaClient {
+    /// True when this client talks to the official Solana devnet RPC. The
+    /// MCP's devnet mode requires exactly this endpoint, so explorer links can
+    /// rely on it.
+    pub fn is_devnet(&self) -> bool {
+        self.rpc_url.trim_end_matches('/') == "https://api.devnet.solana.com"
+    }
+
     pub fn new(rpc_url: &str) -> Self {
         Self {
             rpc_url: rpc_url.to_string(),
@@ -167,8 +174,8 @@ impl SolanaClient {
     /// Enumerate every anchor memo this wallet ever wrote, oldest-first.
     ///
     /// The authoritative recovery source (recover-traction-from-chain):
-    /// gateway GraphQL does NOT index the historical Irys-bundled items,
-    /// but each `anchored` write also produced an SPL Memo
+    /// gateway GraphQL does not list every historical item, but each
+    /// `anchored` write also produced an SPL Memo
     /// (`{"h": blake3, "a": arweave_tx, "v": 2|3}`) from the server wallet,
     /// and `getSignaturesForAddress` returns the memo text inline — one
     /// paginated RPC enumerates the full anchored ledger. Non-anchor memos

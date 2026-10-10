@@ -1,21 +1,12 @@
-//! Arweave/Irys gateway GraphQL client — enumerates anchored mnemonic-protocol
-//! data items so traction stats survive a total node-database loss.
+//! Arweave gateway GraphQL client — enumerates anchored mnemonic-protocol
+//! data items so traction stats survive a total node-database loss, and
+//! confirms that an uploaded item reached an Arweave block.
 //!
 //! Every `anchored` write uploads a COSE_Sign1 envelope as an ANS-104
 //! item signed by the server's Solana keypair and tagged
-//! `App-Name: mnemonic-protocol` (see `ArweaveClient::write_irys` /
-//! `write_item`). The Irys GraphQL endpoint indexes those items (Arweave
-//! gateways index the containing bundle, not the items themselves).
-//!
-//! ## Gateway schemas differ
-//!
-//! Irys rejects two fields the Arweave schema accepts:
-//! - `sort` argument on `transactions` → `Unknown argument`
-//! - `block { timestamp }` field on `Transaction` → `Cannot query field`
-//!
-//! [`GatewayFlavour`] selects the query shape and controls how timestamps
-//! are parsed. Derive it from the URL via [`flavour_from_url`], or override
-//! with [`GraphQlClient::new_with_flavour`].
+//! `App-Name: mnemonic-protocol` (see `ArweaveClient::write_item`). Arweave
+//! gateways (arweave.net, ar-io.dev, …) index bundled ANS-104 items by owner
+//! and tag once their bundle is in a block.
 
 use anyhow::Context;
 use base64::Engine;
@@ -31,33 +22,6 @@ const PAGE_SIZE: usize = 100;
 /// keeps returning `hasNextPage: true` (1M items is far beyond current scale).
 const MAX_PAGES: usize = 10_000;
 
-/// Which gateway schema to use when building queries and parsing responses.
-///
-/// Irys rejects `sort` and `block { ... }` — both valid in the Arweave schema
-/// but hard errors on Irys. Irys also returns timestamps as milliseconds on the
-/// node directly, whereas Arweave nests them under `block.timestamp` in seconds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GatewayFlavour {
-    /// Standard Arweave gateway (arweave.net, goldsky, …): supports
-    /// `sort: HEIGHT_ASC`, returns timestamps under `block.timestamp` in
-    /// seconds. Results arrive oldest-first from the gateway.
-    Arweave,
-    /// Irys gateway (uploader.irys.xyz, …): no `sort` argument, timestamp is a
-    /// top-level field in **milliseconds**. Results arrive newest-first;
-    /// ordering is applied client-side after all pages are fetched.
-    Irys,
-}
-
-/// Derive the gateway flavour from a URL. Any URL whose host contains
-/// `irys.xyz` is treated as Irys; everything else is Arweave.
-pub fn flavour_from_url(url: &str) -> GatewayFlavour {
-    if url.contains("irys.xyz") {
-        GatewayFlavour::Irys
-    } else {
-        GatewayFlavour::Arweave
-    }
-}
-
 /// One anchored data item as reported by the gateway index.
 #[derive(Debug, Clone)]
 pub struct AnchoredItem {
@@ -70,14 +34,9 @@ pub struct AnchoredItem {
     pub producer: Option<String>,
 }
 
-/// Derive the **Arweave-gateway** owner address for an ANS-104 item signed by
-/// an Ed25519 (Solana) key: `base64url_nopad(sha256(pubkey_bytes))` — the
-/// arbundles `ownerToAddress` rule.
-///
-/// **This address is only correct for `GatewayFlavour::Arweave` queries.**
-/// Irys indexes items by the raw base58 Solana pubkey, not by this SHA-256
-/// derived form. When querying Irys, pass the base58 pubkey directly as the
-/// `owners` filter value (see [`GatewayFlavour`] and [`GraphQlClient::list_anchored`]).
+/// Derive the Arweave owner address for an ANS-104 item signed by an Ed25519
+/// (Solana) key: `base64url_nopad(sha256(pubkey_bytes))` — the arbundles
+/// `ownerToAddress` rule. Use it as the `owners` filter value.
 pub fn solana_pubkey_to_arweave_address(pubkey_base58: &str) -> anyhow::Result<String> {
     let bytes = bs58::decode(pubkey_base58.trim())
         .into_vec()
@@ -93,39 +52,62 @@ pub fn solana_pubkey_to_arweave_address(pubkey_base58: &str) -> anyhow::Result<S
 
 pub struct GraphQlClient {
     url: String,
-    flavour: GatewayFlavour,
     client: reqwest::Client,
 }
 
 impl GraphQlClient {
-    /// Create a client and auto-detect the gateway flavour from the URL.
-    /// URLs containing `irys.xyz` use the Irys schema; everything else uses
-    /// the Arweave schema. Use [`new_with_flavour`] for an explicit override.
     pub fn new(url: &str) -> Self {
-        Self::new_with_flavour(url, flavour_from_url(url))
-    }
-
-    pub fn new_with_flavour(url: &str, flavour: GatewayFlavour) -> Self {
         Self {
             url: url.to_string(),
-            flavour,
             client: super::http_client(),
         }
     }
 
-    pub fn flavour(&self) -> GatewayFlavour {
-        self.flavour
+    /// Block height of a transaction or bundled data item, or `None` while it
+    /// is not yet in a block (or not yet indexed). An upload is permanent on
+    /// Arweave only once this returns `Some`.
+    pub async fn block_height(&self, id: &str) -> anyhow::Result<Option<u64>> {
+        anyhow::ensure!(
+            id.len() == 43
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            "invalid Arweave id"
+        );
+        let body = serde_json::json!({
+            "query": format!(r#"{{ transaction(id: "{id}") {{ block {{ height }} }} }}"#),
+        });
+        let json = self.post(&body).await?;
+        Ok(json["data"]["transaction"]["block"]["height"].as_u64())
+    }
+
+    async fn post(&self, body: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        let resp = self
+            .client
+            .post(&self.url)
+            .json(body)
+            .send()
+            .await
+            .context("arweave graphql request")?;
+        anyhow::ensure!(
+            resp.status().is_success(),
+            "arweave graphql returned {}",
+            resp.status()
+        );
+        let json: serde_json::Value = resp.json().await.context("arweave graphql body")?;
+        if let Some(errors) = json.get("errors") {
+            if errors.as_array().is_some_and(|a| !a.is_empty()) {
+                anyhow::bail!("arweave graphql errors: {errors}");
+            }
+        }
+        Ok(json)
     }
 
     /// Enumerate all anchored items, oldest-first.
     ///
-    /// `owner_addresses` format depends on the gateway flavour:
-    /// - `GatewayFlavour::Irys` — pass the **raw base58 Solana pubkey**. Irys
-    ///   indexes items by the raw pubkey, not by the SHA-256-derived Arweave
-    ///   address. Verified 2026-09-28 against `uploader.irys.xyz`.
-    /// - `GatewayFlavour::Arweave` — pass the Arweave-form address produced by
-    ///   [`solana_pubkey_to_arweave_address`] (SHA-256 / base64url-nopad).
-    /// - Empty slice — no owner filter (tag-only query).
+    /// `owner_addresses` are Arweave-form addresses produced by
+    /// [`solana_pubkey_to_arweave_address`]. An empty slice means no owner
+    /// filter (tag-only query).
     pub async fn list_anchored(
         &self,
         owner_addresses: &[String],
@@ -178,11 +160,6 @@ impl GraphQlClient {
             }
         }
         report.budget_exhausted = !report.exhausted && report.error.is_none();
-        if self.flavour == GatewayFlavour::Irys {
-            report
-                .items
-                .sort_by_key(|i| i.block_time.unwrap_or(i64::MAX));
-        }
         report
     }
 
@@ -200,9 +177,8 @@ impl GraphQlClient {
             format!("owners: {},", serde_json::to_string(owner_addresses)?)
         };
 
-        let query = match self.flavour {
-            GatewayFlavour::Arweave => format!(
-                r#"query($after: String) {{
+        let query = format!(
+            r#"query($after: String) {{
   transactions(
     {owners_clause}
     tags: [{{ name: "App-Name", values: ["{APP_NAME}"] }}],
@@ -214,46 +190,14 @@ impl GraphQlClient {
     edges {{ cursor node {{ id block {{ timestamp }} tags {{ name value }} }} }}
   }}
 }}"#
-            ),
-            GatewayFlavour::Irys => format!(
-                r#"query($after: String) {{
-  transactions(
-    {owners_clause}
-    tags: [{{ name: "App-Name", values: ["{APP_NAME}"] }}],
-    first: {PAGE_SIZE},
-    after: $after
-  ) {{
-    pageInfo {{ hasNextPage }}
-    edges {{ cursor node {{ id timestamp tags {{ name value }} }} }}
-  }}
-}}"#
-            ),
-        };
+        );
 
         let body = serde_json::json!({
             "query": query,
             "variables": { "after": after },
         });
 
-        let resp = self
-            .client
-            .post(&self.url)
-            .json(&body)
-            .send()
-            .await
-            .context("arweave graphql request")?;
-        anyhow::ensure!(
-            resp.status().is_success(),
-            "arweave graphql returned {}",
-            resp.status()
-        );
-        let json: serde_json::Value = resp.json().await.context("arweave graphql body")?;
-        if let Some(errors) = json.get("errors") {
-            if errors.as_array().is_some_and(|a| !a.is_empty()) {
-                anyhow::bail!("arweave graphql errors: {errors}");
-            }
-        }
-        parse_page(&json, self.flavour)
+        parse_page(&self.post(&body).await?)
     }
 }
 
@@ -263,7 +207,7 @@ struct PageResult {
     next_cursor: Option<String>,
 }
 
-fn parse_page(json: &serde_json::Value, flavour: GatewayFlavour) -> anyhow::Result<PageResult> {
+fn parse_page(json: &serde_json::Value) -> anyhow::Result<PageResult> {
     let tx = &json["data"]["transactions"];
     let edges = tx["edges"]
         .as_array()
@@ -277,12 +221,8 @@ fn parse_page(json: &serde_json::Value, flavour: GatewayFlavour) -> anyhow::Resu
             .as_str()
             .context("graphql edge node missing id")?
             .to_string();
-        let block_time = match flavour {
-            // Arweave: seconds nested under block.timestamp.
-            GatewayFlavour::Arweave => node["block"]["timestamp"].as_i64(),
-            // Irys: milliseconds as a top-level field; convert to seconds.
-            GatewayFlavour::Irys => node["timestamp"].as_i64().map(|ms| ms / 1000),
-        };
+        // Unix seconds nested under block.timestamp; absent while pending.
+        let block_time = node["block"]["timestamp"].as_i64();
         let producer = node["tags"].as_array().and_then(|tags| {
             tags.iter()
                 .find(|t| t["name"].as_str() == Some("Producer"))
@@ -326,24 +266,6 @@ mod tests {
         })
     }
 
-    fn irys_edge(id: &str, ts_ms: Option<i64>, producer: Option<&str>) -> serde_json::Value {
-        let mut tags = vec![serde_json::json!({"name": "App-Name", "value": APP_NAME})];
-        if let Some(p) = producer {
-            tags.push(serde_json::json!({"name": "Producer", "value": p}));
-        }
-        let mut node = serde_json::json!({
-            "id": id,
-            "tags": tags,
-        });
-        if let Some(ms) = ts_ms {
-            node["timestamp"] = serde_json::json!(ms);
-        }
-        serde_json::json!({
-            "cursor": format!("cur-{id}"),
-            "node": node,
-        })
-    }
-
     fn page(edges: Vec<serde_json::Value>, has_next: bool) -> serde_json::Value {
         serde_json::json!({
             "data": { "transactions": {
@@ -370,33 +292,7 @@ mod tests {
         assert!(solana_pubkey_to_arweave_address(&bs58::encode([1u8; 16]).into_string()).is_err());
     }
 
-    #[test]
-    fn flavour_detection_from_url() {
-        assert_eq!(
-            flavour_from_url("https://uploader.irys.xyz/graphql"),
-            GatewayFlavour::Irys
-        );
-        assert_eq!(
-            flavour_from_url("https://devnet.irys.xyz/graphql"),
-            GatewayFlavour::Irys
-        );
-        assert_eq!(
-            flavour_from_url("https://arweave.net/graphql"),
-            GatewayFlavour::Arweave
-        );
-        assert_eq!(
-            flavour_from_url("https://arweave-search.goldsky.com/graphql"),
-            GatewayFlavour::Arweave
-        );
-        assert_eq!(
-            flavour_from_url("http://localhost:1984/graphql"),
-            GatewayFlavour::Arweave
-        );
-    }
-
-    /// Arweave query must contain `sort` and `block`; these would be rejected
-    /// by Irys. Both schemas must be checked in the same test suite so that a
-    /// change to one cannot silently break the other.
+    /// The query sorts by height and requests block timestamps.
     #[tokio::test]
     async fn arweave_query_contains_sort_and_block() {
         let server = MockServer::start();
@@ -407,76 +303,17 @@ mod tests {
                 .body_includes("block {");
             then.status(200).json_body(page(vec![], false));
         });
-        let client = GraphQlClient::new_with_flavour(
-            &format!("{}/graphql", server.base_url()),
-            GatewayFlavour::Arweave,
-        );
+        let client = GraphQlClient::new(&format!("{}/graphql", server.base_url()));
         client.list_anchored(&[]).await.unwrap();
         mock.assert();
     }
 
-    /// Irys query must contain neither `sort` nor `block` — both cause hard
-    /// errors on the Irys GraphQL endpoint.
-    #[tokio::test]
-    async fn irys_query_omits_sort_and_block() {
-        let server = MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(POST)
-                .path("/graphql")
-                .body_excludes("sort:")
-                .body_excludes("block {");
-            then.status(200).json_body(page(vec![], false));
-        });
-        let client = GraphQlClient::new_with_flavour(
-            &format!("{}/graphql", server.base_url()),
-            GatewayFlavour::Irys,
-        );
-        client.list_anchored(&[]).await.unwrap();
-        mock.assert();
-    }
-
-    /// Irys timestamps are milliseconds and must be divided by 1000.
-    /// Arweave timestamps are already seconds and must pass through unchanged.
     #[test]
-    fn timestamp_units_irys_converts_ms_to_s() {
-        let ms: i64 = 1_700_000_000_000;
-        let p = page(vec![irys_edge("tx1", Some(ms), None)], false);
-        let result = parse_page(&p, GatewayFlavour::Irys).unwrap();
-        assert_eq!(result.items[0].block_time, Some(1_700_000_000));
-    }
-
-    #[test]
-    fn timestamp_units_arweave_passes_through() {
+    fn timestamp_passes_through_in_seconds() {
         let s: i64 = 1_700_000_000;
         let p = page(vec![arweave_edge("tx1", Some(s), None)], false);
-        let result = parse_page(&p, GatewayFlavour::Arweave).unwrap();
+        let result = parse_page(&p).unwrap();
         assert_eq!(result.items[0].block_time, Some(1_700_000_000));
-    }
-
-    /// Irys returns newest-first; list_anchored must sort to oldest-first.
-    #[tokio::test]
-    async fn irys_results_are_sorted_oldest_first() {
-        let server = MockServer::start();
-        // Gateway returns newest-first (descending timestamps in ms).
-        server.mock(|when, then| {
-            when.method(POST).path("/graphql");
-            then.status(200).json_body(page(
-                vec![
-                    irys_edge("tx-new", Some(1_700_000_100_000), None),
-                    irys_edge("tx-old", Some(1_700_000_000_000), None),
-                    irys_edge("tx-pending", None, None),
-                ],
-                false,
-            ));
-        });
-        let client = GraphQlClient::new_with_flavour(
-            &format!("{}/graphql", server.base_url()),
-            GatewayFlavour::Irys,
-        );
-        let items = client.list_anchored(&[]).await.unwrap();
-        assert_eq!(items[0].arweave_tx, "tx-old");
-        assert_eq!(items[1].arweave_tx, "tx-new");
-        assert_eq!(items[2].arweave_tx, "tx-pending"); // None → i64::MAX → last
     }
 
     #[tokio::test]
@@ -501,10 +338,7 @@ mod tests {
                 .json_body(page(vec![arweave_edge("tx3", None, None)], false));
         });
 
-        let client = GraphQlClient::new_with_flavour(
-            &format!("{}/graphql", server.base_url()),
-            GatewayFlavour::Arweave,
-        );
+        let client = GraphQlClient::new(&format!("{}/graphql", server.base_url()));
         let items = client.list_anchored(&[]).await.unwrap();
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].arweave_tx, "tx1");
@@ -523,10 +357,7 @@ mod tests {
                 .body_includes("owners: [\\\"addr-A\\\"]");
             then.status(200).json_body(page(vec![], false));
         });
-        let client = GraphQlClient::new_with_flavour(
-            &format!("{}/graphql", server.base_url()),
-            GatewayFlavour::Arweave,
-        );
+        let client = GraphQlClient::new(&format!("{}/graphql", server.base_url()));
         let items = client.list_anchored(&["addr-A".to_string()]).await.unwrap();
         assert!(items.is_empty());
         mock.assert();
@@ -542,5 +373,27 @@ mod tests {
         });
         let client = GraphQlClient::new(&format!("{}/graphql", server.base_url()));
         assert!(client.list_anchored(&[]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn block_height_reports_pending_and_mined() {
+        let id = "GbYdbhdRWLWQptoz3-e-gAMsHY0kencCsn5vClwZi_Y";
+        let mined = MockServer::start();
+        mined.mock(|when, then| {
+            when.method(POST).path("/graphql").body_includes(id);
+            then.status(200).json_body(serde_json::json!(
+                {"data": {"transaction": {"block": {"height": 2018468}}}}));
+        });
+        let pending = MockServer::start();
+        pending.mock(|when, then| {
+            when.method(POST).path("/graphql");
+            then.status(200)
+                .json_body(serde_json::json!({"data": {"transaction": null}}));
+        });
+        let client = GraphQlClient::new(&format!("{}/graphql", mined.base_url()));
+        assert_eq!(client.block_height(id).await.unwrap(), Some(2018468));
+        let client = GraphQlClient::new(&format!("{}/graphql", pending.base_url()));
+        assert_eq!(client.block_height(id).await.unwrap(), None);
+        assert!(client.block_height("bad id\"}").await.is_err());
     }
 }

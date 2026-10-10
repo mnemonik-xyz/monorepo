@@ -266,7 +266,7 @@ async fn mcp_stdio_accepts_jsonrpc_on_stdin() {
         .env("STORAGE_MODE", "local")
         .env("PAYMENT_MODE", "none")
         // F-1 round-2 fix: skip the initial+background pricing.refresh()
-        // calls so the binary never reaches out to uploader.irys.xyz or
+        // calls so the binary never reaches out to payment.ardrive.io or
         // api.coingecko.com on startup (the ~20s blocker that previously
         // forced #[ignore]). Test-only env contract; main.rs documents the
         // semantics.

@@ -21,7 +21,6 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use mnemonic_core::codec::sign::sign_cose;
-use mnemonic_core::storage::AttestationStore;
 use mnemonic_mcp::{
     api::{get_pending_handler, sign_callback_handler},
     mcp::{mcp_handler, McpState},
@@ -258,7 +257,6 @@ async fn test_programmatic_client_sign_without_pending_get() {
     // 5. Row persisted with the USER as signer (self-sovereign authorship).
     //    Task 6: default visibility = private → sealed row, no embedding.
     {
-        use mnemonic_core::storage::AttestationStore;
         let store = state.store.lock().expect("store mutex");
         let sealed = store
             .list_sealed(&user_pubkey, None, 5)

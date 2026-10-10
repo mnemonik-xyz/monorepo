@@ -1,5 +1,8 @@
 //! Shared test helpers for bridge-a2a integration tests.
 
+// Shared by several test binaries; each uses a different subset.
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 

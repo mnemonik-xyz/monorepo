@@ -1,8 +1,9 @@
-//! Arweave client -- arlocal (local) + Irys (production) via HTTP.
+//! Arweave client -- arlocal (local) + ArDrive Turbo (production) via HTTP.
 //!
-//! Production uploads go to Irys (uploader.irys.xyz) as signed ANS-104 bundle
-//! items using the server's Solana Ed25519 keypair.  Local uploads (arlocal)
-//! use unsigned stub transactions -- no signing needed for dev/test.
+//! Production uploads go to the ArDrive Turbo bundler as signed ANS-104 data
+//! items using the server's Solana Ed25519 keypair. Turbo bundles them into
+//! Arweave transactions; reads come from any Arweave gateway. Local uploads
+//! (arlocal) use stub transactions -- no bundler needed for dev/test.
 
 pub mod arlocal;
 pub mod graphql;
@@ -10,9 +11,8 @@ pub mod recovery;
 
 use anyhow::Context;
 
-/// Shared reqwest client with an explicit User-Agent. Irys gateways sit
-/// behind a WAF that 403s certain default agents (verified live:
-/// `Python-urllib` blocked, named agents pass) — an identifiable UA keeps
+/// Shared reqwest client with an explicit User-Agent. Some gateways sit
+/// behind a WAF that rejects certain default agents; an identifiable UA keeps
 /// payload fetches and uploads out of that filter.
 pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -24,31 +24,14 @@ pub(crate) fn http_client() -> reqwest::Client {
 use sha2::{Digest, Sha384};
 use solana_sdk::signature::{Keypair, Signer};
 
-/// Irys network used for ANS-104 uploads.
-///
-/// The upload endpoint is deliberately selected from this enum rather than
-/// accepted as an arbitrary environment URL. In particular, a test-only MCP
-/// must not be able to turn a Devnet deployment into a mainnet upload through
-/// a copied or mistyped endpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IrysNetwork {
-    Mainnet,
-    Devnet,
-}
-
-impl IrysNetwork {
-    fn upload_url(self) -> &'static str {
-        match self {
-            Self::Mainnet => "https://uploader.irys.xyz/tx/solana",
-            Self::Devnet => "https://devnet.irys.xyz/tx/solana",
-        }
-    }
-}
+/// ArDrive Turbo upload endpoint for ANS-104 items signed with an Ed25519
+/// (Solana) key. Fixed rather than configurable, so a copied or mistyped
+/// environment value cannot redirect uploads to another service.
+pub const TURBO_UPLOAD_URL: &str = "https://upload.ardrive.io/v1/tx/solana";
 
 pub struct ArweaveClient {
     base_url: String,
     upload_url: String,
-    network: IrysNetwork,
     bypass_local_routing: bool,
     parent_blob_origin: Option<String>,
     /// Read-only fallback gateways tried, in order, after `base_url`.
@@ -75,15 +58,12 @@ enum ReadAttempt {
 }
 
 impl ArweaveClient {
-    /// Construct an Irys-backed client for an explicit network.
-    ///
-    /// `base_url` remains the read gateway. Uploads always use the fixed,
-    /// network-specific ANS-104 endpoint selected by `network`.
-    pub fn new_with_network(base_url: &str, network: IrysNetwork) -> Self {
+    /// Construct a client that reads from `base_url` (an Arweave gateway) and
+    /// uploads through ArDrive Turbo.
+    pub fn new(base_url: &str) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            upload_url: network.upload_url().to_string(),
-            network,
+            upload_url: TURBO_UPLOAD_URL.to_string(),
             bypass_local_routing: false,
             parent_blob_origin: None,
             fallback_gateways: Vec::new(),
@@ -92,18 +72,9 @@ impl ArweaveClient {
         }
     }
 
-    pub fn new(base_url: &str) -> Self {
-        Self::new_with_network(base_url, IrysNetwork::Mainnet)
-    }
-
-    /// Configured Irys read gateway, without a trailing slash.
+    /// Configured primary read gateway, without a trailing slash.
     pub fn gateway_url(&self) -> &str {
         &self.base_url
-    }
-
-    /// Irys network selected for uploads and data links.
-    pub fn network(&self) -> IrysNetwork {
-        self.network
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -112,7 +83,6 @@ impl ArweaveClient {
         Self {
             base_url,
             upload_url,
-            network: IrysNetwork::Mainnet,
             bypass_local_routing: true,
             parent_blob_origin: None,
             fallback_gateways: Vec::new(),
@@ -126,21 +96,21 @@ impl ArweaveClient {
         if !self.bypass_local_routing && self.is_local() {
             self.write_arlocal(payload.as_bytes(), keypair).await
         } else {
-            self.write_irys(keypair, payload.as_bytes()).await
+            self.write_turbo(keypair, payload.as_bytes()).await
         }
     }
 
-    /// Write raw bytes to Arweave (arlocal in dev, Irys in prod).
+    /// Write raw bytes to Arweave (arlocal in dev, Turbo in prod).
     /// Used for COSE_Sign1 encoded artifacts.
     pub async fn write_bytes(&self, data: &[u8], keypair: &Keypair) -> anyhow::Result<String> {
         if !self.bypass_local_routing && self.is_local() {
             self.write_arlocal(data, keypair).await
         } else {
-            self.write_irys(keypair, data).await
+            self.write_turbo(keypair, data).await
         }
     }
 
-    /// Write a tagged ANS-104 data item (Irys) / arlocal stub. The base
+    /// Write a tagged ANS-104 data item (Turbo) / arlocal stub. The base
     /// `App-Name` / `Content-Type` tags are always present; `extra_tags` (e.g.
     /// `trajectory_id`, `seq`, `content_hash`) are appended so the item is
     /// retrievable via a GraphQL tag query. Returns the tx id.
@@ -158,31 +128,12 @@ impl ArweaveClient {
 
         if !self.bypass_local_routing && self.is_local() {
             // arlocal dev path: post a signed ANS-104 data item the same way
-            // Irys accepts it. arlocal's /tx/solana endpoint validates the
+            // Turbo accepts it. arlocal's /tx/solana endpoint validates the
             // signature and data root, so the previous unsigned JSON stub no
             // longer works with modern arlocal versions.
             return self.write_arlocal(data, keypair).await;
         }
-        let item = build_data_item(keypair, data, &tags);
-        let resp = self
-            .client
-            .post(&self.upload_url)
-            .header("Content-Type", "application/octet-stream")
-            .header("x-token", "solana")
-            .body(item)
-            .send()
-            .await
-            .context("irys upload")?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("irys upload failed: {status} -- {body}");
-        }
-        let result: serde_json::Value = resp.json().await?;
-        result["id"]
-            .as_str()
-            .map(|s| s.to_string())
-            .context("no id in irys response")
+        self.post_turbo(build_data_item(keypair, data, &tags)).await
     }
 
     /// Deterministic ANS-104 ID. Format-2 local uploads do not satisfy this contract.
@@ -479,36 +430,44 @@ impl ArweaveClient {
         Ok(id)
     }
 
-    // -- Production (Irys) --
+    // -- Production (ArDrive Turbo) --
 
-    /// Upload a signed ANS-104 data item to Irys.
-    async fn write_irys(&self, keypair: &Keypair, data: &[u8]) -> anyhow::Result<String> {
+    /// Upload a signed ANS-104 data item through Turbo.
+    async fn write_turbo(&self, keypair: &Keypair, data: &[u8]) -> anyhow::Result<String> {
         let tags = [
             ("Content-Type", "application/json"),
             ("App-Name", "mnemonic-protocol"),
         ];
-        let item = build_data_item(keypair, data, &tags);
+        self.post_turbo(build_data_item(keypair, data, &tags)).await
+    }
 
+    /// POST a signed item to Turbo and return its id. HTTP 402 means the
+    /// signer has no Turbo credits for an item above the free-tier size.
+    async fn post_turbo(&self, item: Vec<u8>) -> anyhow::Result<String> {
         let resp = self
             .client
             .post(&self.upload_url)
             .header("Content-Type", "application/octet-stream")
-            .header("x-token", "solana")
             .body(item)
             .send()
             .await
-            .context("irys upload")?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
+            .context("turbo upload")?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::PAYMENT_REQUIRED {
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("irys upload failed: {status} -- {body}");
+            anyhow::bail!(
+                "turbo upload needs credits: the operator wallet has insufficient Turbo balance -- {body}"
+            );
         }
-        let result: serde_json::Value = resp.json().await?;
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("turbo upload failed: {status} -- {body}");
+        }
+        let result: serde_json::Value = resp.json().await.context("turbo upload response")?;
         result["id"]
             .as_str()
             .map(|s| s.to_string())
-            .context("no id in irys response")
+            .context("no id in turbo response")
     }
 }
 
@@ -523,7 +482,7 @@ fn deep_hash_blob(data: &[u8]) -> [u8; 48] {
     //   sha384( sha384("blob" + len_str) || sha384(data) )
     // Hashing tag and data SEPARATELY then combining is required —
     // hashing the concatenation in one pass produces a different digest
-    // and Irys rejects with "Invalid signature".
+    // and the bundler rejects with "Invalid signature".
     let tag = format!("blob{}", data.len());
     let tag_hash = sha384(tag.as_bytes());
     let data_hash = sha384(data);
@@ -582,12 +541,11 @@ fn avro_encode_tags(tags: &[(&str, &str)]) -> Vec<u8> {
 }
 
 fn build_data_item(keypair: &Keypair, data: &[u8], tags: &[(&str, &str)]) -> Vec<u8> {
-    // Irys's SolanaSigner extends Curve25519, which sets signatureType=2
-    // (ED25519). The SOLANA=4 enum exists in @irys/bundles/constants.ts
-    // but is NEVER used by the Solana signer at runtime — sig_type=4 is
-    // routed to a different verifier and rejected as "Invalid signature".
-    // Solana keys ARE Ed25519 keys; sig_type=2 is the right wire value.
-    // Ref: @irys/bundles/src/signing/keys/curve25519.ts
+    // ANS-104 signatureType=2 is ED25519. Solana keys ARE Ed25519 keys, so
+    // sig_type=2 is the right wire value; the separate SOLANA=4 type is
+    // routed to a different verifier by bundlers and rejected. Verified live
+    // against ArDrive Turbo: it accepts these items and returns the same id
+    // as `item_id` computes locally.
     let sig_type: u16 = 2;
     let pubkey = keypair.pubkey().to_bytes();
     let avro_tags = avro_encode_tags(tags);
@@ -658,8 +616,8 @@ mod tests {
         });
         let client = failover_client(&primary.base_url(), &[&fallback.base_url()]);
         assert_eq!(client.read("item").await.unwrap(), b"exact bytes");
-        down.assert_hits(READ_ATTEMPTS_PER_GATEWAY as usize);
-        up.assert_hits(1);
+        down.assert_calls(READ_ATTEMPTS_PER_GATEWAY as usize);
+        up.assert_calls(1);
     }
 
     #[tokio::test]
@@ -680,7 +638,7 @@ mod tests {
             &[&missing.base_url(), &fallback.base_url()],
         );
         assert_eq!(client.read("item").await.unwrap(), b"exact bytes");
-        none.assert_hits(1);
+        none.assert_calls(1);
     }
 
     #[tokio::test]
@@ -724,7 +682,7 @@ mod tests {
         });
         let client = failover_client(&empty.base_url(), &[&fallback.base_url()]);
         assert_eq!(client.read("item").await.unwrap(), b"exact bytes");
-        hits.assert_hits(READ_ATTEMPTS_PER_GATEWAY as usize);
+        hits.assert_calls(READ_ATTEMPTS_PER_GATEWAY as usize);
     }
 
     #[tokio::test]
@@ -828,18 +786,33 @@ mod tests {
     }
 
     #[test]
-    fn devnet_uses_the_devnet_upload_endpoint() {
-        let client =
-            ArweaveClient::new_with_network("https://devnet.irys.xyz", IrysNetwork::Devnet);
-        assert_eq!(client.base_url, "https://devnet.irys.xyz");
-        assert_eq!(client.upload_url, "https://devnet.irys.xyz/tx/solana");
+    fn uploads_always_use_the_fixed_turbo_endpoint() {
+        let client = ArweaveClient::new("https://arweave.net/");
+        assert_eq!(client.base_url, "https://arweave.net");
+        assert_eq!(client.upload_url, TURBO_UPLOAD_URL);
+    }
+
+    #[tokio::test]
+    async fn upload_without_credits_reports_a_clear_error() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/upload");
+            then.status(402).body("Insufficient balance");
+        });
+        let client = ArweaveClient::new_for_test(server.base_url());
+        let err = client
+            .write_item(b"x", &Keypair::new(), &[])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("needs credits"), "{err}");
     }
 
     /// Sign a data item, then re-derive the deep hash from the buffer's
     /// own owner+tags+data fields and verify the signature against it.
     /// If this fails, our build_data_item is internally broken (signing
-    /// over different bytes than what Irys would re-derive from the
-    /// buffer it receives). If it passes but Irys still says "Invalid
+    /// over different bytes than what the bundler would re-derive from the
+    /// buffer it receives). If it passes but the bundler still says "Invalid
     /// signature", the divergence is in the deep_hash formula vs. the
     /// arweave-js spec.
     #[test]
@@ -853,7 +826,7 @@ mod tests {
         ];
         let item = build_data_item(&kp, data, &tags);
 
-        // Re-derive owner + tags from the buffer (mirroring how Irys
+        // Re-derive owner + tags from the buffer (mirroring how the bundler
         // parses rawOwner / rawTags from the item it receives).
         let sig_bytes = &item[2..66];
         let owner = &item[66..98];
@@ -867,7 +840,7 @@ mod tests {
         let raw_data = &item[tags_end..];
         assert_eq!(raw_data, data);
 
-        // Compute the deep hash that Irys would compute for this buffer.
+        // Compute the deep hash that the bundler would compute for this buffer.
         // sig_type=2 (ED25519) → ASCII "2" — matches Curve25519 signer.
         let msg = deep_hash_list(&[b"dataitem", b"1", b"2", owner, b"", b"", raw_tags, raw_data]);
 
@@ -880,7 +853,7 @@ mod tests {
 
     /// Diagnostic: dump a real data item to /tmp/item.bin and print hex
     /// for each field. Then we verify it externally with pynacl using
-    /// Irys's exact verification path. Run with --nocapture.
+    /// the bundler's exact verification path. Run with --nocapture.
     #[test]
     fn dump_data_item_for_external_verification() {
         let kp = Keypair::new();
@@ -913,7 +886,7 @@ mod tests {
     /// computed for fixed inputs (pubkey=32 zeros, data="hello world",
     /// tags=[("Content-Type","application/json"),("App-Name","mnemonic-protocol")],
     /// sigType=4). Our Rust deep_hash MUST produce the same digest, otherwise
-    /// our signature is over the wrong message and Irys will reject as
+    /// our signature is over the wrong message and the bundler will reject as
     /// "Invalid signature".
     #[test]
     fn deep_hash_matches_python_reference() {
@@ -942,7 +915,7 @@ mod tests {
         assert_eq!(
             &dh[..],
             &expected[..],
-            "deep_hash diverges from arweave-js reference — Irys will reject"
+            "deep_hash diverges from arweave-js reference — the bundler will reject"
         );
     }
 
