@@ -79,6 +79,20 @@ Use this standalone manifest restore for migrated `blob://` locators.
 Generic `importA2AAttestation` and direct checkpoint restore still use the Arweave gateway path.
 Recipient opening still requires the recipient's original decryption keys.
 
+## Gateway read failover
+
+This behavior is available now. Item reads try the configured primary gateway first.
+Then they try each origin in `ARWEAVE_FALLBACK_GATEWAYS`, in order.
+The default list is `https://arweave.net`, `https://ar-io.dev` and `https://turbo-gateway.com`.
+An empty value disables failover. A local gateway gets no fallbacks.
+
+Each gateway gets up to 3 attempts for connection errors, HTTP 429, HTTP 5xx and empty bodies.
+The delay between attempts grows linearly. HTTP 404 and other client errors move to the next gateway at once.
+A read reports "not found" only when every gateway returns HTTP 404.
+Otherwise the error names each gateway and its failure reason.
+A2A reads keep their 1 MiB limit and reject redirects on every gateway.
+Callers still verify signatures and digests; a gateway is not a trust anchor.
+
 ## Independent operator continuation
 
 An operator may configure `MNEMONIC_PARENT_BLOB_ORIGIN` with one trusted HTTP(S) origin.

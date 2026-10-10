@@ -51,7 +51,27 @@ pub struct ArweaveClient {
     network: IrysNetwork,
     bypass_local_routing: bool,
     parent_blob_origin: Option<String>,
+    /// Read-only fallback gateways tried, in order, after `base_url`.
+    fallback_gateways: Vec<String>,
+    /// Base delay between attempts on the same gateway (grows linearly).
+    retry_backoff: std::time::Duration,
     client: reqwest::Client,
+}
+
+/// Attempts per gateway for retryable failures (transport, 429, 5xx, empty body).
+const READ_ATTEMPTS_PER_GATEWAY: u32 = 3;
+/// Upper bound on configured fallback gateways.
+const MAX_FALLBACK_GATEWAYS: usize = 8;
+
+/// Outcome of one gateway attempt, used to choose retry, failover or stop.
+enum ReadAttempt {
+    Bytes(Vec<u8>),
+    /// The gateway does not have the item; try the next gateway.
+    NotFound,
+    /// A permanent refusal from this gateway (non-404 4xx, too large).
+    Refused(String),
+    /// Worth retrying on the same gateway.
+    Retryable(String),
 }
 
 impl ArweaveClient {
@@ -66,6 +86,8 @@ impl ArweaveClient {
             network,
             bypass_local_routing: false,
             parent_blob_origin: None,
+            fallback_gateways: Vec::new(),
+            retry_backoff: std::time::Duration::from_millis(250),
             client: http_client(),
         }
     }
@@ -93,6 +115,8 @@ impl ArweaveClient {
             network: IrysNetwork::Mainnet,
             bypass_local_routing: true,
             parent_blob_origin: None,
+            fallback_gateways: Vec::new(),
+            retry_backoff: std::time::Duration::from_millis(1),
             client: reqwest::Client::new(),
         }
     }
@@ -184,6 +208,7 @@ impl ArweaveClient {
     }
 
     /// Bounded A2A fetch; no caller-controlled URL or cross-origin redirect.
+    /// Fails over across the configured read gateways.
     pub async fn read_a2a(&self, id: &str) -> anyhow::Result<Vec<u8>> {
         anyhow::ensure!(
             id.len() == 43
@@ -193,24 +218,135 @@ impl ArweaveClient {
             "invalid A2A locator"
         );
         let client = reqwest::Client::builder()
+            .user_agent(concat!("mnemonic-core/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
-        let mut r = client
-            .get(format!("{}/{}", self.base_url, id))
-            .send()
-            .await?
-            .error_for_status()?;
-        anyhow::ensure!(
-            r.content_length().is_none_or(|n| n <= 1048576),
-            "A2A blob too large"
-        );
-        let mut out = Vec::new();
-        while let Some(chunk) = r.chunk().await? {
-            anyhow::ensure!(out.len() + chunk.len() <= 1048576, "A2A blob too large");
-            out.extend_from_slice(&chunk);
+        self.read_with_failover(&client, id, Some(1048576)).await
+    }
+
+    /// Add read-only fallback gateways, tried in order after the primary one.
+    /// Each entry must be an HTTP(S) origin without credentials, path or query.
+    /// Duplicates of the primary or of each other are ignored.
+    pub fn try_with_fallback_gateways(mut self, gateways: &[String]) -> anyhow::Result<Self> {
+        for gateway in gateways {
+            let url = reqwest::Url::parse(gateway.trim())?;
+            anyhow::ensure!(
+                matches!(url.scheme(), "http" | "https")
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && matches!(url.path(), "" | "/")
+                    && url.query().is_none()
+                    && url.fragment().is_none(),
+                "fallback gateway must be an HTTP(S) origin without credentials or path"
+            );
+            let origin = url.origin().ascii_serialization();
+            if origin != self.base_url && !self.fallback_gateways.contains(&origin) {
+                self.fallback_gateways.push(origin);
+            }
         }
-        Ok(out)
+        anyhow::ensure!(
+            self.fallback_gateways.len() <= MAX_FALLBACK_GATEWAYS,
+            "at most {MAX_FALLBACK_GATEWAYS} fallback gateways are supported"
+        );
+        Ok(self)
+    }
+
+    /// Read gateways in the order they are tried.
+    pub fn read_gateways(&self) -> Vec<&str> {
+        std::iter::once(self.base_url.as_str())
+            .chain(self.fallback_gateways.iter().map(String::as_str))
+            .collect()
+    }
+
+    /// Try each read gateway in order. Retry transport errors, HTTP 429, 5xx
+    /// and empty bodies on the same gateway with linear backoff; move to the
+    /// next gateway on 404 or another refusal. Report "not found" only when
+    /// every gateway answered 404.
+    async fn read_with_failover(
+        &self,
+        client: &reqwest::Client,
+        id: &str,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<u8>> {
+        let mut failures = Vec::new();
+        let mut not_found = 0usize;
+        let gateways = self.read_gateways();
+        for gateway in &gateways {
+            let url = format!("{gateway}/{id}");
+            for attempt in 1..=READ_ATTEMPTS_PER_GATEWAY {
+                match Self::read_attempt(client, &url, limit).await {
+                    ReadAttempt::Bytes(bytes) => return Ok(bytes),
+                    ReadAttempt::NotFound => {
+                        not_found += 1;
+                        break;
+                    }
+                    ReadAttempt::Refused(reason) => {
+                        failures.push(format!("{gateway}: {reason}"));
+                        break;
+                    }
+                    ReadAttempt::Retryable(reason) => {
+                        if attempt == READ_ATTEMPTS_PER_GATEWAY {
+                            failures.push(format!("{gateway}: {reason} after {attempt} attempts"));
+                        } else {
+                            tokio::time::sleep(self.retry_backoff * attempt).await;
+                        }
+                    }
+                }
+            }
+        }
+        if not_found == gateways.len() {
+            anyhow::bail!("arweave tx not found: {id}");
+        }
+        anyhow::bail!(
+            "arweave read failed for {id} on {} gateway(s): {}",
+            gateways.len(),
+            failures.join("; ")
+        )
+    }
+
+    async fn read_attempt(
+        client: &reqwest::Client,
+        url: &str,
+        limit: Option<usize>,
+    ) -> ReadAttempt {
+        let mut response = match client.get(url).send().await {
+            Ok(response) => response,
+            Err(e) => return ReadAttempt::Retryable(format!("request failed ({e})")),
+        };
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return ReadAttempt::NotFound;
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            return ReadAttempt::Retryable(format!("HTTP {status}"));
+        }
+        if !status.is_success() {
+            return ReadAttempt::Refused(format!("HTTP {status}"));
+        }
+        if let (Some(limit), Some(length)) = (limit, response.content_length()) {
+            if length > limit as u64 {
+                return ReadAttempt::Refused("response too large".into());
+            }
+        }
+        let mut bytes = Vec::new();
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    if limit.is_some_and(|limit| bytes.len() + chunk.len() > limit) {
+                        return ReadAttempt::Refused("response too large".into());
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(e) => return ReadAttempt::Retryable(format!("body read failed ({e})")),
+            }
+        }
+        if bytes.is_empty() {
+            return ReadAttempt::Retryable("empty body".into());
+        }
+        ReadAttempt::Bytes(bytes)
     }
 
     /// Enable portable parent fetches from one independently configured object
@@ -286,14 +422,9 @@ impl ArweaveClient {
         Ok(bytes)
     }
 
+    /// Read an item's bytes, failing over across the configured gateways.
     pub async fn read(&self, tx_id: &str) -> anyhow::Result<Vec<u8>> {
-        let url = format!("{}/{tx_id}", self.base_url);
-        let resp = self.client.get(&url).send().await.context("arweave read")?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            anyhow::bail!("arweave tx not found: {tx_id}");
-        }
-        resp.error_for_status_ref().context("arweave read status")?;
-        Ok(resp.bytes().await?.to_vec())
+        self.read_with_failover(&self.client, tx_id, None).await
     }
 
     pub async fn mine(&self) -> anyhow::Result<()> {
@@ -501,6 +632,144 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "test-tx-id-123");
         mock.assert();
+    }
+
+    fn failover_client(primary: &str, fallbacks: &[&str]) -> ArweaveClient {
+        let mut client = ArweaveClient::new(primary);
+        client.retry_backoff = std::time::Duration::from_millis(1);
+        client
+            .try_with_fallback_gateways(
+                &fallbacks.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            )
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn read_retries_then_fails_over_when_primary_refuses() {
+        let primary = MockServer::start();
+        let fallback = MockServer::start();
+        let down = primary.mock(|when, then| {
+            when.method(GET).path("/item");
+            then.status(503);
+        });
+        let up = fallback.mock(|when, then| {
+            when.method(GET).path("/item");
+            then.status(200).body(b"exact bytes");
+        });
+        let client = failover_client(&primary.base_url(), &[&fallback.base_url()]);
+        assert_eq!(client.read("item").await.unwrap(), b"exact bytes");
+        down.assert_hits(READ_ATTEMPTS_PER_GATEWAY as usize);
+        up.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn read_fails_over_on_404_and_unreachable_gateways_without_retrying_404() {
+        let missing = MockServer::start();
+        let fallback = MockServer::start();
+        let none = missing.mock(|when, then| {
+            when.method(GET).path("/item");
+            then.status(404);
+        });
+        fallback.mock(|when, then| {
+            when.method(GET).path("/item");
+            then.status(200).body(b"exact bytes");
+        });
+        // Port 9 (discard) refuses connections: a transport failure.
+        let client = failover_client(
+            "http://127.0.0.1:9",
+            &[&missing.base_url(), &fallback.base_url()],
+        );
+        assert_eq!(client.read("item").await.unwrap(), b"exact bytes");
+        none.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn read_reports_not_found_only_when_every_gateway_says_404() {
+        let a = MockServer::start();
+        let b = MockServer::start();
+        for server in [&a, &b] {
+            server.mock(|when, then| {
+                when.method(GET).path("/item");
+                then.status(404);
+            });
+        }
+        let client = failover_client(&a.base_url(), &[&b.base_url()]);
+        let err = client.read("item").await.unwrap_err().to_string();
+        assert!(err.contains("not found"), "{err}");
+
+        let c = MockServer::start();
+        c.mock(|when, then| {
+            when.method(GET).path("/item");
+            then.status(500);
+        });
+        let client = failover_client(&a.base_url(), &[&c.base_url()]);
+        let err = client.read("item").await.unwrap_err().to_string();
+        assert!(
+            !err.contains("not found") && err.contains("HTTP 500"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_treats_empty_body_as_retryable() {
+        let empty = MockServer::start();
+        let fallback = MockServer::start();
+        let hits = empty.mock(|when, then| {
+            when.method(GET).path("/item");
+            then.status(200).body(b"");
+        });
+        fallback.mock(|when, then| {
+            when.method(GET).path("/item");
+            then.status(200).body(b"exact bytes");
+        });
+        let client = failover_client(&empty.base_url(), &[&fallback.base_url()]);
+        assert_eq!(client.read("item").await.unwrap(), b"exact bytes");
+        hits.assert_hits(READ_ATTEMPTS_PER_GATEWAY as usize);
+    }
+
+    #[tokio::test]
+    async fn read_a2a_fails_over_and_keeps_size_limit() {
+        let id = "GbYdbhdRWLWQptoz3-e-gAMsHY0kencCsn5vClwZi_Y";
+        let big = MockServer::start();
+        let fallback = MockServer::start();
+        big.mock(|when, then| {
+            when.method(GET).path(format!("/{id}"));
+            then.status(200).body(vec![0u8; 1048577]);
+        });
+        fallback.mock(|when, then| {
+            when.method(GET).path(format!("/{id}"));
+            then.status(200).body(b"a2a bytes");
+        });
+        let client = failover_client(&big.base_url(), &[&fallback.base_url()]);
+        assert_eq!(client.read_a2a(id).await.unwrap(), b"a2a bytes");
+    }
+
+    #[test]
+    fn fallback_gateways_are_validated_and_deduplicated() {
+        let client = ArweaveClient::new("https://arweave.net")
+            .try_with_fallback_gateways(&[
+                "https://arweave.net/".into(),
+                "https://ar-io.dev".into(),
+                "https://ar-io.dev".into(),
+            ])
+            .unwrap();
+        assert_eq!(
+            client.read_gateways(),
+            vec!["https://arweave.net", "https://ar-io.dev"]
+        );
+        for bad in [
+            "https://u:p@ar-io.dev",
+            "https://ar-io.dev/path",
+            "ftp://ar-io.dev",
+            "https://ar-io.dev?q=1",
+        ] {
+            assert!(
+                ArweaveClient::new("https://arweave.net")
+                    .try_with_fallback_gateways(&[bad.to_string()])
+                    .is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[tokio::test]
