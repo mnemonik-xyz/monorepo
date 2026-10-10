@@ -17,9 +17,9 @@ SOLANA_RPC_URL=https://api.mainnet-beta.solana.com   # or Helius for stability
 ARWEAVE_GATEWAY_URL=https://arweave.net          # reads; uploads go to ArDrive Turbo
 ```
 
-`sudo systemctl restart mnemonic-mcp` — done. The CLI / SDK / MCP-clients see no API change; only `mnemonic_verify` start returning real `arweave_tx` / `solana_tx` instead of the synthetic `local:` IDs, and `mnemonic_sign_memory` latency rises (see below).
+`sudo systemctl restart mnemonic-mcp` — done. The CLI / SDK / MCP-clients see no API change; only `mnemonic_verify` start returning real `arweave_tx` instead of the synthetic `local:` IDs, and `mnemonic_sign_memory` latency rises (see below).
 
-What's already in place: `core/src/{arweave,solana}/` modules, `attestation_costs` table, ANS-104 bundle builder with deep-hash + Avro encoding, SPL Memo writer, idempotency keys for tx submission. Implementation done in pre-integrations Phase 0. No further code work for the flip itself.
+What's already in place: `core/src/arweave/` module, `attestation_costs` table, ANS-104 data-item builder with deep-hash + Avro encoding, idempotency keys for tx submission. Implementation done in pre-integrations Phase 0. No further code work for the flip itself.
 
 Effort to flip: **~½ dev-day** (config + smoke test).
 
@@ -47,7 +47,7 @@ Effort to flip: **~½ dev-day** (config + smoke test).
 | **Total per `sign_memory`** | **$0.002–0.004 (LocalSigner)** | | |
 | **Total per `sign_memory`** | **$0.003–0.005 (Turnkey)** | | |
 
-`recall` and `verify` stay free — they read SQLite locally + optionally re-fetch from Arweave (free GET) and Solana RPC (free reads).
+`recall` and `verify` stay free — they read SQLite locally + optionally re-fetch from Arweave (free GET).
 
 Plus per-OAuth-login (every 1h JWT TTL): 1× challenge sig. With `LocalSigner` it's free (WASM in-browser); with Turnkey it's $0.001 per login.
 
@@ -89,7 +89,7 @@ Assumes Turnkey adoption rate of 50% (LocalSigner free, Turnkey opt-in for custo
 Free tier — "Try it"  ($0/month)
   - LocalSigner (browser localStorage / CLI ~/.mnemonic/identity.json)
   - sign_memory persists to mcp-server's SQLite ONLY
-  - synthetic local: tx IDs (no Solana memo, no Arweave upload)
+  - synthetic local: tx IDs (no Arweave upload)
   - recall works (semantic search over user's own attestations)
   - verify returns not_found (no on-chain anchor to validate)
   - NOT portable across MCP servers
@@ -99,7 +99,7 @@ Free tier — "Try it"  ($0/month)
 
 Paid tier — "Verifiable"  ($5/month)
   - LocalSigner OR Turnkey custody (Phase 1.x)
-  - Full STORAGE_MODE=full pipeline: Solana SPL Memo + Arweave upload through ArDrive Turbo
+  - Full STORAGE_MODE=full pipeline: Arweave upload through ArDrive Turbo
   - verify works end-to-end (third party can independently re-hash + check)
   - Portable across any MCP server with same identity
   - Recovery: Turnkey email/passkey if Turnkey-managed; otherwise self-custody backup

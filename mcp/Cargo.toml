@@ -367,8 +367,8 @@ path = "tests/sealed_routes.rs"
 required-features = ["test-support"]
 
 [[test]]
-name = "stage2_no_solana_memo"
-path = "tests/stage2_no_solana_memo.rs"
+name = "arweave_only_anchoring"
+path = "tests/arweave_only_anchoring.rs"
 required-features = ["test-support"]
 
 [[test]]

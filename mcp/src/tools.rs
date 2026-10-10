@@ -3,7 +3,7 @@
 //! Week 3: sign_memory and verify now use the CBOR/COSE codec pipeline.
 //! - Content hash: blake3(canonical_cbor) instead of SHA-256(content)
 //! - Arweave payload: COSE_Sign1 envelope (not raw JSON)
-//! - Solana anchor: {"h": blake3_hash, "a": arweave_tx, "v": 2}
+//! - Arweave is the single record of an anchored memory
 
 use solana_sdk::signature::Keypair;
 
@@ -20,7 +20,6 @@ use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::embed::Embedder;
 use mnemonic_core::identity::{self, LazyKeypair};
 use mnemonic_core::sealed;
-use mnemonic_core::solana::SolanaClient;
 use mnemonic_core::storage::{AttestationStore, SqliteStore, Visibility, WriteMode};
 use zeroize::Zeroize;
 
@@ -32,44 +31,21 @@ use crate::pending::PendingBundles;
 use crate::{payment, pricing::CostHint};
 
 /// Public anchor metadata returned after a successful signing/delivery flow.
-/// The Solana cluster comes from the configured Solana client, so a devnet MCP
-/// cannot direct users to production explorers. Artifacts always live on
-/// Arweave mainnet and are linked through the configured read gateway.
+/// Artifacts live on Arweave mainnet and are linked through the configured
+/// read gateway. Arweave is the single record of an anchored memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnchorLinks {
-    pub network: &'static str,
-    pub solana_explorer_url: String,
     pub arweave_url: String,
 }
 
-pub fn anchor_links(
-    solana: &SolanaClient,
-    arweave: &ArweaveClient,
-    solana_tx: &str,
-    arweave_tx: &str,
-) -> AnchorLinks {
-    if solana_tx.starts_with("local:") || arweave_tx.starts_with("local:") {
+pub fn anchor_links(arweave: &ArweaveClient, arweave_tx: &str) -> AnchorLinks {
+    if arweave_tx.is_empty() || arweave_tx.starts_with("local:") {
         return AnchorLinks {
-            network: "local",
-            solana_explorer_url: String::new(),
             arweave_url: String::new(),
         };
     }
-    let arweave_url = format!("{}/{arweave_tx}", arweave.gateway_url());
-    if solana.is_devnet() {
-        AnchorLinks {
-            network: "devnet",
-            solana_explorer_url: format!(
-                "https://explorer.solana.com/tx/{solana_tx}?cluster=devnet"
-            ),
-            arweave_url,
-        }
-    } else {
-        AnchorLinks {
-            network: "mainnet",
-            solana_explorer_url: format!("https://explorer.solana.com/tx/{solana_tx}"),
-            arweave_url,
-        }
+    AnchorLinks {
+        arweave_url: format!("{}/{arweave_tx}", arweave.gateway_url()),
     }
 }
 
@@ -281,7 +257,7 @@ pub enum ToolError {
     /// Already-typed JSON-RPC error — propagate verbatim through the
     /// dispatcher.
     TypedRpc(JsonRpcError),
-    /// Opaque error (Arweave/Solana/SQLite failure, etc.). The
+    /// Opaque error (Arweave/SQLite failure, etc.). The
     /// dispatcher wraps it in `-32603 InternalError`.
     Other(anyhow::Error),
 }
@@ -354,7 +330,7 @@ pub fn whoami(
 ///   embed content → compress → build canonical-CBOR over the unsigned
 ///   artifact → blake3-hash → park in `PendingBundles` and return
 ///   `{status: "awaiting_signature", approve_url, correlation_id, expires_in: 300}`.
-///   No COSE signing, no Arweave/Solana writes, no SQLite row created.
+///   No COSE signing, no Arweave writes, no SQLite row created.
 ///   The client finishes the flow by signing locally and POSTing
 ///   `/api/sign-callback` (handled in `api.rs`).
 ///
@@ -364,7 +340,7 @@ pub fn whoami(
 ///
 /// **Stdio path** (`jwt_sub.is_none()`, `Transport::Stdio`):
 ///   the inline pipeline: JSON → canonical CBOR → blake3 → (anchored
-///   only) COSE_Sign1 → Arweave + Solana, or synthetic tx IDs (local) →
+///   only) COSE_Sign1 → Arweave, or a synthetic tx ID (local) →
 ///   SQLite. The keypair is the local agent's own identity.
 ///
 /// `owner_pubkey` (Decision 9) is the OAuth-resolved tenant scope used by
@@ -373,7 +349,6 @@ pub fn whoami(
 #[allow(clippy::too_many_arguments)]
 pub async fn sign_memory(
     keypair: &LazyKeypair,
-    solana: &SolanaClient,
     arweave: &ArweaveClient,
     store: &std::sync::Mutex<SqliteStore>,
     embedder: &dyn Embedder,
@@ -513,7 +488,7 @@ pub async fn sign_memory(
     // default) with `mode: "anchored"` (or `"participate"`) on the single-
     // tenant stdio transport, the inner MEMORY_V1 is sealed before uploading
     // to Arweave. The COSE_Sign1 wraps the SEALED_V1 outer CBOR (not plain
-    // MEMORY_V1) and carries `Mnemonic-Type: sealed` Arweave tag + v:3 memo.
+    // MEMORY_V1) and carries the `Mnemonic-Type: sealed` Arweave tag.
     // Plaintext never reaches Arweave; no embedding row is written.
     //
     // Routing only fires when `visibility` field is EXPLICITLY present in
@@ -531,7 +506,6 @@ pub async fn sign_memory(
     {
         return sign_memory_sealed_anchored(
             keypair,
-            solana,
             arweave,
             store,
             content,
@@ -544,7 +518,6 @@ pub async fn sign_memory(
 
     let inline_result = sign_memory_inline(
         keypair,
-        solana,
         arweave,
         store,
         embedder,
@@ -973,8 +946,8 @@ async fn proxy_anchored(
 ///    key `K` before returning.
 ///
 /// The sign-callback receives the outer CBOR to COSE_Sign1, uploads it to
-/// Arweave with `Mnemonic-Type: sealed`, writes a Solana memo with `v: 3`,
-/// and persists the row via `save_sealed_attestation`.
+/// Arweave with `Mnemonic-Type: sealed`, and persists the row via
+/// `save_sealed_attestation`.
 ///
 /// # Plain path (`visibility == Public`)
 ///
@@ -1143,8 +1116,8 @@ async fn sign_memory_deferred(
              cose_signed_bytes, signer_pubkey}} to client_sign.submit_path \
              (/api/sign-callback). (B) Browser — tell the user to open \
              approve_url and click Approve. Then call mnemonic_check_pending \
-             with correlation_id={assigned_id} to retrieve the on-chain \
-             solana_tx + arweave_tx."
+             with correlation_id={assigned_id} to retrieve the \
+             arweave_tx and arweave_url."
         ),
     }))
 }
@@ -1154,7 +1127,7 @@ async fn sign_memory_deferred(
 /// Seals the inner MEMORY_V1 inline using the owner's Ed25519 public key and
 /// saves the SEALED_V1 outer CBOR directly into `sealed_blob`. No COSE_Sign1
 /// is produced — local writes never carry a signature. No keychain access, no
-/// Arweave/Solana round-trip, no PendingBundles entry.
+/// Arweave round-trip, no PendingBundles entry.
 ///
 /// Called only for HTTP+JWT callers with an explicit `mode: "local"` AND
 /// `visibility: "private"`. The stdio operator path falls through to
@@ -1210,9 +1183,8 @@ fn sign_memory_local_sealed(
     let outer_cbor = sealed_art.outer_cbor;
     let content_hash = blake3_hash(&outer_cbor);
 
-    // 5. Synthetic local tx ids (same pattern as local write in sign_memory_inline).
+    // 5. Synthetic local tx id (same pattern as local write in sign_memory_inline).
     let local_ar = format!("local:{}", &attestation_id[..8]);
-    let local_sol = format!("local:{}", &content_hash[..16]);
 
     // 6. Persist sealed row.
     {
@@ -1221,7 +1193,7 @@ fn sign_memory_local_sealed(
             &attestation_id,
             &content_hash,
             tags,
-            &local_sol,
+            "", // legacy `solana_tx` column, unused
             &local_ar,
             owner_pubkey,
             owner_pubkey,
@@ -1242,7 +1214,6 @@ fn sign_memory_local_sealed(
         "content_hash": content_hash,
         "hash_algorithm": "blake3",
         "encoding": "cbor+sealed",
-        "solana_tx": local_sol,
         "arweave_tx": local_ar,
         "signer": owner_pubkey,
         "signature": "none",
@@ -1260,10 +1231,9 @@ fn sign_memory_local_sealed(
 /// final on-chain state once the user has approved the COSE envelope in the
 /// browser. Returns one of:
 ///
-///   - `{status: "signed", attestation_id, content_hash, solana_tx,
-///     arweave_tx, signer_pubkey, signed_at, anchoring_network,
-///     solana_explorer_url, arweave_url}` — sign-callback completed, row
-///     persisted.
+///   - `{status: "signed", attestation_id, content_hash, arweave_tx,
+///     signer_pubkey, signed_at, arweave_url}` — sign-callback completed,
+///     row persisted.
 ///   - `{status: "awaiting_signature", correlation_id, expires_at}` —
 ///     bundle still parked in the LRU; user has not yet approved.
 ///   - `{status: "not_found", correlation_id}` — never issued, expired
@@ -1276,7 +1246,6 @@ fn sign_memory_local_sealed(
 pub async fn check_pending(
     pending: &PendingBundles,
     store: &std::sync::Mutex<SqliteStore>,
-    solana: &SolanaClient,
     arweave: &ArweaveClient,
     correlation_id: &str,
 ) -> serde_json::Value {
@@ -1297,20 +1266,15 @@ pub async fn check_pending(
             .ok()
             .flatten()
     };
-    if let Some((attestation_id, content_hash, solana_tx, arweave_tx, signer_pubkey, created_at)) =
-        signed
-    {
-        let links = anchor_links(solana, arweave, &solana_tx, &arweave_tx);
+    if let Some((attestation_id, content_hash, arweave_tx, signer_pubkey, created_at)) = signed {
+        let links = anchor_links(arweave, &arweave_tx);
         return serde_json::json!({
             "status": "signed",
             "attestation_id": attestation_id,
             "content_hash": content_hash,
-            "solana_tx": solana_tx,
             "arweave_tx": arweave_tx,
             "signer_pubkey": signer_pubkey,
             "signed_at": created_at,
-            "anchoring_network": links.network,
-            "solana_explorer_url": links.solana_explorer_url,
             "arweave_url": links.arweave_url,
         });
     }
@@ -1347,8 +1311,8 @@ pub async fn check_pending(
 ///
 /// - The `write_mode` parameter replaces `storage_mode` as the routing
 ///   decision. `WriteMode::Local` → synthetic-id no-anchor path
-///   regardless of env-var. `WriteMode::Anchored` → real Arweave +
-///   Solana writes regardless of env-var (the paywall gate in
+///   regardless of env-var. `WriteMode::Anchored` → a real Arweave
+///   write regardless of env-var (the paywall gate in
 ///   `mcp_handler` has already ensured the deploy supports it).
 /// - `storage_mode` is retained ONLY for the legacy whoami-echo field in
 ///   the success envelope. It does NOT influence behaviour anymore — the
@@ -1359,7 +1323,7 @@ pub async fn check_pending(
 ///
 /// T3 changes (delivery guarantee on anchored):
 ///
-/// - After `solana.write_memo` returns, the anchored path re-fetches the
+/// - After the Arweave upload returns, the anchored path re-fetches the
 ///   COSE bytes from Arweave with an exponential-backoff loop capped by
 ///   `delivery_refetch_timeout`, then runs `verify_cose` over the re-fetched
 ///   bytes, then runs an in-process recall against `content_hash` and
@@ -1370,10 +1334,9 @@ pub async fn check_pending(
 ///   `mcp_handler` consumes the typed error to drive refund + counter
 ///   bookkeeping (api_key is only available at the dispatcher boundary).
 /// - On success the row is persisted with `WriteMode::Anchored` and the
-///   success envelope gains `delivery_receipt { arweave_tx, solana_tx,
+///   success envelope gains `delivery_receipt { arweave_tx,
 ///   recall_verified_at }`. `recall_verified_at` is operator-attested per
-///   the tech-spec's trust-model note; the cryptographically verifiable
-///   timestamp is the Solana memo's `block_time`.
+///   the tech-spec's trust-model note.
 /// - Critical-section discipline (Decision 8): two short scoped locks. The
 ///   success branch takes the SQLite mutex for save_attestation +
 ///   record_attestation_cost and drops it. The failure branch takes the
@@ -1387,11 +1350,6 @@ pub async fn check_pending(
 #[allow(clippy::too_many_arguments)]
 async fn sign_memory_inline(
     keypair: &LazyKeypair,
-    // Stage 2 (chain-agnostic/decisions.md): `solana` is no longer used to
-    // write memos on the anchored path. The parameter is kept in the signature
-    // so callers do not need updating; it remains available for any future
-    // re-introduction without an ABI break. `_solana` suppresses the lint.
-    _solana: &SolanaClient,
     arweave: &ArweaveClient,
     store: &std::sync::Mutex<SqliteStore>,
     embedder: &dyn Embedder,
@@ -1509,14 +1467,10 @@ async fn sign_memory_inline(
 
     // 5. Store on-chain (or locally) — routed by per-request `write_mode`,
     //    not the operator's `STORAGE_MODE`. A `local` request against a
-    //    `STORAGE_MODE=full` deploy stays free (no Arweave/Solana writes).
+    //    `STORAGE_MODE=full` deploy stays free (no Arweave write).
     let mut original_bytes = Vec::new();
-    let (solana_tx, arweave_tx) = match write_mode {
-        WriteMode::Local => {
-            let local_ar = format!("local:{}", &attestation_id[..8]);
-            let local_sol = format!("local:{}", &content_hash[..16]);
-            (local_sol, local_ar)
-        }
+    let arweave_tx = match write_mode {
+        WriteMode::Local => format!("local:{}", &attestation_id[..8]),
         WriteMode::Anchored => {
             // Arweave: store COSE_Sign1 bytes (not raw JSON). `Producer` /
             // `Created-At` tags mirror fields already public inside the
@@ -1540,14 +1494,7 @@ async fn sign_memory_inline(
                 )
                 .await?;
             arweave.mine().await?;
-
-            // Stage 2 (chain-agnostic/decisions.md): WriteMode::Anchored no
-            // longer writes an SPL Memo. New rows store solana_tx = '' (empty
-            // string, already a valid RowFact state per the schema). Memo
-            // readers (read_memo, list_memo_anchors, parse_anchor_memo) stay
-            // intact forever for legacy-row enumeration and verification.
-            let _ = embed_model; // kept for the artifact field; no longer in memo
-            (String::new(), ar_tx)
+            ar_tx
         }
     };
 
@@ -1586,7 +1533,7 @@ async fn sign_memory_inline(
             content,
             &content_hash,
             tags,
-            &solana_tx,
+            "", // legacy `solana_tx` column, unused
             &arweave_tx,
             owner_pubkey,
             owner_pubkey,
@@ -1603,7 +1550,7 @@ async fn sign_memory_inline(
 
     // 6b. Delivery confirmation — Anchored ONLY. T3 (modes-user-choice).
     //
-    // We just successfully wrote to Arweave + Solana AND persisted the row.
+    // We just successfully wrote to Arweave AND persisted the row.
     // Before claiming "delivered" we must prove the chain bytes are
     // *retrievable*. Three checks, any failure demotes the row to `Local`
     // (via INSERT OR REPLACE under the same attestation_id) and returns
@@ -1629,7 +1576,6 @@ async fn sign_memory_inline(
             content,
             content_hash: &content_hash,
             tags,
-            solana_tx: &solana_tx,
             arweave_tx: &arweave_tx,
             signer_pubkey: owner_pubkey,
             owner_pubkey,
@@ -1642,7 +1588,6 @@ async fn sign_memory_inline(
                 return Err(ToolError::TypedRpc(delivery_not_confirmed(
                     stage,
                     &arweave_tx,
-                    &solana_tx,
                     &attestation_id,
                 )));
             }
@@ -1687,7 +1632,6 @@ async fn sign_memory_inline(
         "content_hash": content_hash,
         "hash_algorithm": "blake3",
         "encoding": "cbor+cose",
-        "solana_tx": solana_tx,
         "arweave_tx": arweave_tx,
         "signer": owner_pubkey,
         "signature": signature,
@@ -1723,7 +1667,6 @@ async fn sign_memory_inline(
         // immutably).
         let receipt = serde_json::json!({
             "arweave_tx": arweave_tx,
-            "solana_tx": solana_tx,
             "recall_verified_at": ts,
         });
         if let Some(obj) = out.as_object_mut() {
@@ -1846,7 +1789,6 @@ pub struct DeliveryContext<'a> {
     pub content: &'a str,
     pub content_hash: &'a str,
     pub tags: &'a [String],
-    pub solana_tx: &'a str,
     pub arweave_tx: &'a str,
     pub signer_pubkey: &'a str,
     pub owner_pubkey: &'a str,
@@ -1899,7 +1841,7 @@ pub async fn confirm_delivery_or_demote(
                     ctx.content,
                     ctx.content_hash,
                     ctx.tags,
-                    ctx.solana_tx,
+                    "", // legacy `solana_tx` column, unused
                     ctx.arweave_tx,
                     ctx.signer_pubkey,
                     ctx.owner_pubkey,
@@ -1912,7 +1854,6 @@ pub async fn confirm_delivery_or_demote(
             tracing::warn!(
                 attestation_id = %ctx.attestation_id,
                 arweave_tx = %ctx.arweave_tx,
-                solana_tx = %ctx.solana_tx,
                 stage = %stage,
                 owner_pubkey = %ctx.owner_pubkey,
                 "delivery not confirmed — row demoted to local"
@@ -1926,9 +1867,9 @@ pub async fn confirm_delivery_or_demote(
 ///
 /// Routes by the row's stored `write_mode` (Decision 9 / T4), not by env-var:
 /// - `WriteMode::Local`  → `verify_local` (SQLite lookup + blake3 recompute).
-/// - `WriteMode::Anchored` → fetch COSE bytes from Arweave → COSE verify →
-///   compare hash with the Solana anchor (`verify_cose` / `verify_legacy_json`
-///   fallback for v1 rows).
+/// - `WriteMode::Anchored` → fetch the original bytes from Arweave and verify
+///   the COSE_Sign1 signature and content hash (`verify_cose`), or the
+///   legacy JSON + SHA-256 format (`verify_legacy_json`).
 ///
 /// Tenant isolation: the routing lookup is scoped by the caller's
 /// `owner_pubkey`. A row owned by a different tenant returns the
@@ -1940,29 +1881,27 @@ pub async fn confirm_delivery_or_demote(
 /// pre-date the routing change.
 #[allow(clippy::too_many_arguments)]
 pub async fn verify(
-    solana: &SolanaClient,
     arweave: &ArweaveClient,
     store: &std::sync::Mutex<SqliteStore>,
-    solana_tx: Option<&str>,
     arweave_tx: Option<&str>,
     owner_pubkey: &str,
     _storage_mode: &str,
     embedder: &dyn Embedder,
     compressor: &EmbeddingCompressor,
 ) -> anyhow::Result<serde_json::Value> {
-    let lookup_id = match solana_tx.or(arweave_tx) {
+    let lookup_id = match arweave_tx.filter(|id| !id.is_empty()) {
         Some(id) => id,
         None => {
             return Ok(serde_json::json!({
                 "status": "error",
-                "message": "Provide solana_tx or arweave_tx",
+                "message": "Provide arweave_tx",
             }));
         }
     };
 
     // Storage lock discipline: SqliteStore is !Send. Hold the mutex
     // briefly for the routing lookup and DROP before any `.await` on
-    // Arweave / Solana clients.
+    // the Arweave client.
     let (routed_mode, plaintext_on_arweave, is_sealed) = {
         let store = store.lock().expect("store mutex poisoned");
         (
@@ -2001,18 +1940,10 @@ pub async fn verify(
     };
 
     match routed_mode {
-        Some(WriteMode::Local) => verify_local(
-            store,
-            solana_tx,
-            arweave_tx,
-            owner_pubkey,
-            embedder,
-            compressor,
-        )
-        .map(with_flag),
-        Some(WriteMode::Anchored) => verify_anchored(solana, arweave, solana_tx, arweave_tx)
-            .await
-            .map(with_flag),
+        Some(WriteMode::Local) => {
+            verify_local(store, lookup_id, owner_pubkey, embedder, compressor).map(with_flag)
+        }
+        Some(WriteMode::Anchored) => verify_anchored(arweave, lookup_id).await.map(with_flag),
         // Tenant isolation: a row owned by a different tenant returns
         // `Ok(None)` from `find_write_mode_by_tx` — same shape as a
         // genuine miss. NO `content_hash`, `signer_pubkey`, `content`,
@@ -2025,55 +1956,29 @@ pub async fn verify(
     }
 }
 
-/// Anchored-mode verification: fetch COSE bytes from Arweave, verify the
-/// COSE signature, compare blake3 hash against the Solana anchor. Extracted
-/// from the pre-T4 env-var branch so the routing decision in `verify`
-/// remains a flat `match`.
+/// Anchored-mode verification: fetch the original bytes from Arweave and
+/// verify them. Arweave is the single record of an anchored memory, so the
+/// COSE signature and the blake3 hash inside it are the whole proof.
 async fn verify_anchored(
-    solana: &SolanaClient,
     arweave: &ArweaveClient,
-    solana_tx: Option<&str>,
-    arweave_tx: Option<&str>,
+    arweave_tx: &str,
 ) -> anyhow::Result<serde_json::Value> {
-    let mut expected_hash: Option<String> = None;
-    let mut ar_tx = arweave_tx.map(|s| s.to_string());
-    let mut anchor_version: u64 = 1;
-
-    if let Some(sol_tx) = solana_tx {
-        match solana.read_memo(sol_tx).await? {
-            Some(memo) => {
-                expected_hash = memo["h"].as_str().map(|s| s.to_string());
-                if ar_tx.is_none() {
-                    ar_tx = memo["a"].as_str().map(|s| s.to_string());
-                }
-                anchor_version = memo["v"].as_u64().unwrap_or(1);
-            }
-            None => {
-                return Ok(serde_json::json!({"status": "anchor_not_found", "solana_tx": sol_tx}))
-            }
-        }
-    }
-
-    let ar_tx_id = ar_tx.as_deref().unwrap_or("");
-    let raw_bytes = match arweave.read(ar_tx_id).await {
+    let raw_bytes = match arweave.read(arweave_tx).await {
         Ok(b) => b,
         Err(_) => {
-            return Ok(serde_json::json!({"status": "arweave_not_found", "arweave_tx": ar_tx_id}))
+            return Ok(serde_json::json!({"status": "arweave_not_found", "arweave_tx": arweave_tx}))
         }
     };
 
     // Detect artifact format:
-    // - If anchor_version >= 2 from Solana memo → COSE
-    // - If no Solana anchor but payload looks like COSE (CBOR array tag 0x84) → try COSE
+    // - Payload looks like COSE (CBOR array tag 0x84) → COSE
     // - Otherwise → legacy JSON + SHA-256
-    let is_cose = anchor_version >= 2 || (solana_tx.is_none() && looks_like_cose(&raw_bytes));
-
-    if is_cose {
-        return verify_cose(&raw_bytes, expected_hash.as_deref(), solana_tx, ar_tx_id);
+    if looks_like_cose(&raw_bytes) {
+        return verify_cose(&raw_bytes, arweave_tx);
     }
 
     // v1 artifacts (legacy): raw JSON + SHA-256
-    verify_legacy_json(&raw_bytes, expected_hash.as_deref(), solana_tx, ar_tx_id)
+    Ok(verify_legacy_json(&raw_bytes, arweave_tx))
 }
 
 /// Heuristic: COSE_Sign1 is a CBOR 4-element array.
@@ -2084,13 +1989,8 @@ fn looks_like_cose(bytes: &[u8]) -> bool {
 }
 
 /// Verify a v2 COSE_Sign1 artifact from Arweave.
-fn verify_cose(
-    cose_bytes: &[u8],
-    expected_hash: Option<&str>,
-    solana_tx: Option<&str>,
-    arweave_tx: &str,
-) -> anyhow::Result<serde_json::Value> {
-    let result = cose_verify(cose_bytes, expected_hash)
+fn verify_cose(cose_bytes: &[u8], arweave_tx: &str) -> anyhow::Result<serde_json::Value> {
+    let result = cose_verify(cose_bytes, None)
         .map_err(|e| anyhow::anyhow!("COSE verification failed: {e}"))?;
 
     // Try to recover content preview from the CBOR payload
@@ -2113,48 +2013,28 @@ fn verify_cose(
         },
         "content_hash": result.content_hash,
         "hash_algorithm": "blake3",
-        "solana_tx": solana_tx.unwrap_or(""),
         "arweave_tx": arweave_tx,
         "signer": result.signer,
         "content_preview": content_preview,
     }))
 }
 
-/// Verify a v1 legacy artifact (raw JSON + SHA-256).
-fn verify_legacy_json(
-    raw_bytes: &[u8],
-    expected_hash: Option<&str>,
-    solana_tx: Option<&str>,
-    arweave_tx: &str,
-) -> anyhow::Result<serde_json::Value> {
+/// Hash a v1 legacy artifact (raw JSON + SHA-256). A legacy JSON artifact has
+/// no signature, so this reports the computed hash only.
+fn verify_legacy_json(raw_bytes: &[u8], arweave_tx: &str) -> serde_json::Value {
     use sha2::{Digest, Sha256};
 
     let payload: serde_json::Value = serde_json::from_slice(raw_bytes).unwrap_or_default();
     let content = payload["content"].as_str().unwrap_or("");
     let actual_hash = hex::encode(Sha256::digest(content.as_bytes()));
 
-    if let Some(expected) = expected_hash {
-        if actual_hash == expected {
-            return Ok(serde_json::json!({
-                "status": "verified",
-                "encoding": "json+sha256 (legacy v1)",
-                "content_hash": actual_hash,
-                "hash_algorithm": "sha256",
-                "solana_tx": solana_tx.unwrap_or(""),
-                "arweave_tx": arweave_tx,
-                "signer": payload["signer"].as_str().unwrap_or(""),
-                "content_preview": &content[..content.len().min(200)],
-            }));
-        }
-        return Ok(serde_json::json!({
-            "status": "tampered",
-            "encoding": "json+sha256 (legacy v1)",
-            "expected_hash": expected,
-            "actual_hash": actual_hash,
-        }));
-    }
-
-    Ok(serde_json::json!({"status": "hash_computed", "content_hash": actual_hash}))
+    serde_json::json!({
+        "status": "hash_computed",
+        "encoding": "json+sha256 (legacy v1)",
+        "content_hash": actual_hash,
+        "hash_algorithm": "sha256",
+        "arweave_tx": arweave_tx,
+    })
 }
 
 /// Local-mode verification: rebuild the canonical CBOR artifact and compare
@@ -2185,16 +2065,11 @@ fn verify_legacy_json(
 /// inherit the same isolation guarantee.
 fn verify_local(
     store: &std::sync::Mutex<SqliteStore>,
-    solana_tx: Option<&str>,
-    arweave_tx: Option<&str>,
+    lookup_id: &str,
     owner_pubkey: &str,
     embedder: &dyn Embedder,
     compressor: &EmbeddingCompressor,
 ) -> anyhow::Result<serde_json::Value> {
-    let lookup_id = solana_tx
-        .or(arweave_tx)
-        .ok_or_else(|| anyhow::anyhow!("provide solana_tx or arweave_tx"))?;
-
     let row = {
         let store = store.lock().expect("store mutex poisoned");
         store.reconstruction_inputs_by_tx(lookup_id, owner_pubkey)?
@@ -2225,7 +2100,6 @@ fn verify_local(
             "status": "verified",
             "storage_mode": "local",
             "content_hash": row.content_hash,
-            "solana_tx": row.solana_tx,
             "arweave_tx": row.arweave_tx,
             "signer": row.signer_pubkey,
             "content_preview": &row.content[..row.content.len().min(200)],
@@ -2429,7 +2303,7 @@ pub fn operator_proof(
 /// (Wave 5 / design §16). The `root` commits to the *set* of an owner's
 /// `content_hash`es (rebuildable from Arweave); `proofs` carries one inclusion
 /// proof per returned result so a client can check — against the root it
-/// independently anchored/observed on Solana — that the operator neither
+/// independently observed — that the operator neither
 /// omitted nor tampered with the row. Pure local computation over the
 /// rebuildable SQLite cache; no chain call here.
 ///
@@ -2619,7 +2493,7 @@ fn sanitize_untrusted(content: &str) -> String {
 /// `visibility == Private`. Seals the inner MEMORY_V1 artifact with the
 /// owner's Ed25519 public key, wraps the outer SEALED_V1 CBOR in
 /// COSE_Sign1 (signed by the agent key), uploads to Arweave with a
-/// `Mnemonic-Type: sealed` tag, and writes a Solana SPL memo with `v: 3`.
+/// `Mnemonic-Type: sealed` tag.
 ///
 /// # Critical-section discipline (Decision 8)
 ///
@@ -2629,7 +2503,6 @@ fn sanitize_untrusted(content: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 pub async fn sign_memory_sealed_anchored(
     keypair: &LazyKeypair,
-    solana: &mnemonic_core::solana::SolanaClient,
     arweave: &mnemonic_core::arweave::ArweaveClient,
     store: &std::sync::Mutex<SqliteStore>,
     content: &str,
@@ -2684,7 +2557,7 @@ pub async fn sign_memory_sealed_anchored(
     let cose_bytes = sign_cose(&outer_cbor, kp)
         .map_err(|e| anyhow::anyhow!("COSE signing of sealed artifact failed: {e}"))?;
 
-    // 5. Upload to Arweave + Solana memo.
+    // 5. Upload to Arweave.
     let producer_did = identity::did_sol(kp);
     let ar_tx = arweave
         .write_item(
@@ -2699,13 +2572,6 @@ pub async fn sign_memory_sealed_anchored(
         .await?;
     arweave.mine().await?;
 
-    // Stage 2 (chain-agnostic/decisions.md): WriteMode::Anchored no longer
-    // writes an SPL Memo. New rows store solana_tx = '' (empty string).
-    // Memo readers stay intact for legacy rows. `solana` parameter is kept
-    // in the signature; it is still used by `verify_usdc_transfer`.
-    let _ = solana;
-    let sol_tx = String::new();
-
     // 6. Persist sealed row (short critical section, no await while held).
     {
         let store_g = store.lock().unwrap();
@@ -2713,7 +2579,7 @@ pub async fn sign_memory_sealed_anchored(
             &attestation_id,
             &content_hash,
             tags,
-            &sol_tx,
+            "", // legacy `solana_tx` column, unused
             &ar_tx,
             owner_pubkey,
             owner_pubkey,
@@ -2732,7 +2598,6 @@ pub async fn sign_memory_sealed_anchored(
         "content_hash": content_hash,
         "hash_algorithm": "blake3",
         "encoding": "cbor+sealed+cose",
-        "solana_tx": sol_tx,
         "arweave_tx": ar_tx,
         "signer": owner_pubkey,
         "signature": "cose_sign1",
@@ -2837,7 +2702,6 @@ pub async fn recall_with_sealed(
                         labelled_results.push(serde_json::json!({
                             "attestation_id": row.attestation_id,
                             "content_hash": row.content_hash,
-                            "solana_tx": row.solana_tx,
                             "arweave_tx": row.arweave_tx,
                             "content": inner_content,
                             "created_at": row.created_at,
@@ -3078,7 +2942,7 @@ pub(crate) fn try_write_sealed_index(
 #[cfg(test)]
 mod sign_memory_tests {
     //! Decision-12 unit tests: HTTP/JWT path defers to PendingBundles, stdio
-    //! path keeps inline signing. Network-free (uses dummy SolanaClient and
+    //! path keeps inline signing. Network-free (uses a dummy
     //! ArweaveClient with `http://localhost:0`; tests only exercise the
     //! local-mode branch + the deferred branch, which never call out).
 
@@ -3105,7 +2969,6 @@ mod sign_memory_tests {
 
     fn fixtures() -> (
         Keypair,
-        SolanaClient,
         ArweaveClient,
         std::sync::Mutex<SqliteStore>,
         StubEmbedder,
@@ -3114,7 +2977,6 @@ mod sign_memory_tests {
         crate::pricing::CostHint,
     ) {
         let kp = Keypair::new();
-        let sol = SolanaClient::new("http://localhost:0");
         let ar = ArweaveClient::new("http://localhost:0");
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let store = std::sync::Mutex::new(SqliteStore::open(tmp.path()).unwrap());
@@ -3128,7 +2990,7 @@ mod sign_memory_tests {
         };
         // Keep tmp alive for the test duration via leaking the path keeper.
         std::mem::forget(tmp);
-        (kp, sol, ar, store, StubEmbedder, comp, pending, hint)
+        (kp, ar, store, StubEmbedder, comp, pending, hint)
     }
 
     fn local_envelope() -> Envelope {
@@ -3159,7 +3021,7 @@ mod sign_memory_tests {
         // Task 6: the deferred sealed path (default `visibility = Private`)
         // decodes `jwt_sub` as a Solana pubkey to derive the owner's X25519
         // key. Use the fixture keypair's pubkey so the decoding succeeds.
-        let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
+        let (kp, ar, store, emb, comp, pending, hint) = fixtures();
         let owner = kp.pubkey().to_string();
         // Use the same pubkey as jwt_sub so the sealed path can parse it.
         let jwt_sub = owner.clone();
@@ -3168,7 +3030,6 @@ mod sign_memory_tests {
         let (hosted_client, args) = no_softfall();
         let result = sign_memory(
             &LazyKeypair::ready(kp.insecure_clone()),
-            &sol,
             &ar,
             &store,
             &emb,
@@ -3207,14 +3068,13 @@ mod sign_memory_tests {
 
     #[tokio::test]
     async fn test_sign_memory_stdio_path_unchanged() {
-        let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
+        let (kp, ar, store, emb, comp, pending, hint) = fixtures();
         let owner = kp.pubkey().to_string();
         let env = local_envelope();
         let resolved = resolve_write_mode(None, "local").unwrap();
         let (hosted_client, args) = no_softfall();
         let result = sign_memory(
             &LazyKeypair::ready(kp.insecure_clone()),
-            &sol,
             &ar,
             &store,
             &emb,
@@ -3250,7 +3110,7 @@ mod sign_memory_tests {
         // Even when the JWT subject IS the operator identity (the one case
         // that used to be allowed), an anchored write over the hosted
         // transport must go to client signing, never to the server key.
-        let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
+        let (kp, ar, store, emb, comp, pending, hint) = fixtures();
         let operator = LazyKeypair::deferred(kp.pubkey(), || {
             panic!("server key must not be loaded for a hosted memory write")
         });
@@ -3260,7 +3120,6 @@ mod sign_memory_tests {
         let env = Envelope::from_config("full", "none", 0);
         let result = sign_memory(
             &operator,
-            &sol,
             &ar,
             &store,
             &emb,
@@ -3292,14 +3151,13 @@ mod sign_memory_tests {
     async fn test_local_write_and_recall_never_read_the_keychain() {
         // A locked / denied OS keychain must not block free local memory:
         // local writes persist only the hash, so no secret is needed.
-        let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
+        let (kp, ar, store, emb, comp, pending, hint) = fixtures();
         let owner = kp.pubkey().to_string();
         let locked = LazyKeypair::deferred(kp.pubkey(), || anyhow::bail!("keychain is locked"));
         let resolved = resolve_write_mode(None, "local").unwrap();
         let (hosted_client, args) = no_softfall();
         let result = sign_memory(
             &locked,
-            &sol,
             &ar,
             &store,
             &emb,
@@ -3365,7 +3223,6 @@ mod sign_memory_tests {
         storage_mode: &str,
         content: &str,
     ) -> Result<serde_json::Value, ToolError> {
-        let sol = SolanaClient::new("http://localhost:0");
         let ar = ArweaveClient::new("http://localhost:0");
         let comp = EmbeddingCompressor::new(8, 4, 42);
         let hint = crate::pricing::CostHint {
@@ -3378,7 +3235,6 @@ mod sign_memory_tests {
         let (hosted_client, args) = no_softfall();
         sign_memory(
             operator,
-            &sol,
             &ar,
             store,
             &StubEmbedder,
@@ -3419,7 +3275,7 @@ mod sign_memory_tests {
     /// structurally: free means client-side, via a locally installed server.
     #[tokio::test]
     async fn explicit_local_over_http_is_refused_on_every_deploy_variant() {
-        let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
+        let (kp, ar, store, emb, comp, pending, hint) = fixtures();
         let owner = kp.pubkey().to_string();
 
         // Both deploy variants must refuse it: the reason is the transport, not
@@ -3434,7 +3290,6 @@ mod sign_memory_tests {
             let (hosted_client, args) = no_softfall();
             let err = sign_memory(
                 &LazyKeypair::ready(kp.insecure_clone()),
-                &sol,
                 &ar,
                 &store,
                 &emb,
@@ -3491,7 +3346,7 @@ mod sign_memory_tests {
     #[tokio::test]
     async fn test_jwt_anchored_remote_owner_stays_deferred() {
         // Owner requirement 1: an anchored memory is signed by the client.
-        let (kp, _sol, _ar, store, _emb, _comp, pending, _hint) = fixtures();
+        let (kp, _ar, store, _emb, _comp, pending, _hint) = fixtures();
         let (operator, attempts) = watched_operator(kp.pubkey());
         let remote = Keypair::new().pubkey().to_string();
         let resolved = resolve_write_mode(Some(&serde_json::json!("anchored")), "full").unwrap();
@@ -3522,7 +3377,7 @@ mod sign_memory_tests {
         // with owner != operator: the operator secret is never read, so no
         // anchored artifact can carry the operator key as COSE kid. Each
         // call either defers to client signing or is refused.
-        let (kp, _sol, _ar, store, _emb, _comp, pending, _hint) = fixtures();
+        let (kp, _ar, store, _emb, _comp, pending, _hint) = fixtures();
         let (operator, attempts) = watched_operator(kp.pubkey());
         let remote = Keypair::new().pubkey().to_string();
         let explicit = resolve_write_mode(Some(&serde_json::json!("anchored")), "full").unwrap();
@@ -3562,7 +3417,7 @@ mod sign_memory_tests {
         // Transport guard: an unauthenticated HTTP call falls back to
         // owner = operator in `mcp_handler`. Even so, anchored must not
         // reach inline operator signing — only `Transport::Stdio` may.
-        let (kp, _sol, _ar, store, _emb, _comp, pending, _hint) = fixtures();
+        let (kp, _ar, store, _emb, _comp, pending, _hint) = fixtures();
         let (operator, attempts) = watched_operator(kp.pubkey());
         let operator_pk = kp.pubkey().to_string();
         let resolved = resolve_write_mode(Some(&serde_json::json!("anchored")), "full").unwrap();
@@ -3593,7 +3448,6 @@ mod sign_memory_tests {
         };
         let err = sign_memory_inline(
             &operator,
-            &SolanaClient::new("http://localhost:0"),
             &ArweaveClient::new("http://localhost:0"),
             &store,
             &StubEmbedder,
@@ -3644,7 +3498,7 @@ mod sign_memory_tests {
     /// the LRU store.
     #[tokio::test]
     async fn test_sealed_pending_entry_holds_no_plaintext() {
-        let (kp, _, _, _, emb, comp, pending, _) = fixtures();
+        let (kp, _, _, emb, comp, pending, _) = fixtures();
         let owner_pubkey = kp.pubkey().to_string();
         let secret = "this is the secret memory";
 
@@ -3755,7 +3609,7 @@ mod sign_memory_tests {
     /// pre-Task-6 behaviour — no sealing, embedding preserved, MEMORY_V1 CBOR.
     #[tokio::test]
     async fn test_public_deferred_path_unchanged() {
-        let (kp, _, _, _, emb, comp, pending, _) = fixtures();
+        let (kp, _, _, emb, comp, pending, _) = fixtures();
         let owner_pubkey = kp.pubkey().to_string();
 
         let result = sign_memory_deferred(
@@ -3823,7 +3677,7 @@ mod sign_memory_tests {
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(logs_clone));
         let _guard = set_default(subscriber);
 
-        let (kp, _, _, _, emb, comp, pending, _) = fixtures();
+        let (kp, _, _, emb, comp, pending, _) = fixtures();
         let owner_pubkey = kp.pubkey().to_string();
         let secret_content = "UNIQUE_SECRET_SENTINEL_xyz9876543210";
 
@@ -3988,40 +3842,17 @@ mod anchor_links_tests {
     use super::*;
 
     #[test]
-    fn devnet_links_use_devnet_cluster_and_arweave_gateway() {
-        let solana = SolanaClient::new("https://api.devnet.solana.com");
+    fn links_use_configured_arweave_gateway() {
         let arweave = ArweaveClient::new("https://arweave.net/");
-        let links = anchor_links(&solana, &arweave, "solana-signature", "data-item");
-
-        assert_eq!(links.network, "devnet");
-        assert_eq!(
-            links.solana_explorer_url,
-            "https://explorer.solana.com/tx/solana-signature?cluster=devnet"
-        );
+        let links = anchor_links(&arweave, "data-item");
         assert_eq!(links.arweave_url, "https://arweave.net/data-item");
     }
 
     #[test]
-    fn mainnet_links_use_mainnet_explorer() {
-        let solana = SolanaClient::new("https://api.mainnet-beta.solana.com");
+    fn local_and_empty_ids_have_no_external_links() {
         let arweave = ArweaveClient::new("https://arweave.net");
-        let links = anchor_links(&solana, &arweave, "sig", "item");
-        assert_eq!(links.network, "mainnet");
-        assert_eq!(
-            links.solana_explorer_url,
-            "https://explorer.solana.com/tx/sig"
-        );
-    }
-
-    #[test]
-    fn local_ids_have_no_external_links() {
-        let arweave = ArweaveClient::new("https://arweave.net");
-        let solana = SolanaClient::new("https://api.mainnet-beta.solana.com");
-        let links = anchor_links(&solana, &arweave, "local:solana", "local:item");
-
-        assert_eq!(links.network, "local");
-        assert!(links.solana_explorer_url.is_empty());
-        assert!(links.arweave_url.is_empty());
+        assert!(anchor_links(&arweave, "local:item").arweave_url.is_empty());
+        assert!(anchor_links(&arweave, "").arweave_url.is_empty());
     }
 }
 

@@ -51,8 +51,7 @@ Variables for `mcp/` (set by user):
 | `OPENAI_API_KEY` | — | If `EMBED_PROVIDER=openai` |
 | `TURBO_BITS` | `4` | 2, 3, or 4 |
 | `ARWEAVE_GATEWAY_URL` | `https://arweave.net` | Primary Arweave read gateway. Old name `ARWEAVE_URL` is still accepted. Uploads always go to ArDrive Turbo |
-| `ANCHORING_NETWORK` | `mainnet` | Solana network for memo anchors (`mainnet` or `devnet`). `devnet` requires `SOLANA_RPC_URL=https://api.devnet.solana.com`. Uploads are always Arweave mainnet |
-| `SOLANA_RPC_URL` | `https://api.mainnet-beta.solana.com` | Solana RPC |
+| `SOLANA_RPC_URL` | `https://api.mainnet-beta.solana.com` | Solana RPC. Used only to verify x402 Solana USDC payments |
 | `MCP_TRANSPORT` | `http` | `stdio` or `http` |
 | `MCP_HTTP_PORT` | `3000` | HTTP transport port |
 | `PAYMENT_MODE` | `none` | `none`, `balance`, `x402`, `both` |
@@ -332,7 +331,7 @@ other generators.
 Per Deviation 7 of the same tech-spec, `MNEMONIC_KEYPAIR_PATH` is **no
 longer required for the OAuth flow** — signing happens client-side in the
 webapp's WASM identity. The keypair is still required for legacy `full`
-storage mode (Arweave + Solana writes) but irrelevant to OAuth bootstrap.
+storage mode (Arweave writes) but irrelevant to OAuth bootstrap.
 
 #### Chrome extension OAuth — Google sign-in (T14 + T16, 2026-05-11)
 

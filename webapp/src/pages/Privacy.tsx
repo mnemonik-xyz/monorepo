@@ -62,12 +62,12 @@ export default function Privacy() {
                 scalar-quantised, canonicalised to deterministic CBOR, hashed
                 with BLAKE3, and signed as a COSE_Sign1 artifact under an
                 Ed25519 keypair. In full mode the signed bytes are also
-                persisted on Arweave and timestamped on Solana via an SPL Memo
-                transaction.
+                persisted on Arweave. Arweave is the single record of each
+                full-mode memory.
               </P>
               <P>
                 Because the cryptographic surface — keypair, hash, signature,
-                anchor transaction — is the substrate of the protocol itself,
+                Arweave data item — is the substrate of the protocol itself,
                 the privacy properties of what you put into Mnemonic are
                 determined by the design choices described below, not by an
                 operator policy.
@@ -92,9 +92,8 @@ export default function Privacy() {
                 <P>
                   In <strong className="text-text-primary">full mode</strong>{" "}
                   the signed canonical CBOR bytes are uploaded to Arweave (via
-                  ArDrive Turbo as an ANS-104 data item) and a content identifier is
-                  published on Solana as an SPL Memo transaction. Both are
-                  public, permanent, decentralised ledgers. Anything an
+                  ArDrive Turbo as an ANS-104 data item). Arweave is a public,
+                  permanent, decentralised ledger. Anything an
                   attestation contains — including the embedded vector and any
                   plaintext your client chose to include in the canonical body —
                   becomes world-readable and, in practical terms,{" "}
@@ -231,31 +230,21 @@ export default function Privacy() {
               </P>
             </Section>
 
-            <Section title="6. Public ledgers: Arweave and Solana">
+            <Section title="6. Public ledger: Arweave">
               <P>
-                Full-mode attestations are written to two independent public
-                ledgers:
+                Full-mode attestations are written to one public ledger.{" "}
+                <strong className="text-text-primary">Arweave</strong> stores
+                the signed CBOR bytes as an ANS-104 data item. Arweave is
+                designed to be permanent; once a data item confirms, its
+                contents are not deletable by Mnemonic, by any operator, or by
+                Arweave miners. Mnemonic does not write full-mode attestations
+                to Solana. Older full-mode attestations also published a content
+                hash in a public Solana transaction, which is not deletable.
               </P>
-              <Bullets>
-                <li>
-                  <strong className="text-text-primary">Arweave</strong> stores
-                  the signed CBOR bytes as an ANS-104 bundle item. Arweave is
-                  designed to be permanent; once a transaction confirms, its
-                  contents are not deletable by Mnemonic, by any operator, or by
-                  Arweave miners.
-                </li>
-                <li>
-                  <strong className="text-text-primary">Solana</strong> records
-                  an SPL Memo transaction. The memo contains only the content
-                  hash, the Arweave transaction id, the embedding model name and
-                  a format version. It does not contain your public key. Solana
-                  transactions are public and not deletable.
-                </li>
-              </Bullets>
               <P>
                 Operators of Mnemonic — including the maintainers of
-                mnemonik.xyz — cannot retract data committed to Arweave or
-                Solana. The Arweave bytes contain your content as plain text. Use full mode only with content
+                mnemonik.xyz — cannot retract data committed to Arweave. The
+                Arweave bytes contain your content as plain text. Use full mode only with content
                 for which permanent public disclosure is acceptable.
               </P>
             </Section>
@@ -268,7 +257,7 @@ export default function Privacy() {
                 process such a request within thirty (30) days.
               </P>
               <P>
-                For full-mode attestations, deletion from Arweave and Solana is{" "}
+                For full-mode attestations, deletion from Arweave is{" "}
                 <strong className="text-text-primary">
                   not technically possible
                 </strong>

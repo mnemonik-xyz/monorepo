@@ -32,7 +32,7 @@ type StagedDeliveryRow = (
 );
 
 /// Column tuple for the delivery-attempt SELECT.
-type DeliveryAttemptRow = (String, Option<String>, Option<String>, u32, Option<String>);
+type DeliveryAttemptRow = (String, Option<String>, u32, Option<String>);
 
 /// Current paid-artifact binding format.
 // Reserved for the in-flight paid-anchoring work; exercised by tests but not
@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS paid_artifact_delivery_attempts (
     correlation_id TEXT PRIMARY KEY,
     state TEXT NOT NULL,
     arweave_tx TEXT,
+    -- Legacy and unused. Kept so existing databases need no table rewrite.
     solana_tx TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
     lease_id TEXT,
@@ -395,7 +396,6 @@ pub struct DeliveryAttempt {
     pub correlation_id: String,
     pub state: String,
     pub arweave_tx: Option<String>,
-    pub solana_tx: Option<String>,
     pub attempts: u32,
     pub lease_id: String,
 }
@@ -412,22 +412,14 @@ pub fn acquire_delivery_attempt(
 ) -> Result<Option<DeliveryAttempt>> {
     let existing: Option<DeliveryAttemptRow> = conn
         .query_row(
-            "SELECT state, arweave_tx, solana_tx, attempts, lease_expires_at \
+            "SELECT state, arweave_tx, attempts, lease_expires_at \
              FROM paid_artifact_delivery_attempts WHERE correlation_id = ?1",
             params![correlation_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
         .context("read paid delivery attempt")?;
-    if let Some((state, arweave_tx, solana_tx, attempts, existing_lease)) = existing {
+    if let Some((state, arweave_tx, attempts, existing_lease)) = existing {
         // An abandoned delivery is terminal: only an explicit, audited operator
         // action may reopen it. In particular, a late browser callback must not
         // silently start another delivery after the bounded retry budget ends.
@@ -458,7 +450,6 @@ pub fn acquire_delivery_attempt(
             correlation_id: correlation_id.into(),
             state,
             arweave_tx,
-            solana_tx,
             attempts: attempts + 1,
             lease_id: lease_id.into(),
         }));
@@ -478,7 +469,6 @@ pub fn acquire_delivery_attempt(
         correlation_id: correlation_id.into(),
         state: "anchoring".into(),
         arweave_tx: None,
-        solana_tx: None,
         attempts: 1,
         lease_id: lease_id.into(),
     }))
@@ -550,41 +540,15 @@ pub fn due_delivery_retries(conn: &Connection, now: &str, limit: usize) -> Resul
     Ok(retries)
 }
 
-/// Record that the Solana memo for a paid anchored delivery has been submitted
-/// but not yet confirmed. Stage 2 (chain-agnostic/decisions.md) stopped writing
-/// SPL Memos, so this function is no longer called on the new write path. It is
-/// kept for forward compatibility: a future re-introduction of an anchor writer
-/// can call it again without an ABI change. `allow(dead_code)` instead of
-/// deletion because removing it would silently break any operator running a
-/// mixed-version deployment that still has `solana_submitted` rows in flight.
-#[allow(dead_code)]
-pub fn record_solana_submitted(
-    conn: &Connection,
-    attempt: &DeliveryAttempt,
-    solana_tx: &str,
-    now: &str,
-) -> Result<()> {
-    let changed = conn.execute(
-        "UPDATE paid_artifact_delivery_attempts SET state = 'solana_submitted', solana_tx = ?1, updated_at = ?2 \
-         WHERE correlation_id = ?3 AND lease_id = ?4 AND solana_tx IS NULL",
-        params![solana_tx, now, attempt.correlation_id, attempt.lease_id],
-    ).context("record paid Solana submission")?;
-    if changed != 1 {
-        return Err(anyhow!("paid_delivery_lease_conflict"));
-    }
-    Ok(())
-}
-
 pub fn mark_delivery_completed(
     conn: &Connection,
     attempt: &DeliveryAttempt,
-    solana_tx: &str,
     now: &str,
 ) -> Result<()> {
     let changed = conn.execute(
-        "UPDATE paid_artifact_delivery_attempts SET state = 'completed', solana_tx = ?1, lease_id = NULL, lease_expires_at = NULL, updated_at = ?2 \
-         WHERE correlation_id = ?3 AND lease_id = ?4",
-        params![solana_tx, now, attempt.correlation_id, attempt.lease_id],
+        "UPDATE paid_artifact_delivery_attempts SET state = 'completed', lease_id = NULL, lease_expires_at = NULL, updated_at = ?1 \
+         WHERE correlation_id = ?2 AND lease_id = ?3",
+        params![now, attempt.correlation_id, attempt.lease_id],
     ).context("mark paid delivery completed")?;
     if changed != 1 {
         return Err(anyhow!("paid_delivery_lease_conflict"));
@@ -725,7 +689,7 @@ mod tests {
         .unwrap()
         .unwrap();
         record_arweave_uploaded(&conn, &first, "arweave-1", "2026-07-15T00:01:00Z").unwrap();
-        mark_delivery_retryable(&conn, &first, "solana unavailable", "2026-07-15T00:02:00Z")
+        mark_delivery_retryable(&conn, &first, "gateway unavailable", "2026-07-15T00:02:00Z")
             .unwrap();
         let retry = acquire_delivery_attempt(
             &conn,
@@ -738,7 +702,7 @@ mod tests {
         .unwrap();
         assert_eq!(retry.arweave_tx.as_deref(), Some("arweave-1"));
         assert_eq!(retry.attempts, 2);
-        mark_delivery_completed(&conn, &retry, "solana-1", "2026-07-15T00:04:00Z").unwrap();
+        mark_delivery_completed(&conn, &retry, "2026-07-15T00:04:00Z").unwrap();
         assert!(acquire_delivery_attempt(
             &conn,
             "correlation",

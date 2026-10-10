@@ -171,7 +171,6 @@ async fn visibility_threads_through_to_storage() {
     let softfall_args = serde_json::json!({});
     let result = sign_memory(
         &kp,
-        &server.state.solana,
         &server.state.arweave,
         &server.state.store,
         server.state.embedder.as_ref(),
@@ -220,7 +219,6 @@ async fn visibility_threads_through_to_storage() {
     // exercises the threading itself, not the gate.
     let result_public = sign_memory(
         &kp,
-        &server.state.solana,
         &server.state.arweave,
         &server.state.store,
         server.state.embedder.as_ref(),

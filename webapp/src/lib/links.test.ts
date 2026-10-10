@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { arweaveDataUrl, solanaTxUrl } from "./links";
+import { arweaveDataUrl } from "./links";
 
 describe("external transaction links", () => {
   it("routes production data item ids to the Arweave gateway", () => {
@@ -10,6 +10,6 @@ describe("external transaction links", () => {
 
   it("does not link synthetic local ids", () => {
     expect(arweaveDataUrl("local:memory")).toBeNull();
-    expect(solanaTxUrl("local:memory")).toBeNull();
+    expect(arweaveDataUrl("")).toBeNull();
   });
 });

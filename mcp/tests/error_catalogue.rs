@@ -186,7 +186,6 @@ async fn catalogue_embedder_invalid() {
 
     use mnemonic_core::arweave::ArweaveClient;
     use mnemonic_core::compress::EmbeddingCompressor;
-    use mnemonic_core::solana::SolanaClient;
     use mnemonic_core::storage::SqliteStore;
     use mnemonic_mcp::mcp::Envelope;
     use mnemonic_mcp::tools::{resolve_write_mode, sign_memory, ToolError, Transport};
@@ -216,7 +215,6 @@ async fn catalogue_embedder_invalid() {
     let args = serde_json::json!({});
     let result = sign_memory(
         &kp,
-        &SolanaClient::new("http://localhost:0"),
         &ArweaveClient::new("http://localhost:0"),
         &store,
         &embedder,
@@ -281,7 +279,7 @@ fn catalogue_typed_helpers_pin_data_shapes() {
     assert_eq!(e.code, -32602);
     assert_eq!(e.data.as_ref().unwrap()["field"], "visibility");
 
-    let e = delivery_not_confirmed("refetch", "ar", "sol", "att");
+    let e = delivery_not_confirmed("refetch", "ar", "att");
     assert_eq!(e.code, -32011);
     assert_eq!(e.data.as_ref().unwrap()["kind"], "DeliveryNotConfirmed");
 

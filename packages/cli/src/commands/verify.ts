@@ -42,7 +42,6 @@ export async function runVerify(
     if (result.status === "verified") {
       const lines = [`status: verified`, `signer: ${result.signer}`];
       if (result.arweaveTx) lines.push(`arweave_tx: ${result.arweaveTx}`);
-      if (result.solanaTx) lines.push(`solana_tx: ${result.solanaTx}`);
       return lines.join("\n");
     }
     if (result.status === "tampered") {

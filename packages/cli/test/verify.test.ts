@@ -66,7 +66,6 @@ describe("runVerify", () => {
       reply("verified", {
         signer: "abc",
         arweave_tx: "ar1",
-        solana_tx: "sol1",
       })) as never;
     await expect(
       runVerify("att-1", { baseUrl: "http://t" })

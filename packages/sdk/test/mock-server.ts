@@ -536,7 +536,6 @@ function handleTool(
         status: "verified",
         signer: "MockSigner1",
         arweave_tx: "mock-arweave",
-        solana_tx: "mock-solana",
       };
     }
     case "mnemonic_prove_identity":

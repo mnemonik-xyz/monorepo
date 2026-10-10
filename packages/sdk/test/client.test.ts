@@ -371,7 +371,6 @@ describe("verify", () => {
             status: "verified",
             signer: "Pubkey9",
             arweave_tx: "ar-1",
-            solana_tx: "sol-1",
           }),
         },
       ],
@@ -850,7 +849,7 @@ describe("signMemory mode: anchored", () => {
         attestation_id: "att-p",
         status: "anchored",
         write_mode: "anchored",
-        solana_tx: "sol1",
+        arweave_tx: "ar1",
       },
     },
   ];
@@ -865,7 +864,7 @@ describe("signMemory mode: anchored", () => {
       attestationId: "att-p",
       status: "anchored",
       writeMode: "anchored",
-      solanaTx: "sol1",
+      arweaveTx: "ar1",
     });
     const body = calls[0]!.body as { params: { arguments: { mode: string } } };
     expect(body.params.arguments.mode).toBe("anchored");
@@ -935,7 +934,7 @@ describe("signMemory mode: anchored", () => {
           attestation_id: "att-p",
           status: "anchored",
           write_mode: "participate",
-          solana_tx: "sol1",
+          arweave_tx: "ar1",
         },
       },
     ];

@@ -168,7 +168,7 @@ describe("Verify tab — Cloud tier", () => {
     expect(verifyRemote).toHaveBeenCalledWith("att_cloud_one");
   });
 
-  it("verified path renders the verified panel with cloud signer + tx ids", async () => {
+  it("verified path renders the verified panel with cloud signer + arweave id", async () => {
     const verifyRemote = vi
       .fn<[string], Promise<CloudVerifyOutcome | null>>()
       .mockResolvedValue({
@@ -189,8 +189,8 @@ describe("Verify tab — Cloud tier", () => {
     expect(status.textContent ?? "").toMatch(/verified/i);
     // Cloud-side signer (not the `local:` placeholder).
     expect(status.textContent ?? "").toMatch(/PubClo/);
-    // Cloud anchors render their truncated form.
-    expect(status.textContent ?? "").toMatch(/SolRea/);
+    // The Arweave anchor renders its truncated form; no Solana id is shown.
+    expect(status.textContent ?? "").not.toMatch(/SolRea/);
     expect(status.textContent ?? "").toMatch(/ArReal/);
   });
 

@@ -102,7 +102,7 @@ export function organizationJsonLd(): Record<string, unknown> {
     name: SITE_NAME,
     url: ORIGIN,
     description:
-      "Verifiable, persistent memory for AI agents — signed, anchored on Solana, accessed via MCP.",
+      "Verifiable, persistent memory for AI agents — signed, stored on Arweave, accessed via MCP.",
     sameAs: ["https://github.com/mnemonik-xyz/monorepo"],
   };
 }

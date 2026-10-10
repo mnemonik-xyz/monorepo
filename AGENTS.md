@@ -53,9 +53,9 @@ Eleven tools are advertised by the default source build. Full reference — outp
 |---|---|---|
 | `mnemonic_whoami` | — | server pubkey, DIDs, storage mode, attestation count, and the capability envelope (`supported_modes`, `default_mode`, `anchored_cost`); on a paid (`x402`) deploy also `free_anchors`: your free daily quota of anchored writes (only for a key linked to a Google account; per account, per IP address, up to 16 KiB per write), or the `reason` you must pay |
 | `mnemonic_sign_memory` | `{ content: string, tags?: string[], mode?: "local" \| "anchored" }` | over HTTP: `{ status: "awaiting_signature", correlation_id, approve_url, content_hash, expires_in }` for the deferred-sign / sign-callback flow (the SDK handles the COSE-sign step locally). Explicit HTTP `mode: "local"` is refused; plain stdio local writes return an unsigned row |
-| `mnemonic_check_pending` | `{ correlation_id: string }` | `{ status: "signed", attestation_id, solana_tx, arweave_tx, ... }`, or `awaiting_signature` / `not_found` |
+| `mnemonic_check_pending` | `{ correlation_id: string }` | `{ status: "signed", attestation_id, arweave_tx, arweave_url, ... }`, or `awaiting_signature` / `not_found` |
 | `mnemonic_recall` | `{ query: string, limit?: number }` | top-k semantically similar attestations. Authenticated → your own corpus; anonymous → the cross-owner public pool only |
-| `mnemonic_verify` | `{ solana_tx?: string, arweave_tx?: string }` (supply at least one) | verification result with the recovered envelope and chain-of-trust |
+| `mnemonic_verify` | `{ arweave_tx: string }` | verification result: COSE_Sign1 signature and blake3 content hash of the Arweave bytes |
 | `mnemonic_prove_identity` | `{ challenge: string }` | server-signed challenge bytes |
 | `mnemonic_publish_post` | `{ title: string, body_markdown: string, tags?: string[], author?: string }` | the created post; requires auth |
 | `mnemonic_share` | `{ memory_hash: string, reader: string }` | legacy UI handoff only; not evidence of grant delivery. New hosted general-memory grant storage is retired |
@@ -87,8 +87,7 @@ A consumer of a memory can independently verify it without trusting Mnemonic:
 1. Fetch `arweave_tx` from any Arweave gateway → raw COSE_Sign1 bytes.
 2. Recompute `blake3(canonical_cbor_payload)` → 32-byte hash.
 3. Verify `cose_signature` against the writer's Ed25519 pubkey embedded in the envelope.
-4. For legacy artifacts with a Solana transaction, verify that its memo hash matches. New deliveries do not require a Solana memo.
-5. Matching signature and hash establish authorship and content identity. A successful fetch proves availability at that observation time; it does not prove completeness or sustained availability.
+4. Matching signature and hash establish authorship and content identity. A successful fetch proves availability at that observation time; it does not prove completeness or sustained availability.
 
 Reference verifier code is in `core/src/codec/sign.rs` (`verify_artifact`) and `core/src/codec/hash.rs` (`verify_hash`).
 

@@ -34,7 +34,6 @@ Neither format proves global completeness or truth of content.
 | `HttpObjectStorageAdapter` | `blob://<SHA256>` fetch and immutable PUT with exact read-back | One configured origin; server must enforce its retention/access policy. No deployed object service is supplied |
 | Arweave discovery | Arweave GraphQL queries, cursors, known-locator fallback and structured source diagnostics | Indexes are untrusted discovery hints. Lag, omission and failure are reported; exhaustion is not completeness |
 | Native parent resolution | `ar://`; optional configured blob origin via `MNEMONIC_PARENT_BLOB_ORIGIN` | Blob origin must be configured on the receiving operator. Parent authenticity is checked after bounded fetch |
-| Historical Solana memos | Legacy verification and discovery | New shared ingestion does not require a new Solana memo |
 | IPFS, Filecoin, arbitrary cloud providers | No supported adapter in this matrix | Design examples are not production integrations |
 
 Both SDK storage adapters enforce 1 MiB objects, configured origins, no redirects and a 10-second deadline.

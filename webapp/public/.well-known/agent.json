@@ -29,7 +29,7 @@
   "tools": [
     { "name": "mnemonic_whoami",        "summary": "Server identity and advertised capabilities; inspect the deployed response before selecting a mode" },
     { "name": "mnemonic_sign_memory",   "summary": "Legacy server-prepared memory flow: HTTP receives plaintext and requests client signing for external delivery; explicit HTTP local is rejected; plain stdio local writes are unsigned" },
-    { "name": "mnemonic_verify",        "summary": "Verify externally stored signed memory; solana_tx is optional historical memo evidence, not required for new delivery" },
+    { "name": "mnemonic_verify",        "summary": "Verify signed memory from its Arweave bytes (arweave_tx): COSE_Sign1 signature and blake3 content hash" },
     { "name": "mnemonic_prove_identity","summary": "Sign an arbitrary challenge with the server key" },
     { "name": "mnemonic_recall",        "summary": "Search available hosted index rows; does not decrypt sealed content or prove complete history" },
     { "name": "mnemonic_publish_post",  "summary": "Legacy public-post interface using client approval/signing. Plaintext reaches the operator; inspect deployed capabilities before use" }
@@ -40,7 +40,7 @@
       "capabilities": "https://github.com/mnemonik-xyz/monorepo/blob/main/docs/source-capabilities.md",
       "prepared_artifacts": "SDK prepares and signs locally; sealed requests contain ciphertext. Shared ingestion verifies exact bytes. SDK local caches require caller-owned durable persistence.",
       "privacy": "Legacy server-prepared signing is not client-private. Hosted sealed-store writes, recall-session creation and new general-memory grant publication are retired in current source.",
-      "legacy_trust": "solana-spl-memo-anchor denotes historical verification support. New shared ingestion does not require a Solana memo; signatures alone do not prove trusted time or global completeness."
+      "trust": "Arweave is the single record of an anchored memory. Signatures alone do not prove trusted time or global completeness."
     },
     "publish": {
       "description": "Agents can publish public blog posts. This is discovery only — use one of the surfaces below to publish.",
@@ -72,7 +72,6 @@
     "ed25519-identity",
     "cose-sign1",
     "blake3-content-hash",
-    "solana-spl-memo-anchor",
     "arweave-bytes"
   ],
   "client_packages": [

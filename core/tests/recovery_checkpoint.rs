@@ -86,40 +86,22 @@ fn unknown_signed_kind_and_forged_producer_are_explicit() {
     );
 }
 #[tokio::test]
-async fn failed_sources_differ_from_empty_and_preserve_other_source_items() {
+async fn failed_sources_differ_from_empty() {
     use httpmock::prelude::*;
-    use mnemonic_core::{
-        arweave::graphql::GraphQlClient, restore::enumerate_anchored, solana::SolanaClient,
-    };
+    use mnemonic_core::{arweave::graphql::GraphQlClient, restore::enumerate_anchored};
     let server = MockServer::start();
-    server.mock(|when, then| {
-        when.method(POST).path("/rpc");
-        then.status(503);
-    });
     let index=server.mock(|when,then|{when.method(POST).path("/graphql");then.status(200).json_body(serde_json::json!({"data":{"transactions":{"edges":[{"cursor":"cursor1","node":{"id":"A".repeat(43),"tags":[],"block":null}}],"pageInfo":{"hasNextPage":false}}}}));});
-    let report = enumerate_anchored(
-        &GraphQlClient::new(&server.url("/graphql")),
-        &SolanaClient::new(&server.url("/rpc")),
-        "owner",
-        &[],
-    )
-    .await;
-    assert_eq!(report.items.len(), 1);
-    assert_eq!(report.sources[0].status, "failed");
-    assert_eq!(report.sources[1].status, "exhausted");
+    let report = enumerate_anchored(&GraphQlClient::new(&server.url("/graphql")), &[]).await;
+    assert_eq!(report.items, vec!["A".repeat(43)]);
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(report.sources[0].source, "graphql");
+    assert_eq!(report.sources[0].status, "exhausted");
     index.assert();
-    let report = enumerate_anchored(
-        &GraphQlClient::new(&server.url("/fail")),
-        &SolanaClient::new(&server.url("/rpc")),
-        "owner",
-        &[],
-    )
-    .await;
+    let report = enumerate_anchored(&GraphQlClient::new(&server.url("/fail")), &[]).await;
     assert!(report.items.is_empty());
-    assert!(report
-        .sources
-        .iter()
-        .all(|s| s.status == "failed" && s.error.is_some()));
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(report.sources[0].status, "failed");
+    assert!(report.sources[0].error.is_some());
 }
 
 #[test]

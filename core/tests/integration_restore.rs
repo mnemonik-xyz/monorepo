@@ -31,7 +31,6 @@ fn restorable(
     content: &str,
     visibility: Option<&str>,
     arweave_tx: &str,
-    solana_tx: Option<&str>,
 ) -> RestorableItem {
     let c = compressor();
     let embedding: Vec<f32> = (0..DIM).map(|i| i as f32 * 0.1).collect();
@@ -60,7 +59,6 @@ fn restorable(
     let row = rebuild_row_self_describing(&signed.cose_bytes).expect("rebuild");
     RestorableItem {
         arweave_tx: arweave_tx.to_string(),
-        solana_tx: solana_tx.map(str::to_string),
         row,
     }
 }
@@ -75,16 +73,9 @@ fn restores_only_rows_authored_by_the_requesting_identity() {
     let mine = identity::pubkey_base58(&me);
 
     let items = vec![
-        restorable(&me, "a1", "mine one", Some("public"), "ar-1", Some("sol-1")),
-        restorable(
-            &someone_else,
-            "b1",
-            "not mine",
-            Some("public"),
-            "ar-2",
-            None,
-        ),
-        restorable(&me, "a2", "mine two", Some("private"), "ar-3", None),
+        restorable(&me, "a1", "mine one", Some("public"), "ar-1"),
+        restorable(&someone_else, "b1", "not mine", Some("public"), "ar-2"),
+        restorable(&me, "a2", "mine two", Some("private"), "ar-3"),
     ];
 
     let store = SqliteStore::in_memory().unwrap();
@@ -107,7 +98,6 @@ fn restoring_twice_converges_instead_of_duplicating() {
         "written once",
         Some("public"),
         "ar-1",
-        Some("sol-1"),
     )];
 
     let store = SqliteStore::in_memory().unwrap();
@@ -130,8 +120,8 @@ fn the_signed_visibility_label_survives_on_the_artifact() {
     // independently of what the storage layer then decides to store (see the
     // D-8 test below).
     let kp = Keypair::new();
-    let pubv = restorable(&kp, "pub", "public memory", Some("public"), "ar-1", None);
-    let privv = restorable(&kp, "priv", "private memory", Some("private"), "ar-2", None);
+    let pubv = restorable(&kp, "pub", "public memory", Some("public"), "ar-1");
+    let privv = restorable(&kp, "priv", "private memory", Some("private"), "ar-2");
     assert_eq!(pubv.row.visibility.as_deref(), Some("public"));
     assert_eq!(privv.row.visibility.as_deref(), Some("private"));
     assert_eq!(pubv.row.anchor.as_deref(), Some("arweave"));
@@ -152,7 +142,6 @@ fn restore_cannot_resurrect_a_private_label_for_plaintext_on_arweave() {
         "author asked for private",
         Some("private"),
         "ar-real",
-        None,
     )];
 
     let store = SqliteStore::in_memory().unwrap();
@@ -182,7 +171,6 @@ fn an_unlabelled_row_defaults_to_private_when_d8_does_not_apply() {
         "no label",
         None,
         "local:synthetic",
-        None,
     )];
 
     let store = SqliteStore::in_memory().unwrap();
@@ -197,14 +185,7 @@ fn an_unlabelled_row_defaults_to_private_when_d8_does_not_apply() {
 fn an_unknown_visibility_label_is_reported_not_guessed() {
     let kp = Keypair::new();
     let owner = identity::pubkey_base58(&kp);
-    let items = vec![restorable(
-        &kp,
-        "weird",
-        "odd label",
-        Some("semi"),
-        "ar-1",
-        None,
-    )];
+    let items = vec![restorable(&kp, "weird", "odd label", Some("semi"), "ar-1")];
 
     let store = SqliteStore::in_memory().unwrap();
     let report = apply_restore(&store, &owner, &items);
@@ -220,7 +201,7 @@ fn an_unknown_visibility_label_is_reported_not_guessed() {
 }
 
 #[test]
-fn restored_rows_carry_the_anchor_mode_and_their_chain_ids() {
+fn restored_rows_carry_the_anchor_mode_and_their_arweave_id() {
     let kp = Keypair::new();
     let owner = identity::pubkey_base58(&kp);
     let items = vec![restorable(
@@ -229,19 +210,18 @@ fn restored_rows_carry_the_anchor_mode_and_their_chain_ids() {
         "on chain",
         Some("public"),
         "ar-xyz",
-        Some("sol-abc"),
     )];
 
     let store = SqliteStore::in_memory().unwrap();
     assert_eq!(apply_restore(&store, &owner, &items).restored, 1);
 
     let row = store
-        .find_by_tx("sol-abc", &owner)
+        .find_by_tx("ar-xyz", &owner)
         .unwrap()
-        .expect("row is findable by its memo tx");
+        .expect("row is findable by its Arweave id");
     assert_eq!(row.arweave_tx, "ar-xyz");
     assert_eq!(
-        store.find_write_mode_by_tx("sol-abc", &owner).unwrap(),
+        store.find_write_mode_by_tx("ar-xyz", &owner).unwrap(),
         Some(WriteMode::Anchored),
         "a restored row is anchored, not local"
     );
@@ -310,7 +290,6 @@ fn export_serializes_to_one_json_object_per_line() {
         "round trip",
         Some("public"),
         "ar-1",
-        Some("sol-1"),
     )];
     let store = SqliteStore::in_memory().unwrap();
     apply_restore(&store, &owner, &items);

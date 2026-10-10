@@ -52,7 +52,6 @@ const ARTIFACTS: Artifact[] = [
     content_hash:
       "b1946ac92492d2347c6235b4d2611184d3f0a3f9e1c6a2e7c0d4b8a1f2e3d4c5",
     tags: ["release"],
-    solana_tx: "5Nf5h5x2qQk8wq7Yk3J9p1d2c3b4a5n6m7l8k9j0i1h2g3f4e5d6c7b8a9",
     arweave_tx: "kTQ7t1f9c2X3v4B5n6M7l8K9j0I1h2G3f4E5d6C7b8A",
     created_at: "2026-06-26T00:00:00.000Z",
     write_mode: "anchored",
@@ -63,7 +62,6 @@ const ARTIFACTS: Artifact[] = [
     content_hash:
       "3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b",
     tags: [],
-    solana_tx: "local:offline",
     arweave_tx: "local:offline",
     created_at: "2026-06-25T00:00:00.000Z",
     write_mode: "local",
@@ -277,13 +275,16 @@ describe("Analytics page", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/Local-only memory/i)).toBeNull();
 
-    const solanaLink = screen
-      .getAllByRole("link")
-      .find((a) =>
-        a.getAttribute("href")?.startsWith("https://explorer.solana.com/tx/"),
-      );
-    expect(solanaLink).toBeDefined();
-    expect(solanaLink).toHaveAttribute("target", "_blank");
+    const links = screen.getAllByRole("link");
+    const arweaveLink = links.find((a) =>
+      a.getAttribute("href")?.startsWith("https://arweave.net/"),
+    );
+    expect(arweaveLink).toBeDefined();
+    expect(arweaveLink).toHaveAttribute("target", "_blank");
+    // Arweave is the single record: no Solana explorer link is rendered.
+    expect(
+      links.some((a) => a.getAttribute("href")?.includes("solana.com")),
+    ).toBe(false);
   });
 
   it("chart_has_img_role_and_aria_label", async () => {

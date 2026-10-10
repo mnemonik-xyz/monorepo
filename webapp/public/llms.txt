@@ -1,8 +1,7 @@
 # Mnemonic Protocol
 
 > Verifiable, persistent memory for AI agents — signed COSE_Sign1 envelopes,
-> anchored on Solana (SPL Memo) and optionally Arweave, exposed over the
-> Model Context Protocol (MCP). Open-source under Apache-2.0.
+> optionally stored on Arweave, exposed over the Model Context Protocol (MCP). Open-source under Apache-2.0.
 
 ## What it does
 
@@ -10,12 +9,12 @@ Mnemonic gives AI agents a persistent memory that any third party can verify:
 
 - **Sign** — every memory is canonically CBOR-encoded, blake3-hashed, and
   signed with the agent's Ed25519 identity in a COSE_Sign1 envelope.
-- **Anchor** — the hash is committed on-chain via Solana SPL Memo (sub-cent,
-  sub-second) and the bytes are stored permanently on Arweave.
+- **Anchor** — the signed bytes are stored permanently on Arweave. Arweave is
+  the single record of an anchored memory.
 - **Recall** — TurboQuant-compressed embeddings allow cosine search by
   semantic meaning, not just keyword.
-- **Verify** — anyone with the `solana_tx` and `arweave_tx` can independently
-  re-fetch, re-hash, re-verify the signature — without contacting Mnemonic.
+- **Verify** — anyone with the `arweave_tx` can independently re-fetch,
+  re-hash and re-verify the signature — without contacting Mnemonic.
 
 ## Use it from an AI client
 

@@ -261,7 +261,7 @@ export class MnemonicClient {
    * @returns The `attestation_id`, server-issued `signed_at`, the terminal
    *          `status` (`stored` / `signed` / `pending` / `anchored`), the
    *          applied `writeMode` when known, and any optional
-   *          `arweave_tx` / `solana_tx` / `content_hash` echoes.
+   *          `arweave_tx` / `content_hash` echoes.
    * @throws `UserError` if `content` is empty, `mode` is invalid, or a
    *         signature is needed but no keypair is available (call
    *         {@link setKeypair} or {@link setKeypairProvider} first). Without
@@ -424,9 +424,6 @@ export class MnemonicClient {
       ...(typeof cbBody.arweave_tx === "string"
         ? { arweaveTx: cbBody.arweave_tx }
         : {}),
-      ...(typeof cbBody.solana_tx === "string"
-        ? { solanaTx: cbBody.solana_tx }
-        : {}),
     };
   }
 
@@ -473,7 +470,7 @@ export class MnemonicClient {
    * @param attestationId - Non-empty attestation identifier returned by a
    *                        prior `signMemory` call.
    * @returns A discriminated union: `verified` (with `signer` + optional
-   *          `arweave_tx` / `solana_tx`), `tampered` (with `signer` +
+   *          `arweave_tx`), `tampered` (with `signer` +
    *          `reason`), or `not_found`.
    * @throws `UserError` if `attestationId` is empty / non-string.
    * @throws `AuthError` on 401/403, `ServerError` on 5xx / network failure.
@@ -493,7 +490,6 @@ export class MnemonicClient {
         signer: typeof raw.signer === "string" ? raw.signer : "",
       };
       if (typeof raw.arweave_tx === "string") out.arweaveTx = raw.arweave_tx;
-      if (typeof raw.solana_tx === "string") out.solanaTx = raw.solana_tx;
       return out;
     }
     if (status === "tampered") {
@@ -1217,7 +1213,9 @@ function storedRowResult(
     open.status === "signed" ||
     open.status === "stored"
       ? open.status
-      : typeof open.solana_tx === "string"
+      : typeof open.arweave_tx === "string" &&
+        open.arweave_tx.length > 0 &&
+        !open.arweave_tx.startsWith("local:")
       ? "anchored"
       : "stored";
   return {
@@ -1231,7 +1229,6 @@ function storedRowResult(
     ...(typeof open.arweave_tx === "string"
       ? { arweaveTx: open.arweave_tx }
       : {}),
-    ...(typeof open.solana_tx === "string" ? { solanaTx: open.solana_tx } : {}),
   };
 }
 

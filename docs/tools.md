@@ -270,7 +270,6 @@ operator's `default_mode` and the deferred path.
   "content_hash": "<blake3 hex>",
   "hash_algorithm": "blake3",
   "encoding": "cbor+cose",
-  "solana_tx": "<sig>",     // "local:..." in local mode
   "arweave_tx": "<tx id>",  // "local:..." in local mode
   "signer": "<base58>",     // the owner of the memory
   "signature": "cose_sign1", // "none" for a local hash-only row
@@ -315,8 +314,9 @@ Complete it one of two ways:
    `mnemonic_check_pending`. The SDK's `MnemonicClient.signMemory()` does this
    for you.
 
-A pending signature does not establish external delivery. New deliveries do
-not require Solana memos. Financial replay metadata may exist before delivery.
+A pending signature does not establish external delivery. Arweave is the
+single record of an anchored memory. Financial replay metadata may exist before
+delivery.
 Bundles expire after 300 seconds.
 
 ---
@@ -331,16 +331,14 @@ Resolves a deferred-sign `correlation_id`. Poll after `awaiting_signature`.
 
 ```jsonc
 { "status": "signed", "attestation_id": "...", "content_hash": "...",
-  "solana_tx": "...", "arweave_tx": "...", "anchoring_network": "mainnet",
-  "solana_explorer_url": "...", "arweave_url": "..." }
+  "arweave_tx": "...", "arweave_url": "..." }
 
 { "status": "awaiting_signature" }   // user has not approved yet — keep polling
 { "status": "not_found" }            // never existed, or the 300s window expired
 ```
 
-`solana_explorer_url` links to the Solana explorer. On devnet it adds `?cluster=devnet`.
 `arweave_url` is `<gateway>/<id>` on the primary read gateway (`ARWEAVE_GATEWAY_URL`).
-`anchoring_network` names the Solana network only. Every upload goes to Arweave mainnet.
+It is empty for a synthetic `local:` id. Every upload goes to Arweave mainnet.
 
 ---
 
@@ -399,24 +397,24 @@ Do not confuse ciphertext delivery with a promise that every client path seals.
 
 Recompute the hash and check it against what was signed and anchored.
 
-**Input:** `solana_tx` and/or `arweave_tx` (both optional strings — supply at
-least one). Verification is version-aware; legacy SHA-256/JSON artifacts still
-verify through a fallback path.
+**Input:** `arweave_tx` (string, required). For an anchored row, the server
+fetches the original bytes from Arweave and checks the COSE_Sign1 signature
+and the blake3 content hash. For a local row, the server rebuilds the content
+hash from the stored columns. A legacy SHA-256/JSON artifact has no signature,
+so the result is `hash_computed`.
 
 **Returns** a `status` of `verified`, `tampered`, `not_found`,
-`anchor_not_found`, or `arweave_not_found`, alongside `content_hash`,
-`solana_tx`, and `arweave_tx`. For a row that the caller owns, the result
+`hash_computed`, or `arweave_not_found`, alongside `content_hash` and
+`arweave_tx`. For a row that the caller owns, the result
 also has `plaintext_on_arweave` (`true` when the content is plain text on
 Arweave). A caller who does not own the row gets `not_found`, with no content.
 
 **Sealed-aware.** For a sealed memory (`sealed: true`), the `content_hash`
 is the hash of the `SEALED_V1` outer ciphertext. The verify result confirms
-the COSE_Sign1 signature over the ciphertext and the on-chain hash match.
-It does not decrypt the content.
+the COSE_Sign1 signature over the ciphertext. It does not decrypt the content.
 
-Legacy artifacts with a Solana transaction additionally verify its memo.
-New delivery verification checks the original signed bytes and expected author
-without requiring a Solana memo or operator receipt row.
+Arweave is the single record of an anchored memory. Verification checks the
+original signed bytes and needs no operator receipt row.
 
 You do not need this server to verify a memory. See
 [Verifying without Mnemonic](./QUICKSTART.md#5-verify-independently) for the
@@ -570,7 +568,7 @@ switch. The write mode is a per-request user choice on `mnemonic_sign_memory`.
 | | `local` | `anchored` |
 |---|---|---|
 | Storage | Agent-owned store (stdio/client) | External original signed bytes; hosted metadata receipts |
-| Tx ids | Synthetic `local:...` for legacy stdio rows | External locator; Solana IDs only on legacy artifacts |
+| Tx ids | Synthetic `local:...` for legacy stdio rows | Arweave data item id (`arweave_tx`) |
 | Cost | Free | Priced by the operator (`anchored_cost` from `whoami`) |
 | Signed by | Plain legacy rows unsigned; sealed SDK/A2A local artifacts signed | Author identity |
 | Verifiable by third parties | Depends on the local artifact format | Signature and content hash; bounded availability observation |

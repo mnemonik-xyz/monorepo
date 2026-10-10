@@ -222,7 +222,6 @@ No general-purpose storage trait implies support for every provider or artifact 
 | Client local storage/index | Retain original artifacts and rebuild local indexes | Default SDK caches are session-only |
 | Arweave (ArDrive Turbo upload) | Ingestion upload/read-back from any Arweave gateway; discovery through Arweave GraphQL | Availability and index lag are external dependencies |
 | Configured HTTP object origin | A2A exact-byte migration and destination restore | No deployed service, retention SLA or discovery adapter supplied |
-| Historical Solana memo source | Legacy verification/discovery | No mandatory memo on new shared ingestion |
 | IPFS/Filecoin/other providers | Design examples only | No supported adapter claimed |
 
 See [storage portability](./storage-portability.md) for exact capabilities and routing restrictions.
@@ -254,10 +253,9 @@ Larger items need Turbo credits in the operator wallet. Without credits, Turbo r
 An upload counts as permanent only when an Arweave gateway reports it in a block (GraphQL `block.height`).
 Reads use any Arweave gateway, with failover across configured gateways.
 Receipt persistence is reported separately from external delivery.
-New writes do not require a Solana memo.
+Arweave is the single record of each anchored memory. The server writes no memory record to Solana.
 
 A signature or successful storage fetch does not establish a trusted timestamp.
-Historical Solana evidence can be checked separately when present.
 A failed delivery does not imply no payment occurred: payment acceptance and delivery are independent states.
 See [payment retries](./artifact-payment-retries.md).
 
@@ -698,7 +696,7 @@ Source support is not a claim about published packages or a hosted deployment.
 - Independently authenticated checkpoints and encrypted client backups.
 - Bounded A2A discovery, verified import, recipient opening, completed streams and external-parent continuation.
 - A2A exact-byte storage migration through declared Arweave-fetch and configured HTTP-object adapters.
-- Historical Solana verification/discovery, legacy public indexing and server-prepared signing with explicit privacy boundaries.
+- Legacy public indexing and server-prepared signing with explicit privacy boundaries.
 
 MCP transport and tool exposure depend on the build and deployment.
 Use the [tool reference](./tools.md) and deployed capability response; do not infer capabilities from a fixed tool count in a paper.
@@ -756,7 +754,7 @@ The real corpus is small. A standard benchmark set (MTEB or BEIR) is needed for 
 
 ### 13.3 External Delivery Cost and Latency
 
-Current prepared delivery uploads original bytes and verifies read-back; it does not add a mandatory Solana memo.
+Current prepared delivery uploads original bytes to Arweave and verifies read-back.
 Production delivery latency and end-to-end settled cost are not established by the local drills.
 Prices and quota depend on the configured operator and accepted quote.
 Historical pricing formulas are not a current user-facing quote or a promise about every payment rail.

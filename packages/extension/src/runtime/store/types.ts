@@ -43,7 +43,10 @@ export interface AttestationRow {
   signer_pubkey: string;
   /** Base58 owner / tenant pubkey — `search` filters on this. */
   owner_pubkey: string;
-  /** Solana SPL Memo tx id, or `local:<truncated_hash>` in local-only mode. */
+  /**
+   * Legacy local-store field. The server no longer returns it, and new rows
+   * keep an empty string or a `local:<truncated_hash>` id. Not displayed.
+   */
   solana_tx: string;
   /** Arweave bundle tx id, or `local:<truncated_hash>` in local-only mode. */
   arweave_tx: string;

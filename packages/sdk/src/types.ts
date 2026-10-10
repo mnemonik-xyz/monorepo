@@ -77,7 +77,7 @@ export interface MnemonicClientConfig {
  *   no on-chain anchor, no charge and no client signature. The call works
  *   from the public key alone.
  * - `"participate"`: the client signs the canonical bundle (COSE_Sign1)
- *   and the server anchors it on Arweave and Solana. This needs the
+ *   and the server anchors it on Arweave. This needs the
  *   private key.
  */
 /**
@@ -119,7 +119,7 @@ export interface SignMemoryResult {
   /**
    * `stored`: the server stored the memory without a client signature (a
    * `local` write). `signed` / `pending` / `anchored`: the client signed
-   * the bundle. `anchored` means that the on-chain anchor is confirmed.
+   * the bundle. `anchored` means that the Arweave anchor is confirmed.
    */
   status: "stored" | "signed" | "pending" | "anchored";
   /** Write mode that the server applied, when the server reports it. */
@@ -127,7 +127,6 @@ export interface SignMemoryResult {
   /** Server content_hash echo (hex blake3 of canonical CBOR). */
   contentHash?: string;
   arweaveTx?: string;
-  solanaTx?: string;
 }
 
 /**
@@ -139,7 +138,6 @@ export type VerifyResult =
       status: "verified";
       signer: string;
       arweaveTx?: string;
-      solanaTx?: string;
     }
   | { status: "tampered"; signer: string; reason: string }
   | { status: "not_found" };
@@ -188,7 +186,7 @@ export interface ProveResult {
 /**
  * Write mode for `sealMemory`.
  *
- * - `"anchor"`: store on-chain (Arweave / Solana anchor); posts to
+ * - `"anchor"`: store on Arweave; posts to
  *   `/api/anchor-sealed`. Requires an active session.
  * - `"store"`: store off-chain in the hosted service; posts to
  *   `/api/store-sealed`. Cheaper, still E2E encrypted.

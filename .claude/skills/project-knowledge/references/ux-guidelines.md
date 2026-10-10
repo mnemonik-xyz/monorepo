@@ -28,7 +28,7 @@ Applies to `webapp/` only. `core/` and `mcp/` have no UI.
 
 **Example phrases by context:**
 
-- ✅ Good: "Memory attested on Arweave. Solana anchor: `5xQ3...`"
+- ✅ Good: "Memory attested on Arweave: `kL9m...`"
 - ✅ Good: "Recall returned 0 results."
 - ❌ Avoid: "Great news! Your memory has been saved!"
 - ❌ Avoid: "Oops, something went wrong."
@@ -46,7 +46,7 @@ Applies to `webapp/` only. `core/` and `mcp/` have no UI.
 - **Local mode** — SQLite-only, no blockchain. Use "local mode", not "offline" or "free mode".
   *UI example: "Running in local mode — attestations are not on-chain."*
 
-- **Full mode** — Arweave + Solana + SQLite. Use "full mode", not "on-chain mode".
+- **Full mode** — Arweave + SQLite. Use "full mode", not "on-chain mode".
 
 - **Agent identity** — the Ed25519 keypair that signs attestations. Use "agent identity" or "keypair", not "account" or "wallet".
 
@@ -75,7 +75,7 @@ Applies to `webapp/` only. `core/` and `mcp/` have no UI.
 **Format:** Confirmation + key identifiers. No exclamation marks.
 
 **Examples:**
-- "Memory attested · solana_tx: `5xQ3...` · arweave_tx: `kL9m...`"
+- "Memory attested · arweave_tx: `kL9m...`"
 - "Verification passed."
 - "Context exported."
 
@@ -120,7 +120,7 @@ Applies to `webapp/` only. `core/` and `mcp/` have no UI.
 The public pages (`/ledger`, `/analytics`, `/blog`, re-skinned Landing) use a "forensic archive of machine memory" treatment. Hard rules:
 
 - **System typography, no web fonts (Decision 1).** CSP is `font-src 'self' data:` — Google Fonts would be blocked AND force a coupled nginx-header change. Use characterful system faces (Charter / Iowan serif display + system mono), never an external font. Same for scripts: nothing that breaks `script-src 'self'`.
-- **Receipt-card treatment.** Each Ledger artifact renders as a "receipt": content, copyable blake3 hash (mono), tags, a write_mode badge (`on-node` mint / `on-chain` Solana-purple), and Solana/Arweave explorer links. `local:` / unanchored tx render as plain text, never links. On-chain-anchored artifacts carry a "SEALED" stamp. Reuse the locked brand palette above (mint = verified/on-node, purple = anchored on-chain).
+- **Receipt-card treatment.** Each Ledger artifact renders as a "receipt": content, copyable blake3 hash (mono), tags, a write_mode badge (`on-node` mint / `on-chain` Solana-purple), and an Arweave gateway link. `local:` / unanchored tx render as plain text, never links. On-chain-anchored artifacts carry a "SEALED" stamp. Reuse the locked brand palette above (mint = verified/on-node, purple = anchored on-chain).
 - **Custom SVG chart, reduced-motion aware.** The Analytics timeline is a bespoke zero-dependency SVG (no recharts/d3, Decision 3). The line-draw load animation MUST be gated behind `prefers-reduced-motion`.
 
 ### "Sample · not live" labeling rule
@@ -131,4 +131,4 @@ When a public page is showing graceful-fallback sample data (the client returned
 
 ## Accessibility
 
-Follow standard WCAG 2.1 AA guidelines. Ensure all hash/tx displays have `aria-label` with a human-readable description (e.g., `aria-label="Solana transaction ID"`).
+Follow standard WCAG 2.1 AA guidelines. Ensure all hash/tx displays have `aria-label` with a human-readable description (e.g., `aria-label="Arweave transaction ID"`).

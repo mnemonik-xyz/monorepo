@@ -112,7 +112,7 @@ Not a protocol. A multi-platform agent runtime with a pluggable architecture: MC
 Six integration surfaces, ordered by effort, in the proposal:
 
 1. **MCP server registration** (hours) — pure additive `config.yaml` line.
-2. **First-class Memory Provider** (1–2 wks, upstream PR) — the strategic move; Mnemonik becomes the 8th provider, the only one with COSE_Sign1 + Solana anchor + Arweave durability.
+2. **First-class Memory Provider** (1–2 wks, upstream PR) — the strategic move; Mnemonik becomes the 8th provider, the only one with COSE_Sign1 signatures + Arweave durability.
 3. **`hermes-mnemonik` plugin** (1 wk) — CLI re-exports + lifecycle hooks (`on_message_complete` auto-attest, `on_session_start` recall).
 4. **RL trajectory attestation** (1–2 wks) — ShareGPT export with Solana tx + Arweave tx + producing-agent DID per turn; the headline collab — "verifiable RL datasets" as a dataset-provenance pitch for Nous's open-training ethos.
 5. **API-server middleware** (2–3 days) — `X-Mnemonic-Attest` header on the OpenAI-compatible endpoint; every downstream client (Open WebUI, LibreChat, NextChat, ChatBox) inherits attestation transparently.
@@ -150,7 +150,7 @@ This preserves the one-way dependency graph in `core/`, keeps the schema count b
 
 These do not change the off-chain envelope and so do not belong in this doc beyond pointer:
 
-- **Solana** — current default anchor (SPL Memo). See `core/src/solana/`.
+- **Arweave** — the current and only memory anchor (ArDrive Turbo upload). Solana is used only for x402 USDC payment verification.
 - **Arweave** — current default durable storage. See `core/src/arweave/`.
 - **Chain-pluggable anchor** (Ethereum / Bitcoin / ICP / Arweave-only / none) — Phase 3 of `mnemonic-cli`. The narrowed subset "Phase 3α" (anchor-only, off-chain envelope alg unchanged) is upgraded to **prerequisite or co-requisite of ERC-8004 V1** — see `work/a2a-bridge/backlog.md` and the cross-link in `work/mnemonic-cli/backlog.md` "TOP PRIORITY 2".
 - **ERC-8004 on-chain agent identity** — see the dedicated section above. No longer foreclosed.

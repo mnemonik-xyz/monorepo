@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS attestations (
     content TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     tags TEXT NOT NULL DEFAULT '[]',
+    -- solana_tx is legacy and unused. New rows store an empty string. The
+    -- column stays so existing databases need no table rewrite.
     solana_tx TEXT NOT NULL,
     arweave_tx TEXT NOT NULL,
     signer_pubkey TEXT NOT NULL,
@@ -110,7 +112,7 @@ CREATE TABLE IF NOT EXISTS a2a_anchor_readers (
 /// content is encrypted and stored in `sealed_blob`, not in the `content`
 /// column that search results carry.
 const SEARCH_SQL_ALL: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
-            a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
+            a.arweave_tx, a.created_at, a.write_mode,
             a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, ''),
             a.plaintext_on_arweave
      FROM attestations a
@@ -124,7 +126,7 @@ const SEARCH_SQL_ALL: &str = "SELECT a.attestation_id, a.content, a.content_hash
 /// interpolated as text. Sealed rows are excluded (same rationale as
 /// `SEARCH_SQL_ALL`).
 const SEARCH_SQL_FILTERED: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
-            a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
+            a.arweave_tx, a.created_at, a.write_mode,
             a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, ''),
             a.plaintext_on_arweave
      FROM attestations a
@@ -141,7 +143,7 @@ const SEARCH_SQL_FILTERED: &str = "SELECT a.attestation_id, a.content, a.content
 /// they also stay out of the pool (privacy-by-default). Sealed rows are
 /// excluded (same rationale as `SEARCH_SQL_ALL`).
 const SEARCH_SQL_PUBLIC_POOL: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
-            a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
+            a.arweave_tx, a.created_at, a.write_mode,
             a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, ''),
             a.plaintext_on_arweave
      FROM attestations a
@@ -155,7 +157,7 @@ const SEARCH_SQL_PUBLIC_POOL: &str = "SELECT a.attestation_id, a.content, a.cont
 /// endpoint so it reads only the seeded `protocol-knowledge` corpus, never
 /// other rows that the operator key owns. Sealed rows are excluded.
 const SEARCH_SQL_OWNER_TAGGED: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
-            a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
+            a.arweave_tx, a.created_at, a.write_mode,
             a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, ''),
             a.plaintext_on_arweave
      FROM attestations a
@@ -169,7 +171,7 @@ const SEARCH_SQL_OWNER_TAGGED: &str = "SELECT a.attestation_id, a.content, a.con
 /// `Visibility::Public`) are returned; private and legacy NULL rows are not.
 const LIST_PUBLIC_ARTIFACTS_SQL: &str =
     "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
-            a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
+            a.arweave_tx, a.created_at, a.write_mode,
             a.plaintext_on_arweave
      FROM attestations a
      WHERE a.visibility = ?1
@@ -179,7 +181,7 @@ const LIST_PUBLIC_ARTIFACTS_SQL: &str =
 /// Same as `LIST_PUBLIC_ARTIFACTS_SQL`, restricted to one `write_mode`.
 const LIST_PUBLIC_ARTIFACTS_BY_MODE_SQL: &str =
     "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
-            a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
+            a.arweave_tx, a.created_at, a.write_mode,
             a.plaintext_on_arweave
      FROM attestations a
      WHERE a.write_mode = ?1 AND a.visibility = ?2
@@ -251,7 +253,6 @@ pub struct PublicArtifact {
     pub content: String,
     pub content_hash: String,
     pub tags: Vec<String>,
-    pub solana_tx: String,
     pub arweave_tx: String,
     pub created_at: String,
     pub write_mode: WriteMode,
@@ -273,7 +274,6 @@ pub struct ExportRow {
     pub content: String,
     pub content_hash: String,
     pub tags: Vec<String>,
-    pub solana_tx: String,
     pub arweave_tx: String,
     pub signer_pubkey: String,
     pub owner_pubkey: String,
@@ -406,7 +406,7 @@ fn migrate_owner_pubkey_columns(conn: &Connection) -> anyhow::Result<()> {
 /// returns `awaiting_signature` + correlation_id) and `/api/sign-callback`
 /// (webapp posts the COSE envelope back). Storing it on the persisted row
 /// lets `mnemonic_check_pending(correlation_id)` resolve the final
-/// `solana_tx` + `arweave_tx` after the user approves in the browser.
+/// `arweave_tx` after the user approves in the browser.
 ///
 /// Partial index `WHERE correlation_id IS NOT NULL` keeps lookups O(log n)
 /// without bloating against legacy rows that pre-date the column. SQLite
@@ -866,7 +866,6 @@ fn migrate_sealed_columns(conn: &Connection) -> anyhow::Result<()> {
 pub struct SealedRow {
     pub attestation_id: String,
     pub content_hash: String,
-    pub solana_tx: String,
     pub arweave_tx: String,
     pub signer_pubkey: String,
     pub owner_pubkey: String,
@@ -1006,9 +1005,8 @@ impl SqliteStore {
     ///   how many memories it saved.
     /// - `saved_on_node`: total rows in `attestations` (everything the node
     ///   has persisted, including local-mode synthetic txs).
-    /// - `saved_onchain`: rows whose `solana_tx` is a real Solana signature
-    ///   (i.e. not the `local:<...>` synthetic prefix used in
-    ///   `STORAGE_MODE=local` and not empty).
+    /// - `saved_onchain`: rows that are not `local` and that have a real
+    ///   Arweave id (not empty and not the `local:<...>` synthetic prefix).
     ///
     /// All three are single indexed/scanned aggregates over `attestations`;
     /// safe to call on the request path but the caller may still cache to
@@ -1025,7 +1023,8 @@ impl SqliteStore {
                 .query_row("SELECT COUNT(*) FROM attestations", [], |row| row.get(0))?;
         let saved_onchain: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM attestations
-             WHERE solana_tx <> '' AND solana_tx NOT LIKE 'local:%'",
+             WHERE write_mode <> 'local'
+               AND arweave_tx <> '' AND arweave_tx NOT LIKE 'local:%'",
             [],
             |row| row.get(0),
         )?;
@@ -1062,17 +1061,17 @@ impl SqliteStore {
     }
 
     /// Resolve a persisted attestation by the deferred-sign correlation_id.
-    /// Returns `(attestation_id, content_hash, solana_tx, arweave_tx,
-    /// signer_pubkey, created_at)` or `None`.
+    /// Returns `(attestation_id, content_hash, arweave_tx, signer_pubkey,
+    /// created_at)` or `None`.
     ///
     /// Bounded by the partial index `idx_attestations_correlation_id`.
     #[allow(clippy::type_complexity)]
     pub fn find_by_correlation_id(
         &self,
         correlation_id: &str,
-    ) -> anyhow::Result<Option<(String, String, String, String, String, String)>> {
+    ) -> anyhow::Result<Option<(String, String, String, String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT attestation_id, content_hash, solana_tx, arweave_tx,
+            "SELECT attestation_id, content_hash, arweave_tx,
                     signer_pubkey, created_at
              FROM attestations
              WHERE correlation_id = ?1 LIMIT 1",
@@ -1085,22 +1084,21 @@ impl SqliteStore {
                 row.get(2)?,
                 row.get(3)?,
                 row.get(4)?,
-                row.get(5)?,
             ))),
             None => Ok(None),
         }
     }
 
     /// The earliest `anchored` (anchored) row for `content_hash`, as
-    /// `(attestation_id, solana_tx, arweave_tx)`, or `None`. A row demoted
+    /// `(attestation_id, arweave_tx)`, or `None`. A row demoted
     /// to `local` after a failed delivery check does not count. The deferred
     /// sign-callback uses this to never anchor one artifact twice.
     pub fn find_anchored_by_content_hash(
         &self,
         content_hash: &str,
-    ) -> anyhow::Result<Option<(String, String, String)>> {
+    ) -> anyhow::Result<Option<(String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT attestation_id, solana_tx, arweave_tx
+            "SELECT attestation_id, arweave_tx
              FROM attestations
              -- `<> 'local'` rather than `= 'anchored'`: this is a REPLAY GUARD,
              -- so any already-anchored row must block a second anchor. Matching
@@ -1113,7 +1111,7 @@ impl SqliteStore {
         )?;
         let mut rows = stmt.query(params![content_hash])?;
         match rows.next()? {
-            Some(row) => Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?))),
+            Some(row) => Ok(Some((row.get(0)?, row.get(1)?))),
             None => Ok(None),
         }
     }
@@ -1128,7 +1126,7 @@ impl SqliteStore {
     /// the predicate is not optional.
     pub fn export_rows(&self, owner_pubkey: &str) -> anyhow::Result<Vec<ExportRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT attestation_id, content, content_hash, tags, solana_tx, arweave_tx,
+            "SELECT attestation_id, content, content_hash, tags, arweave_tx,
                     signer_pubkey, owner_pubkey, created_at, write_mode, visibility,
                     plaintext_on_arweave
              FROM attestations
@@ -1142,14 +1140,13 @@ impl SqliteStore {
                 content: row.get(1)?,
                 content_hash: row.get(2)?,
                 tags: serde_json::from_str(&tags_str).unwrap_or_default(),
-                solana_tx: row.get(4)?,
-                arweave_tx: row.get(5)?,
-                signer_pubkey: row.get(6)?,
-                owner_pubkey: row.get(7)?,
-                created_at: row.get(8)?,
-                write_mode: row.get::<_, WriteMode>(9)?,
-                visibility: row.get::<_, Visibility>(10)?,
-                plaintext_on_arweave: row.get(11)?,
+                arweave_tx: row.get(4)?,
+                signer_pubkey: row.get(5)?,
+                owner_pubkey: row.get(6)?,
+                created_at: row.get(7)?,
+                write_mode: row.get::<_, WriteMode>(8)?,
+                visibility: row.get::<_, Visibility>(9)?,
+                plaintext_on_arweave: row.get(10)?,
             })
         })?;
         let mut out = Vec::new();
@@ -1175,11 +1172,10 @@ impl SqliteStore {
                 content: row.get(1)?,
                 content_hash: row.get(2)?,
                 tags: serde_json::from_str(&tags_str).unwrap_or_default(),
-                solana_tx: row.get(4)?,
-                arweave_tx: row.get(5)?,
-                created_at: row.get(6)?,
-                write_mode: row.get::<_, WriteMode>(7)?,
-                plaintext_on_arweave: row.get(8)?,
+                arweave_tx: row.get(4)?,
+                created_at: row.get(5)?,
+                write_mode: row.get::<_, WriteMode>(6)?,
+                plaintext_on_arweave: row.get(7)?,
             })
         })?;
         let mut out = Vec::new();
@@ -1206,11 +1202,10 @@ impl SqliteStore {
                 content: row.get(1)?,
                 content_hash: row.get(2)?,
                 tags: serde_json::from_str(&tags_str).unwrap_or_default(),
-                solana_tx: row.get(4)?,
-                arweave_tx: row.get(5)?,
-                created_at: row.get(6)?,
-                write_mode: row.get::<_, WriteMode>(7)?,
-                plaintext_on_arweave: row.get(8)?,
+                arweave_tx: row.get(4)?,
+                created_at: row.get(5)?,
+                write_mode: row.get::<_, WriteMode>(6)?,
+                plaintext_on_arweave: row.get(7)?,
             })
         })?;
         let mut out = Vec::new();
@@ -1259,7 +1254,7 @@ impl SqliteStore {
             .conn
             .query_row(
                 "SELECT plaintext_on_arweave FROM attestations
-                 WHERE (solana_tx = ?1 OR arweave_tx = ?1) AND owner_pubkey = ?2
+                 WHERE arweave_tx = ?1 AND owner_pubkey = ?2
                  LIMIT 1",
                 params![tx_id, owner_pubkey],
                 |row| row.get::<_, bool>(0),
@@ -1492,7 +1487,7 @@ impl SqliteStore {
         limit: usize,
     ) -> anyhow::Result<Vec<SealedRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT attestation_id, content_hash, solana_tx, arweave_tx,
+            "SELECT attestation_id, content_hash, arweave_tx,
                     signer_pubkey, COALESCE(owner_pubkey, ''), created_at,
                     sealed_blob
              FROM attestations
@@ -1506,12 +1501,11 @@ impl SqliteStore {
             Ok(SealedRow {
                 attestation_id: row.get(0)?,
                 content_hash: row.get(1)?,
-                solana_tx: row.get(2)?,
-                arweave_tx: row.get(3)?,
-                signer_pubkey: row.get(4)?,
-                owner_pubkey: row.get(5)?,
-                created_at: row.get(6)?,
-                sealed_blob: row.get::<_, Option<Vec<u8>>>(7)?.unwrap_or_default(),
+                arweave_tx: row.get(2)?,
+                signer_pubkey: row.get(3)?,
+                owner_pubkey: row.get(4)?,
+                created_at: row.get(5)?,
+                sealed_blob: row.get::<_, Option<Vec<u8>>>(6)?.unwrap_or_default(),
             })
         })?;
         let mut out = Vec::new();
@@ -1628,7 +1622,7 @@ impl SqliteStore {
     pub fn is_sealed_by_tx(&self, tx_id: &str, owner_pubkey: &str) -> anyhow::Result<bool> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM attestations
-             WHERE (solana_tx = ?1 OR arweave_tx = ?1)
+             WHERE arweave_tx = ?1
                AND owner_pubkey = ?2
                AND privacy = 'sealed'",
             params![tx_id, owner_pubkey],
@@ -1752,30 +1746,35 @@ impl SqliteStore {
                 attestation_id: row.get(0)?,
                 content: row.get(1)?,
                 content_hash: row.get(2)?,
-                solana_tx: row.get(3)?,
-                arweave_tx: row.get(4)?,
-                signer_pubkey: row.get(5)?,
+                arweave_tx: row.get(3)?,
+                signer_pubkey: row.get(4)?,
             })
         };
         let mut out = Vec::new();
         if let Some(n) = limit {
-            let mut stmt = self.conn.prepare(
-                "SELECT attestation_id, content, content_hash, solana_tx, arweave_tx, signer_pubkey \
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT attestation_id, content, content_hash, arweave_tx, signer_pubkey \
                  FROM attestations \
                  WHERE context_id = ?1 \
                  ORDER BY created_at DESC \
                  LIMIT ?2",
-            ).context("preparing recall_by_context (limited) query")?;
+                )
+                .context("preparing recall_by_context (limited) query")?;
             for r in stmt.query_map(params![context_id, n as i64], mapper)? {
                 out.push(r?);
             }
         } else {
-            let mut stmt = self.conn.prepare(
-                "SELECT attestation_id, content, content_hash, solana_tx, arweave_tx, signer_pubkey \
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT attestation_id, content, content_hash, arweave_tx, signer_pubkey \
                  FROM attestations \
                  WHERE context_id = ?1 \
                  ORDER BY created_at DESC",
-            ).context("preparing recall_by_context (unlimited) query")?;
+                )
+                .context("preparing recall_by_context (unlimited) query")?;
             for r in stmt.query_map(params![context_id], mapper)? {
                 out.push(r?);
             }
@@ -1897,9 +1896,9 @@ impl AttestationStore for SqliteStore {
         // Response-timing symmetry is documented as accepted residual
         // (R2-F4) — no constant-time wrapper is layered here.
         let mut stmt = self.conn.prepare(
-            "SELECT attestation_id, content, content_hash, solana_tx, arweave_tx, signer_pubkey
+            "SELECT attestation_id, content, content_hash, arweave_tx, signer_pubkey
              FROM attestations
-             WHERE (solana_tx = ?1 OR arweave_tx = ?1) AND owner_pubkey = ?2
+             WHERE arweave_tx = ?1 AND owner_pubkey = ?2
              LIMIT 1",
         )?;
         let mut rows = stmt.query(params![tx_id, owner_pubkey])?;
@@ -1908,9 +1907,8 @@ impl AttestationStore for SqliteStore {
                 attestation_id: row.get(0)?,
                 content: row.get(1)?,
                 content_hash: row.get(2)?,
-                solana_tx: row.get(3)?,
-                arweave_tx: row.get(4)?,
-                signer_pubkey: row.get(5)?,
+                arweave_tx: row.get(3)?,
+                signer_pubkey: row.get(4)?,
             })),
             None => Ok(None),
         }
@@ -1927,27 +1925,26 @@ impl AttestationStore for SqliteStore {
         // from mistaking "cannot verify" for "hash mismatch".
         let mut stmt = self.conn.prepare(
             "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
-                    a.solana_tx, a.arweave_tx, a.signer_pubkey, a.created_at,
+                    a.arweave_tx, a.signer_pubkey, a.created_at,
                     ae.embedding
              FROM attestations a
              JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
-             WHERE (a.solana_tx = ?1 OR a.arweave_tx = ?1) AND a.owner_pubkey = ?2
+             WHERE a.arweave_tx = ?1 AND a.owner_pubkey = ?2
              LIMIT 1",
         )?;
         let mut rows = stmt.query(params![tx_id, owner_pubkey])?;
         match rows.next()? {
             Some(row) => {
                 let tags_str: String = row.get(3)?;
-                let emb_blob: Vec<u8> = row.get(8)?;
+                let emb_blob: Vec<u8> = row.get(7)?;
                 Ok(Some(ReconstructionInputs {
                     attestation_id: row.get(0)?,
                     content: row.get(1)?,
                     content_hash: row.get(2)?,
                     tags: serde_json::from_str(&tags_str).unwrap_or_default(),
-                    solana_tx: row.get(4)?,
-                    arweave_tx: row.get(5)?,
-                    signer_pubkey: row.get(6)?,
-                    created_at: row.get(7)?,
+                    arweave_tx: row.get(4)?,
+                    signer_pubkey: row.get(5)?,
+                    created_at: row.get(6)?,
                     embedding: bytes_to_floats(&emb_blob),
                 }))
             }
@@ -1967,7 +1964,7 @@ impl AttestationStore for SqliteStore {
         // routing path does not pay the cost of decoding `content` etc.
         let mut stmt = self.conn.prepare(
             "SELECT write_mode FROM attestations
-             WHERE (solana_tx = ?1 OR arweave_tx = ?1) AND owner_pubkey = ?2
+             WHERE arweave_tx = ?1 AND owner_pubkey = ?2
              LIMIT 1",
         )?;
         let mut rows = stmt.query(params![tx_id, owner_pubkey])?;
@@ -2126,7 +2123,7 @@ impl CosineScorer {
     }
 
     fn map_row(&self, row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchResult> {
-        let emb_blob: Vec<u8> = row.get(9)?;
+        let emb_blob: Vec<u8> = row.get(8)?;
         let emb = bytes_to_floats(&emb_blob);
         let e_norm = l2_norm(&emb);
         let score = if e_norm > 0.0 {
@@ -2144,15 +2141,14 @@ impl CosineScorer {
             content: row.get(1)?,
             content_hash: row.get(2)?,
             tags: serde_json::from_str(&tags_str).unwrap_or_default(),
-            solana_tx: row.get(4)?,
-            arweave_tx: row.get(5)?,
-            created_at: row.get(6)?,
-            write_mode: row.get::<_, WriteMode>(7)?,
-            visibility: row.get::<_, Visibility>(8)?,
+            arweave_tx: row.get(4)?,
+            created_at: row.get(5)?,
+            write_mode: row.get::<_, WriteMode>(6)?,
+            visibility: row.get::<_, Visibility>(7)?,
             relevance_score: score,
-            signer_pubkey: row.get(10)?,
-            owner_pubkey: row.get(11)?,
-            plaintext_on_arweave: row.get(12)?,
+            signer_pubkey: row.get(9)?,
+            owner_pubkey: row.get(10)?,
+            plaintext_on_arweave: row.get(11)?,
         })
     }
 }
@@ -2258,14 +2254,14 @@ mod tests {
             .expect("save_attestation via trait ref");
 
         let found = store
-            .find_by_tx("sol-contract", "contract-owner")
+            .find_by_tx("ar-contract", "contract-owner")
             .expect("find_by_tx via trait ref");
         assert!(found.is_some(), "trait ref: save + find_by_tx roundtrip");
         let row = found.unwrap();
         assert_eq!(row.attestation_id, "contract-att");
 
         let miss = store
-            .find_by_tx("sol-contract", "wrong-owner")
+            .find_by_tx("ar-contract", "wrong-owner")
             .expect("find_by_tx wrong-tenant via trait ref");
         assert!(
             miss.is_none(),
@@ -2311,7 +2307,7 @@ mod tests {
             )
             .unwrap();
 
-        let found = store_ref.find_by_tx("sol_tx_1", TEST_OWNER).unwrap();
+        let found = store_ref.find_by_tx("ar_tx_1", TEST_OWNER).unwrap();
         assert!(found.is_some());
         let row = found.unwrap();
         assert_eq!(row.attestation_id, "att-1");
@@ -2320,11 +2316,17 @@ mod tests {
 
         // Tenant-isolation predicate: a wrong-tenant lookup returns
         // `Ok(None)` indistinguishable from a genuine miss.
-        let other_tenant = store_ref.find_by_tx("sol_tx_1", "different-owner").unwrap();
+        let other_tenant = store_ref.find_by_tx("ar_tx_1", "different-owner").unwrap();
         assert!(
             other_tenant.is_none(),
             "wrong-tenant lookup must return None"
         );
+
+        // The legacy `solana_tx` column is not a lookup key.
+        assert!(store_ref
+            .find_by_tx("sol_tx_1", TEST_OWNER)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -2367,23 +2369,19 @@ mod tests {
 
         // owner-a's row is local
         assert_eq!(
-            store
-                .find_write_mode_by_tx("sol-shared", "owner-a")
-                .unwrap(),
+            store.find_write_mode_by_tx("ar-local", "owner-a").unwrap(),
             Some(WriteMode::Local)
         );
         // owner-b's row is anchored
         assert_eq!(
             store
-                .find_write_mode_by_tx("sol-different", "owner-b")
+                .find_write_mode_by_tx("ar-anchored", "owner-b")
                 .unwrap(),
             Some(WriteMode::Anchored)
         );
         // Wrong tenant for an existing tx → None (no leak).
         assert_eq!(
-            store
-                .find_write_mode_by_tx("sol-shared", "owner-b")
-                .unwrap(),
+            store.find_write_mode_by_tx("ar-local", "owner-b").unwrap(),
             None
         );
         // Unknown tx → None.
@@ -2760,7 +2758,7 @@ mod tests {
             &[1.0],
         );
         assert!(result.is_ok());
-        let row = store_ref.find_by_tx("sol2", TEST_OWNER).unwrap().unwrap();
+        let row = store_ref.find_by_tx("ar2", TEST_OWNER).unwrap().unwrap();
         assert_eq!(row.content, "c2");
     }
 
@@ -3173,13 +3171,13 @@ mod tests {
         assert!(listed[0].plaintext_on_arweave);
         assert_eq!(
             store
-                .plaintext_on_arweave_by_tx("sol-anchored", "owner-a")
+                .plaintext_on_arweave_by_tx("ArTx1", "owner-a")
                 .unwrap(),
             Some(true)
         );
         assert_eq!(
             store
-                .plaintext_on_arweave_by_tx("sol-anchored", "owner-b")
+                .plaintext_on_arweave_by_tx("ArTx1", "owner-b")
                 .unwrap(),
             None,
             "tenant-scoped"

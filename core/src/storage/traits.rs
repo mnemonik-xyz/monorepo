@@ -8,7 +8,6 @@ pub struct AttestationRow {
     pub attestation_id: String,
     pub content: String,
     pub content_hash: String,
-    pub solana_tx: String,
     pub arweave_tx: String,
     pub signer_pubkey: String,
 }
@@ -27,7 +26,6 @@ pub struct ReconstructionInputs {
     pub content: String,
     pub content_hash: String,
     pub tags: Vec<String>,
-    pub solana_tx: String,
     pub arweave_tx: String,
     pub signer_pubkey: String,
     pub created_at: String,
@@ -40,7 +38,7 @@ pub struct ReconstructionInputs {
 /// `write_mode` is surfaced so callers (notably `recall`) can render mixed-
 /// mode lists with provenance visible: each row carries the per-request
 /// intent that produced it (`Local` — free, offline; `Anchored` —
-/// anchored on Arweave + Solana).
+/// anchored on Arweave).
 ///
 /// `visibility` is surfaced so callers can render the per-row sharing
 /// intent next to provenance — and so the anonymous-recall path
@@ -52,7 +50,6 @@ pub struct SearchResult {
     pub content: String,
     pub content_hash: String,
     pub tags: Vec<String>,
-    pub solana_tx: String,
     pub arweave_tx: String,
     pub created_at: String,
     pub write_mode: WriteMode,
@@ -94,6 +91,9 @@ pub trait AttestationStore {
     /// `Private` (the resolver rejects explicit visibility on local mode —
     /// AC14). Anonymous recall (Decision 5) filters server-side to
     /// `Visibility::Public`; authenticated callers see all their own rows.
+    ///
+    /// `solana_tx` fills the legacy `solana_tx` column. That column is unused;
+    /// callers pass an empty string.
     #[allow(clippy::too_many_arguments)]
     fn save_attestation(
         &self,
@@ -111,7 +111,7 @@ pub trait AttestationStore {
         embedding: &[f32],
     ) -> anyhow::Result<()>;
 
-    /// Look up a row by `solana_tx` OR `arweave_tx`, scoped to the caller's
+    /// Look up a row by `arweave_tx`, scoped to the caller's
     /// `owner_pubkey`. A row belonging to a different tenant returns
     /// `Ok(None)` — same shape as a genuine miss, no side-channel leak of
     /// existence, hash, signer, or content. Closes the pre-existing tenant-
@@ -134,8 +134,7 @@ pub trait AttestationStore {
         owner_pubkey: &str,
     ) -> anyhow::Result<Option<ReconstructionInputs>>;
 
-    /// Look up the stored `write_mode` for a row by `solana_tx` OR
-    /// `arweave_tx`, scoped to the caller's `owner_pubkey`. Used by
+    /// Look up the stored `write_mode` for a row by `arweave_tx`, scoped to the caller's `owner_pubkey`. Used by
     /// `verify` routing in `mcp/` to dispatch by stored intent without
     /// re-loading the full row. Wrong-tenant lookups return `Ok(None)`
     /// identical to a genuine miss.

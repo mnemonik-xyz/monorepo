@@ -379,7 +379,7 @@ pub fn invalid_params(field: &str, received: &Value) -> JsonRpcError {
     }
 }
 
-/// `-32011 DeliveryNotConfirmed` — the anchored write hit Arweave + Solana
+/// `-32011 DeliveryNotConfirmed` — the anchored write hit Arweave
 /// but the post-anchor recall+verify round-trip failed at `stage`. The
 /// attestation row was persisted as `local` (so the embed/signature aren't
 /// wasted), the reserved payment was refunded, no `attestation_costs` row
@@ -387,21 +387,15 @@ pub fn invalid_params(field: &str, received: &Value) -> JsonRpcError {
 /// retry; on x402 retries the same payment header is still good (the nonce
 /// stays unconsumed). T3 — modes-user-choice.
 ///
-/// `data` shape: `{kind, arweave_tx, solana_tx, stage, row_demoted_to,
+/// `data` shape: `{kind, arweave_tx, stage, row_demoted_to,
 /// attestation_id}`.
-pub fn delivery_not_confirmed(
-    stage: &str,
-    arweave_tx: &str,
-    solana_tx: &str,
-    attestation_id: &str,
-) -> JsonRpcError {
+pub fn delivery_not_confirmed(stage: &str, arweave_tx: &str, attestation_id: &str) -> JsonRpcError {
     JsonRpcError {
         code: -32011,
         message: "Delivery not confirmed".to_string(),
         data: Some(serde_json::json!({
             "kind": "DeliveryNotConfirmed",
             "arweave_tx": arweave_tx,
-            "solana_tx": solana_tx,
             "stage": stage,
             "row_demoted_to": "local",
             "attestation_id": attestation_id,
@@ -461,7 +455,7 @@ pub fn token_expired(expires_at: &str, pubkey: &str) -> JsonRpcError {
 }
 
 /// `-32011 DeliveryQuotaExceeded` — entry-of-anchored-path short-circuit
-/// fired by `mcp_handler` BEFORE any Arweave/Solana write because the
+/// fired by `mcp_handler` BEFORE any Arweave write because the
 /// caller's `api_key_hash` has accumulated `>= threshold` delivery-failure
 /// demotions inside the sliding window. Spends zero chain fees. The error
 /// shares the `-32011` code with `DeliveryNotConfirmed`; clients
@@ -871,7 +865,7 @@ pub struct McpState {
     pub sol_tx_fee_lamports: u64,
 
     // Storage mode
-    /// "local" (default, free, SQLite only) or "full" (Arweave + Solana + SQLite)
+    /// "local" (default, free, SQLite only) or "full" (Arweave + SQLite)
     pub storage_mode: String,
 
     // Ollama / RAG (used by chat.rs and seed.rs in Tasks 2-3)
@@ -960,7 +954,7 @@ pub struct McpState {
 
     /// Outcome-based per-`api_key_hash` quota counter (T3 — DoS guard).
     /// Consulted at the *entry* of the anchored path in `mcp_handler`
-    /// BEFORE any Arweave/Solana write; incremented in the failure branch
+    /// BEFORE any Arweave write; incremented in the failure branch
     /// of `sign_memory_inline` after a delivery demotion. Bounded by the
     /// background eviction task spawned in `main.rs::run_http`. Keyed on
     /// `api_key_hash` (blake3(api_key).to_hex()), NEVER `owner_pubkey`.
@@ -1095,7 +1089,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "mnemonic_sign_memory",
-            "description": "Creates a verifiable memory attestation: canonical CBOR + blake3 hash, signed with COSE_Sign1 (Ed25519), stored on Arweave, hash anchored as SPL Memo on Solana",
+            "description": "Creates a verifiable memory attestation: canonical CBOR + blake3 hash, signed with COSE_Sign1 (Ed25519), stored on Arweave. Arweave is the single record of an anchored memory.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1104,7 +1098,7 @@ fn tool_definitions() -> Value {
                     "mode": {
                         "type": "string",
                         "enum": ["local", "anchored"],
-                        "description": "Per-request write intent (T2 — modes-user-choice). 'local' keeps the artifact on the agent's own machine (free, no chain writes). 'anchored' stores it on Arweave + Solana (paid on hosted operators; cost surfaced via mnemonic_whoami). Optional — omit to use the server's default; call mnemonic_whoami to see supported_modes / default_mode / anchored_cost first.",
+                        "description": "Per-request write intent (T2 — modes-user-choice). 'local' keeps the artifact on the agent's own machine (free, no chain writes). 'anchored' stores it on Arweave (paid on hosted operators; cost surfaced via mnemonic_whoami). Optional — omit to use the server's default; call mnemonic_whoami to see supported_modes / default_mode / anchored_cost first.",
                     },
                 },
                 "required": ["content"],
@@ -1112,13 +1106,13 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "mnemonic_verify",
-            "description": "Verifies a memory attestation by recomputing hash and comparing against on-chain record",
+            "description": "Verifies a memory attestation: fetches the original bytes from Arweave, then checks the COSE_Sign1 signature and the blake3 content hash. A local row is checked by rebuilding its content hash.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "solana_tx": {"type": "string", "description": "Solana TX signature"},
                     "arweave_tx": {"type": "string", "description": "Arweave TX ID"},
                 },
+                "required": ["arweave_tx"],
             },
         },
         {
@@ -1157,7 +1151,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "mnemonic_check_pending",
-            "description": "Resolves a deferred-sign correlation_id to its on-chain state. Use this AFTER mnemonic_sign_memory returns awaiting_signature and the user has approved in the browser. Returns {status: 'signed', anchoring_network, solana_tx, arweave_tx, solana_explorer_url, arweave_url, attestation_id, ...} on success, {status: 'awaiting_signature'} if user has not approved yet, or {status: 'not_found'} if expired.",
+            "description": "Resolves a deferred-sign correlation_id to its on-chain state. Use this AFTER mnemonic_sign_memory returns awaiting_signature and the user has approved in the browser. Returns {status: 'signed', arweave_tx, arweave_url, attestation_id, ...} on success, {status: 'awaiting_signature'} if user has not approved yet, or {status: 'not_found'} if expired.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1168,7 +1162,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "request_public_write_confirmation",
-            "description": "Public-write ceremony gate: presents the content_hash about to be anchored on Arweave + Solana so the user can confirm or refuse in-turn before any chain write fires. Consumed by Task 4's handler; not user-facing — agent skills invoke it inline whenever they intend to issue a `mode='anchored'` write with `visibility='public'`.",
+            "description": "Public-write ceremony gate: presents the content_hash about to be anchored on Arweave so the user can confirm or refuse in-turn before any chain write fires. Consumed by Task 4's handler; not user-facing — agent skills invoke it inline whenever they intend to issue a `mode='anchored'` write with `visibility='public'`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2314,7 +2308,6 @@ async fn handle_tool_call(
             let cost_hint = state.pricing.cost_hint(state.sol_tx_fee_lamports);
             tools::sign_memory(
                 &state.keypair,
-                &state.solana,
                 &state.arweave,
                 &state.store,
                 state.embedder.as_ref(),
@@ -2340,17 +2333,14 @@ async fn handle_tool_call(
             .map_err(tool_error_to_json_rpc)?
         }
         "mnemonic_verify" => {
-            let sol = args.get("solana_tx").and_then(|v| v.as_str());
             let ar = args.get("arweave_tx").and_then(|v| v.as_str());
             // T4: pass `owner_pubkey` so the storage routing lookup
             // (`find_write_mode_by_tx`) is tenant-scoped. The
             // `storage_mode` argument is retained for ABI compatibility
             // but ignored — routing is by stored `write_mode` now.
             tools::verify(
-                &state.solana,
                 &state.arweave,
                 &state.store,
-                sol,
                 ar,
                 owner_pubkey,
                 &state.storage_mode,
@@ -2493,14 +2483,7 @@ async fn handle_tool_call(
                 .as_str()
                 .ok_or_else(|| JsonRpcError::simple(-32603, "correlation_id required"))?
                 .to_string();
-            tools::check_pending(
-                &state.pending,
-                &state.store,
-                &state.solana,
-                &state.arweave,
-                &cid,
-            )
-            .await
+            tools::check_pending(&state.pending, &state.store, &state.arweave, &cid).await
         }
         // request_public_write_confirmation — Decision 5b. Mints an
         // HMAC-bound, single-use confirmation token for a specific

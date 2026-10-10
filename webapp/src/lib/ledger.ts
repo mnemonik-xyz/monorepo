@@ -28,8 +28,6 @@ export interface Artifact {
   /** blake3 hex of the canonical CBOR payload. */
   content_hash: string;
   tags: string[];
-  /** SPL-Memo signature, or null / `local:` when not anchored. */
-  solana_tx: string | null;
   /** Arweave ANS-104 data item id, or null / `local:` for on-node data. */
   arweave_tx: string | null;
   /** ISO-8601 timestamp. */
@@ -118,8 +116,8 @@ export async function fetchArtifacts(opts?: {
   }
   // The backend keys each row on `attestation_id`; the webapp Artifact (and
   // <li key={a.id}> in Ledger.tsx) keys on `id`. Remap so live rows have a
-  // usable `id`. solana_tx/arweave_tx pass through untouched — including the
-  // `local:`-prefixed and null forms the explorer-link helpers expect.
+  // usable `id`. arweave_tx passes through untouched — including the
+  // `local:`-prefixed and null forms the link helper expects.
   const artifacts: Artifact[] = live.artifacts.map(
     ({ attestation_id, ...rest }) => ({
       ...rest,

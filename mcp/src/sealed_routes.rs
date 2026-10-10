@@ -93,7 +93,6 @@ pub async fn list_sealed_handler(
             serde_json::json!({
                 "attestation_id": r.attestation_id,
                 "content_hash": r.content_hash,
-                "solana_tx": r.solana_tx,
                 "arweave_tx": r.arweave_tx,
                 "created_at": r.created_at,
                 // The raw COSE_Sign1 / CBOR blob is returned as base64 so the

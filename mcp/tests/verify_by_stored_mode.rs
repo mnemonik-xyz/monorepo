@@ -10,7 +10,7 @@
 //!    `write_mode='participate'` produces the anchored-shape envelope
 //!    regardless of `STORAGE_MODE`. Same pin from the other side.
 //! 3. `tenant_isolation_local` / `tenant_isolation_anchored` — caller A
-//!    writes a row, caller B asks to verify A's `solana_tx`. Must return
+//!    writes a row, caller B asks to verify A's `arweave_tx`. Must return
 //!    the `not_found` shape with NO leakage of `content_hash`,
 //!    `signer_pubkey`, content, or preview fields. Repeated for both
 //!    `local` and `anchored` row shapes.
@@ -48,9 +48,11 @@ const LEAKY_FIELDS: &[&str] = &[
 ];
 
 /// Seed a row directly via `save_attestation` so the test can pin a
-/// specific `(owner, write_mode, solana_tx, arweave_tx)` quartet without
-/// going through the env-dependent inline / deferred sign flow. Returns
-/// the `solana_tx` and `arweave_tx` for the row.
+/// specific `(owner, write_mode, legacy solana_tx, arweave_tx)` quartet
+/// without going through the env-dependent inline / deferred sign flow.
+/// Returns the legacy `solana_tx` column value and the `arweave_tx` for the
+/// row. The legacy column is not empty here on purpose: verify and recall
+/// must ignore it.
 ///
 /// The stored `content_hash` is the real thing — `blake3` over the canonical
 /// CBOR artifact, built exactly as `sign_memory_inline` builds it — so a
@@ -139,10 +141,10 @@ async fn verify_routes_local_for_local_row() {
     for storage_mode in ["local", "full"] {
         let server = TestServer::builder().storage_mode(storage_mode).build();
         let owner = server.server_pubkey();
-        let (sol, _ar) = seed_row(&server, &owner, WriteMode::Local, "local-route");
+        let (_sol, ar) = seed_row(&server, &owner, WriteMode::Local, "local-route");
 
         let result = server
-            .call_tool(Some(&owner), "mnemonic_verify", json!({"solana_tx": sol}))
+            .call_tool(Some(&owner), "mnemonic_verify", json!({"arweave_tx": ar}))
             .await;
         assert!(
             result.error().is_none(),
@@ -158,12 +160,13 @@ async fn verify_routes_local_for_local_row() {
             "[{storage_mode}] expected local-shape envelope; got {inner:?}"
         );
         // Local rows route via `verify_local` which echoes the stored
-        // solana_tx (and never reads from the Solana network).
+        // arweave_tx and never names a Solana transaction.
         assert_eq!(
-            inner["solana_tx"].as_str(),
-            Some(sol.as_str()),
-            "[{storage_mode}] expected local row's solana_tx echoed"
+            inner["arweave_tx"].as_str(),
+            Some(ar.as_str()),
+            "[{storage_mode}] expected local row's arweave_tx echoed"
         );
+        assert!(inner.get("solana_tx").is_none(), "{inner:?}");
         // Verified status is the happy-path expectation; tampering
         // detection is exercised elsewhere.
         assert_eq!(
@@ -178,13 +181,13 @@ async fn verify_routes_local_for_local_row() {
 #[tokio::test]
 async fn verify_routes_anchored_for_anchored_row() {
     // Same shape as #1 but from the other side. A `anchored` row must
-    // route to the Arweave / Solana fetch path even under
+    // route to the Arweave fetch path even under
     // `STORAGE_MODE=local` — the env-var branch is gone in T4.
     //
-    // The anchored path reaches out to the configured `SolanaClient`,
-    // which in test mode points at `http://localhost:0`. The relevant
+    // The anchored path reaches out to the configured `ArweaveClient`,
+    // which in test mode points at an unreachable gateway. The relevant
     // assertion is therefore that we DID try the anchored path — i.e.
-    // the response shape is `anchor_not_found` (or an outright network
+    // the response shape is `arweave_not_found` (or an outright network
     // error) rather than the `local`-shape envelope. The shape contract
     // is enough to pin the routing decision; we don't re-test the deep
     // anchor-verify happy path here (that lives in the COSE round-trip
@@ -192,24 +195,23 @@ async fn verify_routes_anchored_for_anchored_row() {
     for storage_mode in ["local", "full"] {
         let server = TestServer::builder().storage_mode(storage_mode).build();
         let owner = server.server_pubkey();
-        let (sol, _ar) = seed_row(&server, &owner, WriteMode::Anchored, "anchored-route");
+        let (_sol, ar) = seed_row(&server, &owner, WriteMode::Anchored, "anchored-route");
 
         let result = server
-            .call_tool(Some(&owner), "mnemonic_verify", json!({"solana_tx": sol}))
+            .call_tool(Some(&owner), "mnemonic_verify", json!({"arweave_tx": ar}))
             .await;
 
         // Two acceptable outcomes prove routing went to the anchored
         // branch: (a) the tool returned a JSON-RPC error (network-fetch
-        // failure on the test SolanaClient pointing at localhost:0), or
+        // failure on the test ArweaveClient), or
         // (b) the tool returned a `anchored`-side status such as
-        // `anchor_not_found`. EITHER outcome rules out the local route.
+        // `arweave_not_found`. EITHER outcome rules out the local route.
         if let Some(err) = result.error() {
             // The anchored path bubbled a fetch failure; confirm the
-            // message is NOT the local "provide solana_tx or arweave_tx"
-            // signal.
+            // message is NOT the "Provide arweave_tx" input error.
             let msg = err["message"].as_str().unwrap_or("");
             assert!(
-                !msg.contains("provide solana_tx"),
+                !msg.contains("Provide arweave_tx"),
                 "[{storage_mode}] anchored path must not echo local error"
             );
         } else {
@@ -221,13 +223,10 @@ async fn verify_routes_anchored_for_anchored_row() {
                 "[{storage_mode}] anchored row routed to LOCAL path: {inner:?}"
             );
             // The anchored path emits one of these statuses on a
-            // non-network test SolanaClient.
+            // non-network test ArweaveClient.
             let status = inner["status"].as_str().unwrap_or("");
             assert!(
-                matches!(
-                    status,
-                    "anchor_not_found" | "arweave_not_found" | "verified" | "tampered" | "error"
-                ),
+                matches!(status, "arweave_not_found" | "verified" | "tampered"),
                 "[{storage_mode}] unexpected anchored-path status: {inner:?}"
             );
         }
@@ -253,7 +252,7 @@ async fn tenant_isolation_local() {
     // keyless constant) cannot complete. This test only needs a local-tagged
     // row owned by A to exercise the tenant-scoped routing isolation, not the
     // write path itself; `seed_row` provides exactly that.
-    let (a_sol_tx, _ar) = seed_row(&server, USER_A_PUBKEY, WriteMode::Local, "tenant-iso-l");
+    let (_sol, a_ar_tx) = seed_row(&server, USER_A_PUBKEY, WriteMode::Local, "tenant-iso-l");
 
     // Sanity: B's `mnemonic_recall` does not surface A's row (already
     // covered by recall_owner_isolation, but cheap to assert here for
@@ -275,7 +274,7 @@ async fn tenant_isolation_local() {
     // Caller B verifies A's tx.
     let resp_b = server
         .with_token(&token_b)
-        .call_tool("mnemonic_verify", json!({"solana_tx": a_sol_tx}))
+        .call_tool("mnemonic_verify", json!({"arweave_tx": a_ar_tx}))
         .await;
     assert!(
         resp_b.error().is_none(),
@@ -313,11 +312,11 @@ async fn tenant_isolation_anchored() {
     // reject as UnsupportedMode; this test only needs an anchored-
     // tagged row to exercise the routing isolation, not the anchored
     // happy path.
-    let (a_sol_tx, _ar) = seed_row(&server, USER_A_PUBKEY, WriteMode::Anchored, "tenant-iso-p");
+    let (_sol, a_ar_tx) = seed_row(&server, USER_A_PUBKEY, WriteMode::Anchored, "tenant-iso-p");
 
     let resp_b = server
         .with_token(&token_b)
-        .call_tool("mnemonic_verify", json!({"solana_tx": a_sol_tx}))
+        .call_tool("mnemonic_verify", json!({"arweave_tx": a_ar_tx}))
         .await;
     assert!(
         resp_b.error().is_none(),
@@ -364,21 +363,23 @@ async fn recall_surfaces_write_mode() {
     let inner = result.result_text();
     let results = inner["results"].as_array().cloned().unwrap_or_default();
     assert_eq!(results.len(), 2, "expected both rows in recall: {inner:?}");
-    // Bucket results by their solana_tx prefix to map them back to the
+    // Bucket results by their arweave_tx to map them back to the
     // expected mode without relying on result ordering.
     let mut modes: std::collections::HashMap<String, String> = Default::default();
     for row in &results {
-        let sol = row["solana_tx"].as_str().expect("solana_tx").to_string();
+        assert!(row.get("solana_tx").is_none(), "{row}");
+        let ar = row["arweave_tx"].as_str().expect("arweave_tx").to_string();
         let mode = row["write_mode"]
             .as_str()
             .expect("write_mode must be surfaced in recall result envelope")
             .to_string();
-        modes.insert(sol, mode);
+        modes.insert(ar, mode);
     }
-    let local_seed_sol = "local:recall-local-sol".to_string();
+    let local_seed_sol = "local:recall-local-ar".to_string();
     // Must match the synthetic id `seed_row` derives from the "recall-anchored"
     // label above; keep the two in step if either changes.
-    let anchored_seed_sol = "solxrecall-anchoredaRRRRYWfLh8x2y2y9X7Cxe1aN3aN3aN3aN3".to_string();
+    let anchored_seed_sol =
+        "PdhTPLPmHvX0iE6iAtJ8X5Y0WqQ8MzC8KvU9JhQ0aN0recall-anchored".to_string();
     assert_eq!(
         modes.get(&local_seed_sol).map(|s| s.as_str()),
         Some("local"),
@@ -416,7 +417,6 @@ async fn sign_local_via_stdio(server: &TestServer, content: &str) -> serde_json:
     let owner = server.server_pubkey();
     sign_memory(
         &server.state.keypair,
-        &server.state.solana,
         &server.state.arweave,
         &server.state.store,
         server.state.embedder.as_ref(),
@@ -459,10 +459,14 @@ async fn local_sign_then_verify_round_trips() {
     let owner = server.server_pubkey();
 
     let signed = sign_local_via_stdio(&server, "round trip through the real sign path").await;
-    let sol = signed["solana_tx"].as_str().expect("solana_tx").to_string();
+    assert!(signed.get("solana_tx").is_none(), "{signed}");
+    let ar = signed["arweave_tx"]
+        .as_str()
+        .expect("arweave_tx")
+        .to_string();
 
     let result = server
-        .call_tool(Some(&owner), "mnemonic_verify", json!({"solana_tx": sol}))
+        .call_tool(Some(&owner), "mnemonic_verify", json!({"arweave_tx": ar}))
         .await;
     assert!(
         result.error().is_none(),
@@ -495,7 +499,11 @@ async fn local_verify_detects_edited_content() {
     let owner = server.server_pubkey();
 
     let signed = sign_local_via_stdio(&server, "original content").await;
-    let sol = signed["solana_tx"].as_str().expect("solana_tx").to_string();
+    assert!(signed.get("solana_tx").is_none(), "{signed}");
+    let ar = signed["arweave_tx"]
+        .as_str()
+        .expect("arweave_tx")
+        .to_string();
 
     // Edit the content column directly, leaving content_hash untouched —
     // exactly the tamper this check exists to catch.
@@ -504,14 +512,14 @@ async fn local_verify_detects_edited_content() {
         store
             .conn()
             .execute(
-                "UPDATE attestations SET content = ?1 WHERE solana_tx = ?2",
-                rusqlite::params!["tampered content", &sol],
+                "UPDATE attestations SET content = ?1 WHERE arweave_tx = ?2",
+                rusqlite::params!["tampered content", &ar],
             )
             .expect("tamper");
     }
 
     let result = server
-        .call_tool(Some(&owner), "mnemonic_verify", json!({"solana_tx": sol}))
+        .call_tool(Some(&owner), "mnemonic_verify", json!({"arweave_tx": ar}))
         .await;
     let inner = result.result_text();
     assert_eq!(

@@ -91,10 +91,9 @@ enum Command {
     /// Rebuild the local recall index from Arweave, then exit
     /// (work/arweave-as-source-of-truth Wave 3).
     ///
-    /// Enumerates every item this wallet anchored — Solana memo history first,
-    /// because it is authoritative for legacy items, then the Arweave gateway
-    /// index — fetches each artifact, verifies its COSE_Sign1 signature, and
-    /// writes the verified rows into the local database. Only memories authored
+    /// Enumerates the items in the Arweave gateway index, fetches each
+    /// artifact, verifies its COSE_Sign1 signature, and writes the verified
+    /// rows into the local database. Only memories authored
     /// by this identity are imported.
     ///
     /// Idempotent: rows are keyed by the `artifact_id` inside the signed
@@ -330,13 +329,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── `restore` subcommand (work/arweave-as-source-of-truth Wave 3) ─────────
-    // Rebuild the local index from the chain. Placed after config resolution
-    // because it needs the gateway, RPC and database paths, and before any
+    // Rebuild the local index from Arweave. Placed after config resolution
+    // because it needs the gateway and database paths, and before any
     // server wiring because it exits when done.
     if let Some(Command::Restore { dry_run }) = cli.command {
         use mnemonic_core::arweave::graphql::{solana_pubkey_to_arweave_address, GraphQlClient};
         use mnemonic_core::arweave::ArweaveClient;
-        use mnemonic_core::solana::SolanaClient;
 
         let identity = match mnemonic_core::identity::ensure() {
             Ok(id) => id,
@@ -348,7 +346,6 @@ async fn main() -> anyhow::Result<()> {
         let owner = identity.pubkey_base58.clone();
         eprintln!("mnemonic: restoring memories for {owner}");
 
-        let solana = SolanaClient::new(&cfg.solana_rpc_url);
         let gateway = ArweaveClient::new(&cfg.arweave_url)
             .try_with_parent_blob_origin(cfg.parent_blob_origin.as_deref())?
             .try_with_fallback_gateways(&cfg.arweave_fallback_gateways)?;
@@ -361,10 +358,9 @@ async fn main() -> anyhow::Result<()> {
         // host answers a GraphQL POST with an empty body, and an empty index is
         // indistinguishable from a failed query.
         let gql = GraphQlClient::new(&cfg.chain_stats_graphql_url);
-        // A gateway owner filter is an optimisation, not a requirement: the memo
-        // history already enumerates the historical items, and `list_anchored`
-        // treats an empty address list as "tag-only". So a derivation failure
-        // degrades the search rather than aborting the restore.
+        // A gateway owner filter is an optimisation, not a requirement:
+        // `list_anchored` treats an empty address list as "tag-only". So a
+        // derivation failure degrades the search rather than aborting the restore.
         let arweave_addresses: Vec<String> = match solana_pubkey_to_arweave_address(&owner) {
             Ok(addr) => vec![addr],
             Err(e) => {
@@ -375,9 +371,7 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
-        let enumerated =
-            mnemonic_core::restore::enumerate_anchored(&gql, &solana, &owner, &arweave_addresses)
-                .await;
+        let enumerated = mnemonic_core::restore::enumerate_anchored(&gql, &arweave_addresses).await;
         let source_failed = enumerated
             .sources
             .iter()
@@ -395,7 +389,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         eprintln!(
-            "mnemonic: {} anchored item(s) found on chain",
+            "mnemonic: {} anchored item(s) found on Arweave",
             enumerated.items.len()
         );
 
@@ -544,7 +538,7 @@ async fn main() -> anyhow::Result<()> {
                 &r.attestation_id,
                 &content_hash,
                 &r.tags,
-                &r.solana_tx,
+                "", // legacy `solana_tx` column, unused
                 &r.arweave_tx,
                 &r.signer_pubkey,
                 &r.owner_pubkey,
@@ -751,7 +745,7 @@ async fn main() -> anyhow::Result<()> {
         if cfg.storage_mode == "local" {
             "free, SQLite only"
         } else {
-            "Arweave + Solana + SQLite"
+            "Arweave + SQLite"
         }
     );
     tracing::info!("Payment mode: {}", cfg.payment_mode);
@@ -762,17 +756,8 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    let anchoring_network = match cfg.validate_anchoring_config() {
-        Ok(network) => network,
-        Err(msg) => {
-            tracing::error!("FATAL: {msg}");
-            std::process::exit(1);
-        }
-    };
     tracing::info!(
-        "Anchoring network: {:?} (Solana RPC: {}, Arweave gateway: {}, uploads via ArDrive Turbo)",
-        anchoring_network,
-        cfg.solana_rpc_url,
+        "Arweave gateway: {} (uploads via ArDrive Turbo)",
         cfg.arweave_url
     );
     tracing::info!(
@@ -1052,7 +1037,6 @@ async fn main() -> anyhow::Result<()> {
         &cfg.chain_stats_wallets,
         &cfg.chain_stats_graphql_url,
         &cfg.chain_stats_gateway_url,
-        &cfg.solana_rpc_url,
     )
     .expect("invalid CHAIN_STATS_WALLETS — expected comma-separated base58 Solana pubkeys")
     .map(Arc::new);
