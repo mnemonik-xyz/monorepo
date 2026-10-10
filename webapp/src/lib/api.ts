@@ -10,6 +10,43 @@ export const MCP_BASE: string =
   (import.meta.env?.VITE_MCP_BASE as string | undefined) ??
   "https://mcp.mnemonik.xyz";
 
+/**
+ * Parse an `mcp_base` link parameter into a bare origin. Accepts https, or
+ * http on localhost / 127.0.0.1. Rejects credentials, paths, queries and
+ * fragments. Returns null when the value is unusable.
+ */
+export function normalizeMcpBase(raw: string): string | null {
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    const isHttps = url.protocol === "https:";
+    const isLocalHttp =
+      url.protocol === "http:" &&
+      (url.hostname === "localhost" || url.hostname === "127.0.0.1");
+    if (!isHttps && !isLocalHttp) return null;
+    if (url.username || url.password) return null;
+    if (url.pathname !== "/" || url.search || url.hash) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Like {@link normalizeMcpBase}, but only for hosted operators
+ * (`mnemonik.xyz` and its subdomains) or a loopback dev server. The sign page
+ * asks the user to sign bytes that this origin supplies, so a link must not
+ * name an arbitrary host.
+ */
+export function hostedOperatorBase(raw: string): string | null {
+  const origin = normalizeMcpBase(raw);
+  if (!origin) return null;
+  const { protocol, hostname } = new URL(origin);
+  if (protocol === "http:") return origin;
+  const hosted = hostname === "mnemonik.xyz" || hostname.endsWith(".mnemonik.xyz");
+  return hosted ? origin : null;
+}
+
 export interface ChatRequest {
   message: string;
   session_id: string;

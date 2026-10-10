@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MCP_BASE, fetchPublicStats } from "./api";
+import { MCP_BASE, fetchPublicStats, hostedOperatorBase } from "./api";
 
 describe("fetchPublicStats", () => {
   beforeEach(() => {
@@ -47,5 +47,28 @@ describe("fetchPublicStats", () => {
 
     const stats = await fetchPublicStats();
     expect(stats).toBeNull();
+  });
+});
+
+describe("hostedOperatorBase", () => {
+  it("accepts mnemonik.xyz operators and loopback dev servers", () => {
+    expect(hostedOperatorBase("https://mcp2.mnemonik.xyz")).toBe("https://mcp2.mnemonik.xyz");
+    expect(hostedOperatorBase("https://mcp.mnemonik.xyz/")).toBe("https://mcp.mnemonik.xyz");
+    expect(hostedOperatorBase("http://localhost:3000")).toBe("http://localhost:3000");
+  });
+
+  it("rejects other hosts and malformed values", () => {
+    for (const raw of [
+      "",
+      "https://evil.example",
+      "https://mnemonik.xyz.evil.example",
+      "https://evilmnemonik.xyz",
+      "http://mcp.mnemonik.xyz",
+      "https://user@mcp.mnemonik.xyz",
+      "https://mcp.mnemonik.xyz/api",
+      "not a url",
+    ]) {
+      expect(hostedOperatorBase(raw)).toBeNull();
+    }
   });
 });

@@ -382,6 +382,23 @@ pub(crate) fn compute_server_origin_from_env_str(raw: Option<&str>) -> String {
 /// the pending OAuth state.
 pub const WEBAPP_CONSENT_URL: &str = "https://www.mnemonik.xyz/oauth/consent";
 
+/// Webapp sign-approval page. `mnemonic_sign_memory` returns
+/// `WEBAPP_SIGN_URL/<correlation_id>?mcp_base=<origin>` so the page reads the
+/// pending bundle from, and posts the signature to, the server that parked it.
+/// Several operators (`mcp`, `mcp2`, ...) share one webapp; each keeps its own
+/// in-memory pending map. The bare `mnemonik.xyz` host does not serve deep
+/// links, so the URL names `www`.
+pub const WEBAPP_SIGN_URL: &str = "https://www.mnemonik.xyz/sign";
+
+/// The sign-approval URL for `correlation_id`, naming this server's origin.
+pub fn sign_approve_url(correlation_id: &str) -> String {
+    format!(
+        "{WEBAPP_SIGN_URL}/{}?mcp_base={}",
+        urlencoding_encode(correlation_id),
+        urlencoding_encode(server_origin())
+    )
+}
+
 /// JWT claim set per Decision 11.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
@@ -4547,6 +4564,20 @@ mod tests {
             "server_origin() must always return a scheme-prefixed URL, got {origin}"
         );
         assert!(!origin.is_empty());
+    }
+
+    #[test]
+    fn sign_approve_url_names_www_and_this_server() {
+        // The bare apex does not serve `/sign/*`, and the page must reach the
+        // operator that parked the bundle, not a fixed default.
+        let url = sign_approve_url("4382c73c-4368-4d8e-ac18-432349362cdb");
+        assert!(url.starts_with(
+            "https://www.mnemonik.xyz/sign/4382c73c-4368-4d8e-ac18-432349362cdb?mcp_base="
+        ));
+        let encoded_origin = url.split_once("?mcp_base=").unwrap().1;
+        assert_eq!(encoded_origin, urlencoding_encode(server_origin()));
+        assert!(encoded_origin.starts_with("http"));
+        assert!(!encoded_origin.contains('/') && !encoded_origin.contains(':'));
     }
 
     #[test]

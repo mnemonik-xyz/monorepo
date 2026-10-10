@@ -10,6 +10,7 @@ import {
   type Mock,
 } from "vitest";
 import Sign from "./Sign";
+import { MCP_BASE } from "../lib/api";
 
 vi.mock("../lib/wasm", () => ({
   loadWasm: vi.fn(async () => ({
@@ -111,5 +112,42 @@ describe("Sign page", () => {
         ),
       { timeout: 3000, interval: 50 },
     );
+  });
+
+  function renderSign(path: string) {
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <Routes>
+          <Route path="/sign/:correlationId" element={<Sign />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  function firstFetch(): { url: string; headers: Record<string, string> } {
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    return { url, headers: (init.headers ?? {}) as Record<string, string> };
+  }
+
+  it("fetches the bundle from the operator named in mcp_base", async () => {
+    // mcp2 parked the bundle; the default operator has never seen it.
+    renderSign(
+      `/sign/${TEST_UUID}?mcp_base=${encodeURIComponent("https://mcp2.mnemonik.xyz")}`,
+    );
+    await screen.findByTestId("sign-countdown", {}, { timeout: 3000 });
+    const { url, headers } = firstFetch();
+    expect(url).toBe(`https://mcp2.mnemonik.xyz/api/pending/${TEST_UUID}`);
+    // The stored JWT was issued by the default operator; it stays there.
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  it("ignores an mcp_base outside the hosted operators", async () => {
+    renderSign(
+      `/sign/${TEST_UUID}?mcp_base=${encodeURIComponent("https://evil.example")}`,
+    );
+    await screen.findByTestId("sign-countdown", {}, { timeout: 3000 });
+    const { url, headers } = firstFetch();
+    expect(url).toBe(`${MCP_BASE}/api/pending/${TEST_UUID}`);
+    expect(headers.Authorization).toMatch(/^Bearer /);
   });
 });

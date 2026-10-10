@@ -1108,7 +1108,7 @@ async fn sign_memory_deferred(
 
     Ok(serde_json::json!({
         "status": "awaiting_signature",
-        "approve_url": format!("https://mnemonik.xyz/sign/{assigned_id}"),
+        "approve_url": crate::oauth::sign_approve_url(&assigned_id),
         "correlation_id": assigned_id,
         "expires_in": 300,
         "content_hash": content_hash,
@@ -3157,7 +3157,9 @@ mod sign_memory_tests {
         assert!(result["correlation_id"].is_string());
         assert_eq!(result["expires_in"], 300);
         let url = result["approve_url"].as_str().unwrap();
-        assert!(url.starts_with("https://mnemonik.xyz/sign/"));
+        let id = result["correlation_id"].as_str().unwrap();
+        assert!(url.starts_with(&format!("https://www.mnemonik.xyz/sign/{id}?mcp_base=")));
+        assert_eq!(url, crate::oauth::sign_approve_url(id));
         // No SQLite row should have been written.
         let s = store.lock().unwrap();
         assert_eq!(s.count(&owner).unwrap(), 0);
