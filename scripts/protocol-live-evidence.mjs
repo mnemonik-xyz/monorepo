@@ -5,14 +5,13 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { createHash } from 'node:crypto';
 import { validateSubmission, summarizeVisibility } from './protocol-live-observation.mjs';
 import {
-  IrysDiscoverySource, ArweaveDiscoverySource, ArweaveStorageAdapter,
+  ArweaveDiscoverySource, ArweaveStorageAdapter,
   verifyA2AAttestation,
 } from '../packages/sdk/dist/index.js';
 
 const { values } = parseArgs({ options: {
-  irys: { type: 'string', default: 'https://uploader.irys.xyz/graphql' },
   arweave: { type: 'string', default: 'https://arweave.net/graphql' },
-  gateway: { type: 'string', default: 'https://gateway.irys.xyz' },
+  gateway: { type: 'string', default: 'https://arweave.net' },
   author: { type: 'string' }, context: { type: 'string' },
   head: { type: 'string' }, locator: { type: 'string' },
   'submitted-at': { type: 'string' }, 'submission-evidence': { type: 'string' },
@@ -25,7 +24,7 @@ if (!Number.isInteger(samples) || samples < 1 || samples > 6 ||
     !Number.isInteger(interval) || interval < 0 || interval > 60000) {
   throw new Error('samples must be 1–6 and interval-ms 0–60000');
 }
-for (const key of ['irys', 'arweave', 'gateway']) {
+for (const key of ['arweave', 'gateway']) {
   const url = new URL(values[key]);
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
     throw new Error(`${key} requires an HTTPS URL without credentials, query or fragment`);
@@ -58,11 +57,11 @@ async function jsonRequest(url, query, variables) {
   return json;
 }
 
-async function inventory(endpoint, flavour, kind) {
+async function inventory(endpoint, kind) {
   // Bounded public inventory, not an assertion about all history or authors.
   const tags = [{ name: 'App-Name', values: ['mnemonic-protocol'] }];
   if (kind) tags.push({ name: 'Mnemonic-Type', values: [kind] });
-  const query = `query($tags:[TagFilter!]!){transactions(first:100,tags:$tags${flavour === 'arweave' ? ',sort:HEIGHT_ASC' : ''}){edges{node{id}}pageInfo{hasNextPage}}}`;
+  const query = `query($tags:[TagFilter!]!){transactions(first:100,tags:$tags,sort:HEIGHT_ASC){edges{node{id}}pageInfo{hasNextPage}}}`;
   const start = performance.now();
   try {
     const result = await jsonRequest(endpoint, query, { tags });
@@ -82,9 +81,7 @@ async function fixtureObservation() {
   if (!pinned) return { status: 'not_run', reason: 'independently pinned synthetic A2A fixture required' };
   const scope = { artifactKind: 'a2a', context: values.context, expectedAuthors: [values.author] };
   const observations = {};
-  for (const [name, source] of [
-    ['irys', new IrysDiscoverySource(values.irys)], ['arweave', new ArweaveDiscoverySource(values.arweave)],
-  ]) {
+  for (const [name, source] of [['arweave', new ArweaveDiscoverySource(values.arweave)]]) {
     const queryStartedAt = new Date().toISOString();
     let cursor, pages = 0, found = false; const seen = new Set();
     try {
@@ -113,7 +110,7 @@ async function fixtureObservation() {
 }
 
 const report = { version: 1, started_at: new Date().toISOString(),
-  endpoints: { irys: values.irys, arweave: values.arweave, gateway: values.gateway },
+  endpoints: { arweave: values.arweave, gateway: values.gateway },
   mode: 'read_only_no_credentials', pinned_fixture: pinned ? Object.fromEntries(pins.map(key => [key, values[key]])) : null,
   submission, expected_envelope_sha256: values['expected-envelope-sha256'] ?? null,
   observations: [], limits: ['Inventory capped at one page of 100; scoped fixture scans capped at three pages.',
@@ -124,12 +121,11 @@ const report = { version: 1, started_at: new Date().toISOString(),
 for (let sample = 0; sample < samples; sample++) {
   if (sample) await sleep(interval);
   const startedAt = new Date().toISOString();
-  const [irys, arweave, a2aIrys, a2aArweave, fixture] = await Promise.all([
-    inventory(values.irys, 'irys'), inventory(values.arweave, 'arweave'),
-    inventory(values.irys, 'irys', 'a2a'), inventory(values.arweave, 'arweave', 'a2a'), fixtureObservation(),
+  const [arweave, a2aArweave, fixture] = await Promise.all([
+    inventory(values.arweave), inventory(values.arweave, 'a2a'), fixtureObservation(),
   ]);
   report.observations.push({ started_at: startedAt, finished_at: new Date().toISOString(),
-    inventory: { irys, arweave, a2a_irys: a2aIrys, a2a_arweave: a2aArweave }, fixture });
+    inventory: { arweave, a2a_arweave: a2aArweave }, fixture });
 }
 report.finished_at = new Date().toISOString();
 report.positive_fixture_observed = pinned && report.observations.every(({ fixture }) =>

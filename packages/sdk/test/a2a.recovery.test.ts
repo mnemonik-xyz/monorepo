@@ -31,8 +31,8 @@ describe('ancestry and provider bounds',()=>{
    const c=client(remote([]));await expect(c.restoreA2AContext(v.context_id,{expectedAuthors:[v.author.pubkey_base58],checkpoint:{scope:'other'}})).rejects.toThrow();
    const large=client((async()=>new Response(new Uint8Array(1048577))) as typeof fetch);await expect(large.importA2AAttestation(`ar://${id}`,v.author.pubkey_base58)).rejects.toThrow('too large');
  });
- it('uses Arweave query fields only for Arweave indexes',async()=>{
-   for(const flavour of ['irys','arweave'] as const){let query='';const kp=new Keypair(v.author);const c=new MnemonicClient({baseUrl:'https://mcp.invalid',signer:new LocalSigner(kp),a2aIndexFlavour:flavour,fetch:(async(_u,init)=>{query=JSON.parse(init!.body as string).query;return Response.json({data:{transactions:{edges:[],pageInfo:{hasNextPage:false}}}});}) as typeof fetch});await c.restoreA2AContext(v.context_id,{expectedAuthors:[v.author.pubkey_base58]});expect(query.includes('sort:HEIGHT_ASC')).toBe(flavour==='arweave');expect(query).not.toContain('block');}
+ it('defaults discovery to the arweave.net GraphQL index with height ordering',async()=>{
+   let url='',query='';const kp=new Keypair(v.author);const c=new MnemonicClient({baseUrl:'https://mcp.invalid',signer:new LocalSigner(kp),fetch:(async(u,init)=>{url=String(u);query=JSON.parse(init!.body as string).query;return Response.json({data:{transactions:{edges:[],pageInfo:{hasNextPage:false}}}});}) as typeof fetch});await c.restoreA2AContext(v.context_id,{expectedAuthors:[v.author.pubkey_base58]});expect(url).toBe('https://arweave.net/graphql');expect(c._a2aGateway()).toBe('https://arweave.net');expect(query).toContain('sort:HEIGHT_ASC');expect(query).not.toContain('block');
  });
 });
 
@@ -52,13 +52,13 @@ it('resumes with staged signed children when their parent appears on a later pag
 });
 
 describe('replaceable discovery sources',()=>{
- it('replaces Irys with Arweave across duplicate locators and ordering without changing verified identity',async()=>{
-   const {IrysDiscoverySource,ArweaveDiscoverySource}=await import('../src/discovery.js');
+ it('replaces one Arweave index with another across duplicate locators and ordering without changing verified identity',async()=>{
+   const {ArweaveDiscoverySource}=await import('../src/discovery.js');
    const first=edge();const duplicate=edge();duplicate.node.id='B'.repeat(43);duplicate.cursor=duplicate.node.id;
    const results=[];
-   for(const Source of [IrysDiscoverySource,ArweaveDiscoverySource]){
-     const transport=remote(Source===IrysDiscoverySource?[first,duplicate]:[duplicate,first]);
-     const source=new Source('https://index.invalid/graphql',transport);
+   for(const endpoint of ['https://index.invalid/graphql','https://index.invalid/alternate/graphql']){
+     const transport=remote(endpoint.includes('alternate')?[duplicate,first]:[first,duplicate]);
+     const source=new ArweaveDiscoverySource(endpoint,transport);
      const c=client(transport);const r=await c.restoreA2AContext(v.context_id,{expectedAuthors:[v.author.pubkey_base58],discoverySource:source});
      expect(r.source.status).toBe('exhausted');expect(r.attestations).toHaveLength(1);results.push(r.attestations[0]!.attestationId);
    }

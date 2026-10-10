@@ -30,7 +30,7 @@ export interface Artifact {
   tags: string[];
   /** SPL-Memo signature, or null / `local:` when not anchored. */
   solana_tx: string | null;
-  /** Irys DataItem id (legacy field name), or null / `local:` for on-node data. */
+  /** Arweave ANS-104 data item id, or null / `local:` for on-node data. */
   arweave_tx: string | null;
   /** ISO-8601 timestamp. */
   created_at: string;

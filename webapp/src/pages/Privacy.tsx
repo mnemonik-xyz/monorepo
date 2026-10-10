@@ -92,7 +92,7 @@ export default function Privacy() {
                 <P>
                   In <strong className="text-text-primary">full mode</strong>{" "}
                   the signed canonical CBOR bytes are uploaded to Arweave (via
-                  Irys as an ANS-104 bundle item) and a content identifier is
+                  ArDrive Turbo as an ANS-104 data item) and a content identifier is
                   published on Solana as an SPL Memo transaction. Both are
                   public, permanent, decentralised ledgers. Anything an
                   attestation contains — including the embedded vector and any

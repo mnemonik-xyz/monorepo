@@ -66,7 +66,7 @@ export async function signLocatorManifest(manifest:LocatorManifest,checkpoint:Si
 async function graph(rows:Attestation[],cp:RecoveryCheckpoint):Promise<A2ARestoreReport>{
   const index=new Map(rows.map(row=>[row.attestationId,row]));
   const store:A2AIndexStore={list:async()=>[...index.values()],put:async row=>{index.set(row.attestationId,row);}};
-  const host:RecoveryHost={_a2aIndexStore:()=>store,_a2aGateway:()=>'',_a2aDiscovery:()=>({url:'',flavour:'irys'}),_a2aExternal:async()=>{throw new Error('migration graph must not contact a network');}};
+  const host:RecoveryHost={_a2aIndexStore:()=>store,_a2aGateway:()=>'',_a2aDiscovery:()=>({url:''}),_a2aExternal:async()=>{throw new Error('migration graph must not contact a network');}};
   return restoreA2AContext.call(host,cp.scope,{expectedAuthors:cp.expectedAuthors,heads:cp.heads,discoverySource:false});
 }
 class StorageBudgetError extends UserError {}

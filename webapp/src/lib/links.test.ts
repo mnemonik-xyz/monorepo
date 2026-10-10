@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { irysDataUrl, solanaTxUrl } from "./links";
+import { arweaveDataUrl, solanaTxUrl } from "./links";
 
 describe("external transaction links", () => {
-  it("routes production data item ids to the Irys gateway", () => {
-    expect(irysDataUrl("CubJzDPLBaLF7fo67KB9RWXgex1QV8RsaWPWWkEaLoT3")).toBe(
-      "https://gateway.irys.xyz/CubJzDPLBaLF7fo67KB9RWXgex1QV8RsaWPWWkEaLoT3",
+  it("routes production data item ids to the Arweave gateway", () => {
+    expect(arweaveDataUrl("u6pIaLEoaJ8bOnTUCTj2LSiv0IAMp-QbMhcsOcrmBXA")).toBe(
+      "https://arweave.net/u6pIaLEoaJ8bOnTUCTj2LSiv0IAMp-QbMhcsOcrmBXA",
     );
   });
 
   it("does not link synthetic local ids", () => {
-    expect(irysDataUrl("local:memory")).toBeNull();
+    expect(arweaveDataUrl("local:memory")).toBeNull();
     expect(solanaTxUrl("local:memory")).toBeNull();
   });
 });
