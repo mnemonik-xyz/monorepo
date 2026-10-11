@@ -56,7 +56,7 @@ status: backlog
 **Эффорт:** ~1 dev-day total (paperwork-heavy).
 
 ### Headless Claude Code в CI
-**Что:** Запустить `claude code` headless с Mnemonic MCP installed, прогнать `whoami → sign_memory → recall` сценарий, assert на output. Nightly + pre-release smoke.
+**Что:** Запустить `claude code` headless с Mnemonik MCP installed, прогнать `whoami → sign_memory → recall` сценарий, assert на output. Nightly + pre-release smoke.
 **Зачем:** End-to-end доказательство что реальный модель правильно interpret-ит наши tool descriptions (MCP Inspector валидирует только schema, не behavior).
 **Эффорт:** ~1 dev-day.
 
@@ -69,13 +69,13 @@ status: backlog
 **Эффорт:** ~2 dev-days.
 
 ### Browser extension
-**Что:** Chrome/Firefox extension с одной кнопкой "Save to Mnemonic" на chatgpt.com / claude.ai / cursor.com — клик подписывает текущий чат через WASM core, отправляет на hosted MCP.
+**Что:** Chrome/Firefox extension с одной кнопкой "Save to Mnemonik" на chatgpt.com / claude.ai / cursor.com — клик подписывает текущий чат через WASM core, отправляет на hosted MCP.
 **Риски:** ShadowPrompt-class XSS (Anthropic's own extension shipped a critical zero-click prompt-injection vuln в марте 2026). Maintenance burden — UI каждой target меняется, парсер ломается. Permission grant friction ("read & change all data").
 **Митигация:** Manifest v3 + strict CSP + origin allowlist locked + open-source + audited. Defence in depth — даже если extension compromised, артефакты COSE-signed user keypair (живёт в WASM/Turnkey).
 **Эффорт:** ~5-7 dev-days + Chrome Store review (1-3 weeks).
 
 ### ChatGPT Apps SDK submission
-**Что:** Submit Mnemonic как ChatGPT App для inclusion в ChatGPT Plus/Pro/Free через App Directory.
+**Что:** Submit Mnemonik как ChatGPT App для inclusion в ChatGPT Plus/Pro/Free через App Directory.
 **Зачем:** ChatGPT Plus/Pro юзеры не могут ставить custom MCP — Apps SDK единственный путь. Reach на 100M+ ChatGPT юзеров.
 **Риски:** Review time не публичен (community: weeks-to-months). Crypto/Solana surface может вызвать pushback от reviewer'ов. Position как "verifiable knowledge memory" — не "blockchain protocol".
 **Эффорт:** ~3 dev-days submission + indeterminate review wait.
@@ -89,7 +89,7 @@ status: backlog
 Native iOS/Android приложения когда ChatGPT/Claude mobile добавят MCP support. Не GA на 2026-04 — wait-and-see.
 
 ### `web+mnemonic://` protocol handler
-Через `Navigator.registerProtocolHandler` — webapp регистрирует `web+mnemonic://` scheme, открывает bundle URLs в Mnemonic вместо stale-link experience. Marginal value vs. existing landing page. Skip until volume.
+Через `Navigator.registerProtocolHandler` — webapp регистрирует `web+mnemonic://` scheme, открывает bundle URLs в Mnemonik вместо stale-link experience. Marginal value vs. existing landing page. Skip until volume.
 
 ## Out of Scope (won't do)
 

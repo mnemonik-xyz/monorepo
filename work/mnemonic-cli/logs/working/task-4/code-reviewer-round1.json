@@ -35,9 +35,9 @@
     {
       "severity": "minor",
       "category": "type_safety",
-      "issue": "`packages/sdk/test/cose.golden.test.ts` line ~125: `__setWasmForTesting(realWasm as never)`. The `as never` cast bypasses TypeScript's structural checks between the pkg-nodejs surface (just dynamic-imported) and the `typeof MnemonicCore` alias (which references pkg-web). If pkg-nodejs ever drops or renames `sign_cose_payload`, this test will fail at runtime instead of at `tsc --noEmit`.",
+      "issue": "`packages/sdk/test/cose.golden.test.ts` line ~125: `__setWasmForTesting(realWasm as never)`. The `as never` cast bypasses TypeScript's structural checks between the pkg-nodejs surface (just dynamic-imported) and the `typeof MnemonikCore` alias (which references pkg-web). If pkg-nodejs ever drops or renames `sign_cose_payload`, this test will fail at runtime instead of at `tsc --noEmit`.",
       "file": "/Users/syi/src/sessions/2/packages/sdk/test/cose.golden.test.ts",
-      "recommendation": "Replace `as never` with `as typeof MnemonicCore` — the same alias used in `wasm.ts`. If the pkg-nodejs and pkg-web type surfaces genuinely differ in test-relevant shape, narrow the cast to the specific symbol used (`as { sign_cose_payload: typeof realWasm.sign_cose_payload }`). The fewer `as never` casts the SDK has, the easier WASM-target drift is to catch."
+      "recommendation": "Replace `as never` with `as typeof MnemonikCore` — the same alias used in `wasm.ts`. If the pkg-nodejs and pkg-web type surfaces genuinely differ in test-relevant shape, narrow the cast to the specific symbol used (`as { sign_cose_payload: typeof realWasm.sign_cose_payload }`). The fewer `as never` casts the SDK has, the easier WASM-target drift is to catch."
     },
     {
       "severity": "minor",

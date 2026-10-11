@@ -2,7 +2,7 @@
 // Real SDK/WASM verification and signing; synthetic GraphQL and gateway transport.
 // No external calls, provider availability claims, or decryption keys in evidence.
 import assert from 'node:assert/strict';
-import {MnemonicClient, LocalSigner, verifyA2AAttestation} from '../dist/index.js';
+import {MnemonikClient, LocalSigner, verifyA2AAttestation} from '../dist/index.js';
 
 const gateway = 'https://research-gateway.invalid';
 const index = 'https://research-index.invalid/graphql';
@@ -78,7 +78,7 @@ export async function runResearchDiscoveryFailures({context, rows, identity, hea
       const row = [...registry.values()].find(item => `${gateway}/${item.locator.slice(5)}` === target);
       return row ? new Response(Buffer.from(row.coseEnvelopeHex, 'hex')) : new Response('', {status: 404});
     };
-    const client = new MnemonicClient({baseUrl: operator, signer: new LocalSigner(identity),
+    const client = new MnemonikClient({baseUrl: operator, signer: new LocalSigner(identity),
       jwt: 'SYNTHETIC-MUST-NOT-LEAK', a2aGatewayUrl: gateway, a2aIndexUrl: index,
       fetch: request,
       a2aIndex: {list: async () => [...local.values()], put: async row => {local.set(row.attestationId, row);}},

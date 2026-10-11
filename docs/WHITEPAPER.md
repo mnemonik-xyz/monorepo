@@ -1,4 +1,4 @@
-# Mnemonic: Verifiable Memory for AI Agents
+# Mnemonik: Verifiable Memory for AI Agents
 
 **Whitepaper** · Version 0.6 · 2 October 2026
 **Technical details:** [Yellow paper](./YELLOWPAPER.md)
@@ -11,7 +11,7 @@ The Russian edition may describe earlier behavior.
 ## 1. Summary
 
 An agent can keep useful context beyond one conversation, runtime, or service.
-Mnemonic represents that context as signed artifacts that clients can retain, verify, and recover independently.
+Mnemonik represents that context as signed artifacts that clients can retain, verify, and recover independently.
 For private memory, the client encrypts and signs before requesting external storage.
 
 The goal has three parts:
@@ -29,7 +29,7 @@ Saved context can depend on a single application, its database, or its account s
 Copying text alone loses evidence of authorship and links to earlier records.
 Encrypted storage adds another dependency: the keys needed to open it.
 
-Mnemonic separates signed memory from the services that deliver, discover, or index it.
+Mnemonik separates signed memory from the services that deliver, discover, or index it.
 Recovery still needs accessible artifact bytes, trusted authors and checkpoints, and any required decryption keys.
 It restores recorded context, not a running process, tool credentials, or unfinished actions.
 
@@ -180,7 +180,7 @@ See [payment and retry behavior](./artifact-payment-retries.md).
 
 ## 14. Relation to other standards
 
-MCP connects agents to tools; Mnemonic exposes service operations through MCP.
+MCP connects agents to tools; Mnemonik exposes service operations through MCP.
 A2A support records signed task, message and artifact history, including sealed content and externally verified parent links.
 ERC-8004 integration, richer cognitive schemas and formal capability tokens remain design work.
 They are not prerequisites for current local verification or recovery.

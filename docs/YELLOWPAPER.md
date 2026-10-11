@@ -1,4 +1,4 @@
-# Mnemonic Protocol Yellow Paper: Verifiable Memory Infrastructure for AI Agents
+# Mnemonik Protocol Yellow Paper: Verifiable Memory Infrastructure for AI Agents
 
 **Draft:** v0.6
 **Date:** 2 October 2026
@@ -9,7 +9,7 @@
 
 ## Abstract
 
-Mnemonic represents agent memory as signed artifacts that clients can retain and verify independently of the original operator.
+Mnemonik represents agent memory as signed artifacts that clients can retain and verify independently of the original operator.
 Client-prepared sealed memory is encrypted before delivery. The operator receives original signed ciphertext and public metadata.
 Authenticated checkpoints, retained keys and accessible artifact bytes permit recovery without the old operational SQL database.
 Recovery establishes ancestry to trusted heads, not global completeness or a provably newest state.
@@ -24,7 +24,7 @@ They are not implemented requirements or security guarantees.
 ## 1. Introduction
 
 An agent's saved context can outlive its runtime when the client retains a portable record and the keys needed to verify and open it.
-Mnemonic separates that record from the operator's search and delivery services.
+Mnemonik separates that record from the operator's search and delivery services.
 Original signatures remain verifiable after byte-preserving copying; storage and discovery still determine which bytes can be found.
 
 Embeddings accelerate search and can be rebuilt for a different model.
@@ -86,7 +86,7 @@ Effective agentic memory infrastructure must simultaneously satisfy four conditi
 
 Raw transformer attention states and Key-Value (KV) caches represent the wrong abstraction layer for portable memory. Transformer attention architectures are inherently model-specific, mathematically opaque, dimensionally massive, and entirely uninterpretable by humans or external verification systems.
 
-Conversely, the Mnemonic Protocol introduces **typed memory artifacts** as the fundamental unit of state. These artifacts are compact, structurally inspectable, universally portable, and natively optimized for modern search and retrieval mechanics.
+Conversely, the Mnemonik Protocol introduces **typed memory artifacts** as the fundamental unit of state. These artifacts are compact, structurally inspectable, universally portable, and natively optimized for modern search and retrieval mechanics.
 
 The protocol executes this design by composing two symmetrical pipelines built on top of the same cryptographic primitives: the **Sign Pipeline** for state production, and the **Share / Rehydrate Pipeline** for trust-boundary transit.
 
@@ -361,7 +361,7 @@ $$K_i < K_{i+1}$$
 
 $$\text{CID}(A) = \text{BLAKE3}(S_{\text{canonical}})$$
 
-Through this design, the Mnemonic Object Model transitions from a basic variable cache into a hardened, multi-layered attestation framework. The system securely binds the operational lineage of agent workflows—weaving together cognitive role configurations, retrieved vector sources, execution state receipts, and tokenized authorization parameters into a cohesive, cryptographically verifiable history.
+Through this design, the Mnemonik Object Model transitions from a basic variable cache into a hardened, multi-layered attestation framework. The system securely binds the operational lineage of agent workflows—weaving together cognitive role configurations, retrieved vector sources, execution state receipts, and tokenized authorization parameters into a cohesive, cryptographically verifiable history.
 
 
 ## 7. Memory Composition and Multi-Runtime Sharing
@@ -522,13 +522,13 @@ Current signatures do not establish compatibility with an unimplemented extensio
 
 *Implementation status:* this section is a design. None of the ERC-8004 paths (§9.2–§9.5) or the `did:mnemonic` method are implemented. The external specification is maintained separately at [EIP-8004](https://eips.ethereum.org/EIPS/eip-8004); this paper does not certify its current status or compatibility.
 
-The Mnemonic Protocol is engineered with the explicit intent to extend the **ERC-8004 ("Trustless Agents")** framework, serving as its definitive off-chain **Signed-Memory and Lineage Trust Extension**. By interfacing directly alongside decentralized identity singletons, machine micropayment protocols, and peer-to-peer messaging layers, the protocol introduces a fully compatible, content-addressed state-plane substrate to the Web3 agent ecosystem.
+The Mnemonik Protocol is engineered with the explicit intent to extend the **ERC-8004 ("Trustless Agents")** framework, serving as its definitive off-chain **Signed-Memory and Lineage Trust Extension**. By interfacing directly alongside decentralized identity singletons, machine micropayment protocols, and peer-to-peer messaging layers, the protocol introduces a fully compatible, content-addressed state-plane substrate to the Web3 agent ecosystem.
 
 ### 9.1 Technical Division of Labor and Core Thesis
 
 The ERC-8004 standard defines three public, on-chain registries to govern decentralized machine networks: **Identity** (ERC-721 tokenized credentials), **Reputation** (subjective network performance signals), and **Validation** (consensus-driven work audits). To retain strict execution efficiency and gas cost viability on execution layers, ERC-8004 leaves long-term context retention, vector-space indexing, and context window isolation out of scope.
 
-Mnemonic introduces a critical fourth trust category: **Cryptographically Verifiable Agent Memory**. An agent’s historical memory—what it learned, when, from which data ingredients, and under whose authority—represents a more robust security signal than flat network uptime metrics or subjective client ratings.
+Mnemonik introduces a critical fourth trust category: **Cryptographically Verifiable Agent Memory**. An agent’s historical memory—what it learned, when, from which data ingredients, and under whose authority—represents a more robust security signal than flat network uptime metrics or subjective client ratings.
 
 ```text
 [THE FOUR PILLARS OF ARCHITECTURAL SYNCHRONIZATION]
@@ -547,21 +547,21 @@ Mnemonic introduces a critical fourth trust category: **Cryptographically Verifi
 
 ```
 
-The unified division of labor is unambiguous: **ERC-8004** makes autonomous agents discoverable and rateable on the network plane; **Mnemonic** allows those same agents to cryptographically prove what they remember, produced, used, and shared over time.
+The unified division of labor is unambiguous: **ERC-8004** makes autonomous agents discoverable and rateable on the network plane; **Mnemonik** allows those same agents to cryptographically prove what they remember, produced, used, and shared over time.
 
 ---
 
-### 9.2 Path P1: The Validation Registry — Mnemonic as a Cryptographic State Oracle
+### 9.2 Path P1: The Validation Registry — Mnemonik as a Cryptographic State Oracle
 
 Unlike compute-heavy stake-secured re-execution or hardware-dependent Trusted Execution Environment (TEE) validation tracks, memory validation relies entirely on pure, low-overhead cryptography. It would validate the supplied history relative to independently trusted heads, without proving global completeness.
 
 #### 9.2.1 On-Chain Request Interface
 
-When an agent submits an output trajectory for audit under an ERC-8004 workflow, it commits a validation transaction targeting the asymmetric Mnemonic Validator Singleton:
+When an agent submits an output trajectory for audit under an ERC-8004 workflow, it commits a validation transaction targeting the asymmetric Mnemonik Validator Singleton:
 
 ```solidity
 validationRequest(
-    validatorAddress = 0xMnemonicValidatorAddress,
+    validatorAddress = 0xMnemonikValidatorAddress,
     agentId = 42,
     requestURI = "ipfs://bafybeiccanonicalmemorybatch...",
     requestHash = keccak256(canonical_cbor_payload_bytes)
@@ -571,7 +571,7 @@ validationRequest(
 
 #### 9.2.2 Off-Chain Validation Calculus
 
-The decentralized cluster of Mnemonic Validator Nodes processes the transaction out-of-band, executing an optimized Rust engine verification loop to assess the memory block against a strict set of architectural checks:
+The decentralized cluster of Mnemonik Validator Nodes processes the transaction out-of-band, executing an optimized Rust engine verification loop to assess the memory block against a strict set of architectural checks:
 
 1. **Signature Provenance:** Enforces that every sequential `COSE_Sign1` data block resolves to a valid cryptographic key identifier (`did:key` or `did:sol`).
 2. **Content Hash Determinism:** Recomputes the **BLAKE3** hash over the lexicographically sorted Concise Binary Object Representation (CBOR) payload to confirm byte-level data integrity.
@@ -601,7 +601,7 @@ This decentralized identifier maps directly to the ERC-8004 Identity Registry, r
 {
   "services": [
     {
-      "name": "Mnemonic",
+      "name": "Mnemonik",
       "endpoint": "https://mcp.mnemonik.xyz/mcp",
       "version": "v0.2",
       "capabilities": ["sign", "recall", "verify", "anchor"]
@@ -625,7 +625,7 @@ If an ERC-8004 Agent Identity NFT is transferred to a new wallet address on-chai
 
 ### 9.4 Path P3: The Reputation Registry — Evidence-Based Attestation Loops
 
-Standard reputation ranking frameworks are vulnerable to Sybil manipulation, fake review insertion, and arbitrary down-voting. Mnemonic transitions the ERC-8004 Reputation Registry into an objective, evidence-backed verification loop.
+Standard reputation ranking frameworks are vulnerable to Sybil manipulation, fake review insertion, and arbitrary down-voting. Mnemonik transitions the ERC-8004 Reputation Registry into an objective, evidence-backed verification loop.
 
 When a client submits an execution rating or performance signal to the registry, it must include a signed `mnemonic_attestation` payload block. This metadata explicitly binds the rating to the exact content-addressed data nodes generated during the task execution sequence:
 
@@ -657,7 +657,7 @@ The multi-tiered integration plan coordinates its network payment routines using
 
 ## 10. Use Cases
 
-Mnemonic supports a family of agent-memory patterns. Each item below links to a deep-dive document. For data fields, execution sequences and equations, see [Usecases](./usecases.md). Most of these patterns depend on sharing (§7), which is not implemented yet.
+Mnemonik supports a family of agent-memory patterns. Each item below links to a deep-dive document. For data fields, execution sequences and equations, see [Usecases](./usecases.md). Most of these patterns depend on sharing (§7), which is not implemented yet.
 
 1. [Shared Memory Layer](./usecases/shared-memory-layer.md)
 2. [Provenance and Attestation Layer](./usecases/provenance-attestation-layer.md)
@@ -857,7 +857,7 @@ The active [product work](../work/protocol-product/README.md) records scope and 
 
 ## 16. Conclusion
 
-Mnemonic provides signed artifacts, private client preparation and recovery tools that can operate without the original operator's SQL history.
+Mnemonik provides signed artifacts, private client preparation and recovery tools that can operate without the original operator's SQL history.
 Recoverability depends on retained bytes, keys, independently trusted checkpoints and supported adapters.
 Exact-byte migration preserves original signatures; it does not establish global completeness, trusted time, or permanent availability.
 Current scope and evidence are listed in [source capabilities](./source-capabilities.md).
@@ -872,7 +872,7 @@ Current scope and evidence are listed in [source capabilities](./source-capabili
 
 
 <a id="ref-2"></a>
-2. *[Sublinear Verifiable Recall: An Inverted-File Cascade for Compressed Embedding Retrieval in the Mnemonic Protocol](https://www.researchgate.net/publication/404381758_Sublinear_Verifiable_Recall_An_Inverted-File_Cascade_for_Compressed_Embedding_Retrieval_in_the_Mnemonic_Protocol).*
+2. *[Sublinear Verifiable Recall: An Inverted-File Cascade for Compressed Embedding Retrieval in the Mnemonik Protocol](https://www.researchgate.net/publication/404381758_Sublinear_Verifiable_Recall_An_Inverted-File_Cascade_for_Compressed_Embedding_Retrieval_in_the_Mnemonik_Protocol).*
 
 <a id="ref-3"></a>
 3. *[Portable Agent Memory: A Protocol for Cryptographically-Verified Memory Transfer Across Heterogeneous AI Agents](https://arxiv.org/abs/2605.11032).* arXiv:2605.11032.

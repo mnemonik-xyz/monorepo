@@ -14,7 +14,7 @@
 //! set of X25519 recipient public keys and opens it with any one recipient's
 //! secret key. Recall over encrypted memories is therefore **client-side after
 //! decryption** (the operator only ever stores ciphertext). Mapping the
-//! Mnemonic Ed25519 identity to its X25519 recipient key (the standard
+//! Mnemonik Ed25519 identity to its X25519 recipient key (the standard
 //! birational conversion, design §18) is the client-side key-management
 //! adapter that supplies the keys to this layer.
 //!

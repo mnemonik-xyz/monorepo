@@ -2,7 +2,7 @@
 name = "mnemonic-core"
 version = "0.2.8"
 edition = "2021"
-description = "Mnemonic Protocol core library — verifiable memory attestation for AI agents"
+description = "Mnemonik Protocol core library — verifiable memory attestation for AI agents"
 
 [lib]
 # `cdylib` is required for `wasm-pack build core --target web` to emit a `.wasm`

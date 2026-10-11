@@ -11,7 +11,7 @@ size: M
 
 Шипаем два npm-пакета под scope `@mnemonik-xyz`:
 
-1. **`@mnemonik-xyz/sdk`** — runtime-agnostic JavaScript/TypeScript библиотека для работы с Mnemonic Protocol через hosted MCP-сервер (`mcp.mnemonik.xyz`). Чистый ESM, без node-specific API. Работает в Node 20+, Bun, Deno, современных браузерах, Cloudflare Workers, Chrome-extension контексте. Реализует MCP HTTP-клиент, OAuth 2.1 + PKCE auth-flow (interactive + headless modes), inline COSE_Sign1 подпись через переиспользуемый `@mnemonic/core` WASM-бэкенд, и pluggable `Signer` interface (LocalSigner для Phase 1, TurnkeySigner / WebAuthnSigner — Phase 1.5+).
+1. **`@mnemonik-xyz/sdk`** — runtime-agnostic JavaScript/TypeScript библиотека для работы с Mnemonik Protocol через hosted MCP-сервер (`mcp.mnemonik.xyz`). Чистый ESM, без node-specific API. Работает в Node 20+, Bun, Deno, современных браузерах, Cloudflare Workers, Chrome-extension контексте. Реализует MCP HTTP-клиент, OAuth 2.1 + PKCE auth-flow (interactive + headless modes), inline COSE_Sign1 подпись через переиспользуемый `@mnemonic/core` WASM-бэкенд, и pluggable `Signer` interface (LocalSigner для Phase 1, TurnkeySigner / WebAuthnSigner — Phase 1.5+).
 
 2. **`@mnemonik-xyz/cli`** — Node-CLI бинарь для пользователей. Тонкая обёртка над SDK: argv-парсинг, persistence keypair'а в `~/.mnemonic/identity.json`, persistence JWT в `~/.mnemonic/token.json`, форматирование вывода (human-readable text по умолчанию, `--json` для пайпа, `--quiet` для CI). Команды: `mnemonic init`, `mnemonic login`, `mnemonic sign`, `mnemonic recall`, `mnemonic verify`, `mnemonic whoami`, `mnemonic prove`.
 
@@ -101,11 +101,11 @@ storage_mode: local
 ### Сценарий 7 — Programmatic SDK use (LangChain / agent / Chrome ext)
 
 ```typescript
-import { MnemonicClient, LocalSigner, Keypair } from '@mnemonik-xyz/sdk';
+import { MnemonikClient, LocalSigner, Keypair } from '@mnemonik-xyz/sdk';
 
 const kp = Keypair.fromJSON(JSON.parse(await fs.readFile('~/.mnemonic/identity.json')));
 const signer = new LocalSigner(kp);
-const client = new MnemonicClient({
+const client = new MnemonikClient({
   baseUrl: 'https://mc.mnemonik.xyz',
   signer,
   jwt: process.env.MNEMONIC_JWT,  // headless mode
@@ -228,4 +228,4 @@ const status = await client.verify(attestationId);  // 'verified' | 'tampered' |
 - Та же identity (тот же pubkey) видит те же атестации в webapp (`mnemonik.xyz/install`) и в Claude.ai через MCP — кросс-клиентская портативность
 - `mnemonic verify <id>` возвращает `verified`, exit code 0
 - `mnemonic verify <some-other-user-id>` возвращает `not_found` (не tampered) — изоляция тенантов работает
-- Programmatic SDK use в чужом Node-скрипте: `import { MnemonicClient } from '@mnemonik-xyz/sdk'` работает без ошибок типов в TS
+- Programmatic SDK use в чужом Node-скрипте: `import { MnemonikClient } from '@mnemonik-xyz/sdk'` работает без ошибок типов в TS

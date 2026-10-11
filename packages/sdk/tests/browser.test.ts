@@ -5,7 +5,7 @@
 // Two assertions, both driving the T02 deliverable:
 //
 //   1. `client_works_in_browser_env` — under a jsdom global, importing the
-//      built `dist/browser.js` exposes `MnemonicClient`. Instantiating it
+//      built `dist/browser.js` exposes `MnemonikClient`. Instantiating it
 //      and calling `signMemory` issues exactly one `POST /mcp` with the
 //      `mnemonic_sign_memory` tools/call envelope (the start of the
 //      deferred-signing flow per Decision 7). The mocked fetch short-
@@ -35,7 +35,7 @@ describe("browser bundle (dist/browser.js)", () => {
 
   it("client_works_in_browser_env: signMemory hits /mcp with the deferred-signing envelope", async () => {
     const mod = await import(/* @vite-ignore */ pathToFileURL(BUNDLE).href);
-    expect(typeof mod.MnemonicClient).toBe("function");
+    expect(typeof mod.MnemonikClient).toBe("function");
 
     const captured: Array<{ url: string; init: RequestInit }> = [];
     const fetchMock = (url: string | URL | Request, init?: RequestInit) => {
@@ -60,7 +60,7 @@ describe("browser bundle (dist/browser.js)", () => {
       pubkey_base58: "TestPubkey123",
     };
 
-    const client = new mod.MnemonicClient({
+    const client = new mod.MnemonikClient({
       baseUrl: "https://mcp.example",
       jwt: "test.jwt.token",
       signer: {

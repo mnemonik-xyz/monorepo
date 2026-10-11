@@ -1,6 +1,6 @@
 # Security Policy
 
-The Mnemonic Protocol team takes security seriously. Thank you for taking the time to disclose responsibly.
+The Mnemonik Protocol team takes security seriously. Thank you for taking the time to disclose responsibly.
 
 ## Reporting a Vulnerability
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://mnemonik.xyz/.well-known/agent.schema.json",
-  "name": "Mnemonic Protocol",
+  "name": "Mnemonik Protocol",
   "description": "Signed memory artifacts and recovery tools for AI agents. Current source supports client-side sealed preparation, independent verification, and exact-byte external delivery. Legacy MCP signing prepares plaintext on the operator; plain stdio local rows are unsigned. This card describes source interfaces, not verified capabilities of every deployed or published version.",
   "url": "https://mnemonik.xyz",
   "documentation": "https://github.com/mnemonik-xyz/monorepo#readme",

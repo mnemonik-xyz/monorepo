@@ -86,10 +86,10 @@ Append-only log of decisions and audit findings during feature execution.
 **Date:** 2026-04-27
 
 **Summary:** Copied 3 .md (DRAG_ANALYSIS, WEB_RESEARCH_TRUSTLESS_RAG, DECENTRALIZED_RAG_LANDSCAPE) from `recovered/competitive-landscape/` to `docs/competitive-landscape/` and authored an adapted README dropping the `MCP_SERVER_BACKEND_FEATURES_COMPARISON.md` reference per Decision 2 (now a 3-doc set rather than 4). Applied the 4 pre-flight token replacements during promotion:
-- `docs/competitive-landscape/DRAG_ANALYSIS.md:37` (delete-line) — before `Mnemonic records: SHA3-256 hash of the encrypted memory blob via Solana memo.` → after: line removed.
+- `docs/competitive-landscape/DRAG_ANALYSIS.md:37` (delete-line) — before `Mnemonik records: SHA3-256 hash of the encrypted memory blob via Solana memo.` → after: line removed.
 - `docs/competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md:45` — before `| Status | Pre-V1, prototype validated | Live (Kinic-CLI shipped) |` → after `| Status | active Rust MCP server | Live (Kinic-CLI shipped) |`.
-- `docs/competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md:64` (delete-tokens) — before `- Mnemonic commits the memory blob (SHA3 hash); V3DB proves the retrieval result` → after `- Mnemonic commits the memory blob; V3DB proves the retrieval result`.
-- `docs/competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md:132` — before `| Mnemonic | Memory integrity (hash) | ✅ 4/8-bit | ✅ | Arweave+Solana | Pre-V1 |` → after `| Mnemonic | Memory integrity (hash) | ✅ 4/8-bit | ✅ | Arweave+Solana | v1.0 (active) |`.
+- `docs/competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md:64` (delete-tokens) — before `- Mnemonik commits the memory blob (SHA3 hash); V3DB proves the retrieval result` → after `- Mnemonik commits the memory blob; V3DB proves the retrieval result`.
+- `docs/competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md:132` — before `| Mnemonik | Memory integrity (hash) | ✅ 4/8-bit | ✅ | Arweave+Solana | Pre-V1 |` → after `| Mnemonik | Memory integrity (hash) | ✅ 4/8-bit | ✅ | Arweave+Solana | v1.0 (active) |`.
 DECENTRALIZED_RAG_LANDSCAPE.md copied verbatim. Appended a "Wave 3 Task 4 — promotion log" sub-section to `code-research.md` §4.4 with the 4 before/after pairs.
 
 **Commit:** `d8df681`
@@ -130,7 +130,7 @@ Evergreen direction-of-travel hints surfaced during the docs-actualization featu
 
 ### Browser-WASM verification UI
 
-**Problem:** Today's verification path requires a runtime that can run the Rust `verify` tool — the MCP server or the native binary. Browser users cannot independently verify a recalled attestation without contacting a backend, which weakens the core "anyone can verify" property of the Mnemonic Protocol.
+**Problem:** Today's verification path requires a runtime that can run the Rust `verify` tool — the MCP server or the native binary. Browser users cannot independently verify a recalled attestation without contacting a backend, which weakens the core "anyone can verify" property of the Mnemonik Protocol.
 
 **Proposed Approach:** Surface the existing `verify` and `whoami` exports from the `mnemonic-core` WASM build inside the webapp as a verification panel. The panel takes an `attestation_id` (or full bundle), fetches the Arweave payload, runs blake3 + COSE_Sign1 verification entirely in-browser, optionally cross-checks the Solana SPL Memo anchor, and renders OK / tampered / not-found badges. Reuse design tokens from `ux-guidelines.md`.
 

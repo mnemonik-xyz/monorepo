@@ -13,7 +13,7 @@
 #
 # What it does:
 #   1. Read existing config (preserve other servers).
-#   2. Add / overwrite the "Mnemonic" entry pointing at our hosted MCP.
+#   2. Add / overwrite the "Mnemonik" entry pointing at our hosted MCP.
 #   3. Restart Claude Desktop (kill + relaunch).
 #   4. Assert the config file was written.
 #
@@ -23,7 +23,7 @@
 
 set -euo pipefail
 
-APP_NAME="Mnemonic"
+APP_NAME="Mnemonik"
 MCP_URL="https://mcp.mnemonik.xyz/mcp"
 CONFIG_PATH="${HOME}/Library/Application Support/Claude/claude_desktop_config.json"
 APP_PATH="/Applications/Claude.app"
@@ -83,8 +83,8 @@ if not entry:
 if entry.get("url") != url:
     print(f"FAIL: url mismatch", file=sys.stderr)
     sys.exit(1)
-print("OK: claude_desktop_config.json contains Mnemonic entry.")
+print("OK: claude_desktop_config.json contains Mnemonik entry.")
 PY
 
 green "PASS: Claude Desktop config updated. Wait ~10s, then trigger any"
-green "Mnemonic tool from the chat. First call should pop the OAuth browser."
+green "Mnemonik tool from the chat. First call should pop the OAuth browser."

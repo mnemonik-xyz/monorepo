@@ -44,7 +44,7 @@ use std::sync::Arc;
 #[derive(Parser)]
 #[command(
     name = "mnemonic-mcp",
-    about = "Mnemonic MCP server — verifiable memory attestation"
+    about = "Mnemonik MCP server — verifiable memory attestation"
 )]
 struct Cli {
     /// Transport: "stdio" or "http". Ignored when a subcommand is supplied
@@ -647,7 +647,7 @@ async fn main() -> anyhow::Result<()> {
     let (keypair, identity_storage) = match std::env::var_os("MNEMONIC_KEYPAIR_PATH") {
         Some(path) if !path.is_empty() => {
             let path = std::path::PathBuf::from(path);
-            // Accept both the Solana CLI array and Mnemonic's established
+            // Accept both the Solana CLI array and Mnemonik's established
             // legacy identity document (`{"secret":[…], …}`). The latter is
             // what the protected deployment identity already uses.
             let raw = std::fs::read(&path).map_err(|e| {
@@ -669,12 +669,12 @@ async fn main() -> anyhow::Result<()> {
                     .and_then(|secret| secret.as_array().cloned())
                     .ok_or_else(|| {
                         anyhow::anyhow!(
-                            "MNEMONIC_KEYPAIR_PATH {} must be a Solana keypair array or a Mnemonic identity object with a secret array",
+                            "MNEMONIC_KEYPAIR_PATH {} must be a Solana keypair array or a Mnemonik identity object with a secret array",
                             path.display()
                         )
                     })?,
                 _ => anyhow::bail!(
-                    "MNEMONIC_KEYPAIR_PATH {} must be a Solana keypair array or a Mnemonic identity object",
+                    "MNEMONIC_KEYPAIR_PATH {} must be a Solana keypair array or a Mnemonik identity object",
                     path.display()
                 ),
             };

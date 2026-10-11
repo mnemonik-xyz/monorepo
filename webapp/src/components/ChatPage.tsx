@@ -186,7 +186,7 @@ export default function ChatPage({
           {messages.length === 0 && (
             <div className="py-16 text-center">
               <p className="text-text-muted">
-                Ask a question about the Mnemonic Protocol.
+                Ask a question about the Mnemonik Protocol.
               </p>
             </div>
           )}
@@ -248,7 +248,7 @@ export default function ChatPage({
             placeholder={
               isLimitReached
                 ? "Session limit reached."
-                : "Ask about the Mnemonic Protocol..."
+                : "Ask about the Mnemonik Protocol..."
             }
             rows={1}
             className="flex-1 resize-none rounded-lg border border-text-muted/20 bg-white/5 px-4 py-3 text-sm text-text-primary placeholder-text-muted/50 outline-none transition-colors focus:border-accent-primary/50 disabled:cursor-not-allowed disabled:opacity-50"

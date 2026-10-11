@@ -1,4 +1,4 @@
-/** API client for the Mnemonic Protocol chat backend. */
+/** API client for the Mnemonik Protocol chat backend. */
 
 // Configurable for e2e tests + local dev. Parallels the pattern in
 // Sign.tsx / Consent.tsx. Override via Vite env:

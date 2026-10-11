@@ -30,7 +30,7 @@ claim and it does not validate real Arweave or production Solana delivery.
 
 ### Durable-operation progress
 
-Mnemonic now has a minimal SQLite-backed `PaidOperation` record. It persists
+Mnemonik now has a minimal SQLite-backed `PaidOperation` record. It persists
 the operation binding reference, quote metadata, state, and provider receipt
 without storing artifact plaintext. On a resumed payment gate it asks the
 provider for the existing operation status before issuing a quote, so a settled
@@ -57,18 +57,18 @@ work:
    content before the canonical client-signed artifact exists. A quote and
    receipt must bind the versioned canonical signed artifact hash. This is
    tracked in [#216](https://github.com/mnemonik-xyz/monorepo/issues/216).
-2. **Durable operation recovery.** Mnemonic currently retains Universal
+2. **Durable operation recovery.** Mnemonik currently retains Universal
    Paywall quote/authorization state in memory. A browser reload, client
    disconnect, or MCP restart must resume the same operation and must never
    request a second charge.
-3. **Wallet/subject binding.** Production must link the authenticated Mnemonic
+3. **Wallet/subject binding.** Production must link the authenticated Mnemonik
    subject to the payer wallet using a fresh wallet-signed challenge. A
    configured test wallet is not an identity-binding mechanism.
 4. **No raw authorization handoff.** The public E2E authorization-retrieval
    route must not be part of the production flow. Browser, CLI, and IDE
    clients should use an authenticated operation-status/receipt contract;
    raw wallet authorizations are never exposed or logged.
-5. **Test health.** The Mnemonic MCP test initializers need updating for the
+5. **Test health.** The Mnemonik MCP test initializers need updating for the
    new payment fields, and coverage must include restart, replay, duplicate
    callback, quote-expiry, wallet-rejection, delivery-failure, and exact-mode
    concurrency scenarios.
@@ -85,7 +85,7 @@ Solana/Arweave delivery evidence. It cannot be the only operation store:
 - operation recovery needs to present typed user-visible states before a
   settlement or anchor transaction exists.
 
-Mnemonic will therefore persist a minimal `PaidOperation` record keyed by
+Mnemonik will therefore persist a minimal `PaidOperation` record keyed by
 `operation_id`. The record contains only correlation data, binding digest,
 state, and provider/delivery receipt references—not private artifact contents.
 Provider receipts and chain transactions remain independently verifiable
@@ -96,7 +96,7 @@ verification paths unchanged.
 
 1. Restore MCP test compilation and add regression coverage for current
    payment-state initialization.
-2. Define and persist the minimal `PaidOperation` state machine in Mnemonic;
+2. Define and persist the minimal `PaidOperation` state machine in Mnemonik;
    recover provider status by `operation_id` after MCP restart.
 3. Canonicalize and client-sign the artifact before quote creation, introduce a
    versioned artifact-binding format, and retain legacy recall compatibility.
@@ -115,7 +115,7 @@ verification paths unchanged.
 - A one-time payment is bound to exactly one canonical client-signed artifact.
 - Reloads, disconnects, and MCP/provider restarts recover the same operation.
 - No retry can create a duplicate charge.
-- Wallet identity is bound to the authenticated Mnemonic subject.
+- Wallet identity is bound to the authenticated Mnemonik subject.
 - Raw wallet authorizations and secrets are never exposed to other callers.
 - Legacy anchored artifacts remain recallable and verifiable.
 - The local and staging test matrices pass, including the failure/recovery

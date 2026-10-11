@@ -14,7 +14,7 @@ describe("InstallButtons", () => {
     const cursor = screen.getByTestId("install-cursor") as HTMLAnchorElement;
     expect(cursor.href.startsWith("cursor://")).toBe(true);
     const cursorUrl = new URL(cursor.href);
-    expect(cursorUrl.searchParams.get("name")).toBe("Mnemonic");
+    expect(cursorUrl.searchParams.get("name")).toBe("Mnemonik");
     const cursorConfigB64 = cursorUrl.searchParams.get("config");
     expect(cursorConfigB64).not.toBeNull();
     const decodedConfig = JSON.parse(atob(cursorConfigB64!));
@@ -45,7 +45,7 @@ describe("InstallButtons", () => {
     );
     const parsedVscode = JSON.parse(vscodeConfig);
     expect(parsedVscode).toEqual({
-      name: "Mnemonic",
+      name: "Mnemonik",
       type: "http",
       url: "https://mcp.mnemonik.xyz/mcp",
     });
@@ -141,7 +141,7 @@ describe("InstallButtons", () => {
       decodeURIComponent(vscode.href.replace("vscode:mcp/install?", ""))
     );
     expect(vscodeConfig).toEqual({
-      name: "Mnemonic",
+      name: "Mnemonik",
       type: "http",
       url: "https://mcp.mnemonik.xyz/mcp",
     });

@@ -20,7 +20,7 @@ journey is a one-time payment for one anchor. People who anchor repeatedly may
 explicitly enable a capped, expiring allowance to avoid repeated wallet prompts.
 
 Payment is part of the `participate` journey, not a separate product. The
-client remains the artifact signer. Mnemonic uses the payment only to fund the
+client remains the artifact signer. Mnemonik uses the payment only to fund the
 storage and anchoring operation.
 
 ## Product invariants
@@ -37,7 +37,7 @@ storage and anchoring operation.
   wallet has approved it.
 - One user action creates at most one charge. Retrying or reopening the browser
   must not charge again.
-- Payment never authorizes Mnemonic to sign an artifact for the user.
+- Payment never authorizes Mnemonik to sign an artifact for the user.
 - A payment or allowance can be inspected and independently reconciled with an
   operation receipt.
 
@@ -55,7 +55,7 @@ must explain any required network switch before opening the wallet.
 
 ### Set a spending limit — optional
 
-The user may authorize future Mnemonic anchors up to a maximum USDC amount and
+The user may authorize future Mnemonik anchors up to a maximum USDC amount and
 until a visible expiry. This option is described in ordinary language, for
 example: **Avoid wallet prompts — allow up to 10 anchors / 10 USDC until 20
 July**.
@@ -66,7 +66,7 @@ The user sees:
 - price of the current anchor;
 - estimated number of anchors covered at the current price;
 - expiry;
-- recipient, displayed as **Mnemonic anchoring service**;
+- recipient, displayed as **Mnemonik anchoring service**;
 - remaining allowance; and
 - a revoke action.
 
@@ -109,7 +109,7 @@ protocol operations as unexplained, unrelated requests.
 
 1. The user explicitly selects **Anchor on-chain**.
 2. The UI shows the exact current charge and remaining allowance.
-3. The user confirms in the Mnemonic surface; no wallet prompt is required.
+3. The user confirms in the Mnemonik surface; no wallet prompt is required.
 4. The operation anchors and produces the same receipt as a one-time payment.
 
 If the allowance is insufficient or expired, the user is offered **Pay once**
@@ -118,7 +118,7 @@ while the decision is pending.
 
 ### Journey D — IDE and coding-agent handoff
 
-1. The IDE command opens one secure Mnemonic approval URL.
+1. The IDE command opens one secure Mnemonik approval URL.
 2. The page performs preview, client signing, payment choice, wallet approval,
    progress, and receipt without copy/pasting tokens or transaction hashes.
 3. The IDE polls the same correlation ID and updates automatically when the page
@@ -181,7 +181,7 @@ remain available for verification without dominating the journey.
 - A connected-wallet user can complete a first one-time anchor with one wallet
   payment approval.
 - A user with an active allowance completes an anchor without a wallet prompt,
-  after one explicit Mnemonic confirmation.
+  after one explicit Mnemonik confirmation.
 - No flow asks the user to copy a transaction signature, payment proof, or
   correlation ID.
 - Closing and reopening the approval page or IDE resumes the same operation.

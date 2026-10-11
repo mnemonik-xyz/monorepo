@@ -1,7 +1,7 @@
 {
   "name": "@mnemonik-xyz/conformance",
   "version": "1.0.0",
-  "description": "A2A protocol conformance test vectors for the Mnemonic attestation pipeline. Third-party implementations load this package and verify byte-for-byte parity of JCS canonicalization, CBOR envelope, and COSE_Sign1 serialization.",
+  "description": "A2A protocol conformance test vectors for the Mnemonik attestation pipeline. Third-party implementations load this package and verify byte-for-byte parity of JCS canonicalization, CBOR envelope, and COSE_Sign1 serialization.",
   "license": "Apache-2.0",
   "private": false,
   "type": "module",

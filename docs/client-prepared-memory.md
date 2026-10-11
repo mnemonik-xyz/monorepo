@@ -6,7 +6,7 @@ WASM/native implementation.
 
 ## Prepare, retain, deliver
 
-`MnemonicClient.sealMemory(content, {mode: "store"})` encrypts and signs on the client without any HTTP
+`MnemonikClient.sealMemory(content, {mode: "store"})` encrypts and signs on the client without any HTTP
 request. It returns `memoryHash`, `outerCbor`, and `signedBytes`. The client keeps a session-only cache; the
 caller must persist returned bytes and back up its identity for recovery after restart.
 `openMemory(outerCbor)` decrypts locally; it is not a signature-verification API. Independent recovery must

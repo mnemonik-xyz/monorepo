@@ -80,7 +80,7 @@ from Anthropic/OpenAI cloud IP ranges (no VPN, no localhost).
    `prove_identity`, `recall`) but add a thin `get_protocol_knowledge`
    tool that returns the attested bundle for the marketing-site visitor
    flow.
-4. Test in Cursor (`cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonic&config=<base64>`)
+4. Test in Cursor (`cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonik&config=<base64>`)
    and Claude.ai (Settings → Connectors → Add custom connector).
 
 ### 3.2 OAuth + First-Party Connector Stores
@@ -122,7 +122,7 @@ honest about the architecture.
 
 ### 3.4 IDE Deeplinks (Cursor, VS Code, Windsurf)
 
-Cursor: `cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonic&config=<base64-json-of-{"url":"https://mcp.mnemonic.dev"}>`.
+Cursor: `cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonik&config=<base64-json-of-{"url":"https://mcp.mnemonic.dev"}>`.
 One click, deeplink launches Cursor and prompts for install. VS Code has
 `vscode:mcp/install` and an `@mcp` marketplace search. These are the
 lowest-friction installs for devs and almost free to ship — just
@@ -188,7 +188,7 @@ paste in target). Add a "Open ChatGPT / Claude / Perplexity" sibling
 button that opens the destination in a new tab. Compose a self-contained
 markdown system prompt that:
 
-1. Identifies itself as a Mnemonic Protocol attested context bundle.
+1. Identifies itself as a Mnemonik Protocol attested context bundle.
 2. Embeds the COSE Ed25519 signature, Solana SPL Memo signature, and
    Arweave URL as verifiable references.
 3. Instructs the assistant: "If you have a `verify` tool from

@@ -5,7 +5,7 @@ size: L
 branch: feat/drop-solana-anchor
 ---
 
-# Tech Spec: chain-agnostic Mnemonic, starting with the Solana anchor
+# Tech Spec: chain-agnostic Mnemonik, starting with the Solana anchor
 
 > **Order:** this is one step of a larger sequence. See
 > [`work/DECOUPLING-SEQUENCE.md`](../DECOUPLING-SEQUENCE.md) for where it sits and what must

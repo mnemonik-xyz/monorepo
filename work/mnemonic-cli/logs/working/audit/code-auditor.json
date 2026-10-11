@@ -49,7 +49,7 @@
       "severity": "minor",
       "category": "logging / hygiene",
       "file": "packages/cli/src/errors.ts:118 + packages/sdk/src/errors.ts:60-65",
-      "issue": "`MnemonicError.cause` is stored unredacted — Decision 10 documents this as developer-facing. CLI's `handleError` only redacts `err.stack ?? err.message` for unknown errors; for typed `CliError` it prints `err.name: err.message` (already redacted) but does NOT walk the cause chain. If a future code path does `console.error(err.cause)` or `console.error(err)` (which JS prints with the cause chain by default in Node 18+), an unredacted JWT could leak. The current call sites are clean, but the invariant is fragile — one `console.log(err)` away from a regression.",
+      "issue": "`MnemonikError.cause` is stored unredacted — Decision 10 documents this as developer-facing. CLI's `handleError` only redacts `err.stack ?? err.message` for unknown errors; for typed `CliError` it prints `err.name: err.message` (already redacted) but does NOT walk the cause chain. If a future code path does `console.error(err.cause)` or `console.error(err)` (which JS prints with the cause chain by default in Node 18+), an unredacted JWT could leak. The current call sites are clean, but the invariant is fragile — one `console.log(err)` away from a regression.",
       "recommendation": "Either (a) redact `cause` too at the SDK boundary (lose some debug info but match the strict reading of Decision 10), or (b) add a comment in handleError that `console.log(err)` is forbidden and `redactSecrets(util.inspect(err))` must be used. Tests already assert no JWT-shape strings reach stderr; add one that prints `JSON.stringify(err)` for a wrapped SDK error and asserts the same."
     },
     {

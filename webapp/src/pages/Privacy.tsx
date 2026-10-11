@@ -4,7 +4,7 @@ import SiteHeader from "../components/SiteHeader";
 import { EXTERNAL_LINKS } from "../lib/links";
 
 /**
- * `/privacy` — privacy policy for the public Mnemonic Protocol surface
+ * `/privacy` — privacy policy for the public Mnemonik Protocol surface
  * (mnemonik.xyz landing + chat demo, mcp.mnemonik.xyz MCP server).
  *
  * Tone per ux-guidelines.md: technical / precise. No marketing language,
@@ -40,7 +40,7 @@ export default function Privacy() {
                 Effective date: 2026-09-27
               </p>
               <p className="text-[14px] leading-relaxed text-text-muted">
-                This policy describes what data the Mnemonic Protocol handles
+                This policy describes what data the Mnemonik Protocol handles
                 when you use the public website at{" "}
                 <code className="rounded bg-white/[0.06] px-1 py-0.5 font-mono text-[12px] text-text-primary">
                   mnemonik.xyz
@@ -49,15 +49,15 @@ export default function Privacy() {
                 <code className="rounded bg-white/[0.06] px-1 py-0.5 font-mono text-[12px] text-text-primary">
                   mcp.mnemonik.xyz
                 </code>
-                . Mnemonic is open-source under Apache 2.0; the canonical
+                . Mnemonik is open-source under Apache 2.0; the canonical
                 reference for its data handling is the source code, not this
                 document.
               </p>
             </header>
 
-            <Section title="1. What Mnemonic is">
+            <Section title="1. What Mnemonik is">
               <P>
-                Mnemonic Protocol is verifiable, persistent memory for AI
+                Mnemonik Protocol is verifiable, persistent memory for AI
                 agents. A memory item is semantically embedded,
                 scalar-quantised, canonicalised to deterministic CBOR, hashed
                 with BLAKE3, and signed as a COSE_Sign1 artifact under an
@@ -68,7 +68,7 @@ export default function Privacy() {
               <P>
                 Because the cryptographic surface — keypair, hash, signature,
                 Arweave data item — is the substrate of the protocol itself,
-                the privacy properties of what you put into Mnemonic are
+                the privacy properties of what you put into Mnemonik are
                 determined by the design choices described below, not by an
                 operator policy.
               </P>
@@ -126,7 +126,7 @@ export default function Privacy() {
                 </li>
               </Bullets>
               <P>
-                The in-page chat is intended as a demonstration of Mnemonic with
+                The in-page chat is intended as a demonstration of Mnemonik with
                 a local model. Text you enter into the chat is sent to the demo
                 backend so it can produce a reply and is not retained beyond the
                 lifetime of the response unless you explicitly export it as an
@@ -236,13 +236,13 @@ export default function Privacy() {
                 <strong className="text-text-primary">Arweave</strong> stores
                 the signed CBOR bytes as an ANS-104 data item. Arweave is
                 designed to be permanent; once a data item confirms, its
-                contents are not deletable by Mnemonic, by any operator, or by
-                Arweave miners. Mnemonic does not write full-mode attestations
+                contents are not deletable by Mnemonik, by any operator, or by
+                Arweave miners. Mnemonik does not write full-mode attestations
                 to Solana. Older full-mode attestations also published a content
                 hash in a public Solana transaction, which is not deletable.
               </P>
               <P>
-                Operators of Mnemonic — including the maintainers of
+                Operators of Mnemonik — including the maintainers of
                 mnemonik.xyz — cannot retract data committed to Arweave. The
                 Arweave bytes contain your content as plain text. Use full mode only with content
                 for which permanent public disclosure is acceptable.
@@ -275,7 +275,7 @@ export default function Privacy() {
 
             <Section title="8. Children">
               <P>
-                Mnemonic is a developer tool. It is not directed at children
+                Mnemonik is a developer tool. It is not directed at children
                 under the age of 13, and we do not knowingly process data
                 submitted by them.
               </P>

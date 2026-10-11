@@ -41,7 +41,7 @@ memory pool.
   almost only in 2025–26 research papers, not shipped roadmaps; the verifiable-
   agent demand that *does* exist targets **identity / credentials / audit-logs**,
   not a shared memory store [conf 0.6–0.75, agent self-flagged as unproven].
-- BUT the one broadcast pattern that **is shipping** is exactly Mnemonic-shaped:
+- BUT the one broadcast pattern that **is shipping** is exactly Mnemonik-shaped:
   ERC-8004's **public registry of signed, hash-committed, off-chain attestations**
   that anyone can discover, fetch, verify, and aggregate (reputation/validation)
   [0.9]. This is "publish a verifiable record," not "hand memory to a peer."
@@ -75,7 +75,7 @@ Three tiers, increasing strength and cost:
   it collapses "we wrote it" into "we just retrieved the exact signed bytes
   back" [0.85, storage angle].
 
-## Synthesis → recommendation for Mnemonic
+## Synthesis → recommendation for Mnemonik
 
 The two answers reinforce each other and point one way:
 
@@ -89,8 +89,8 @@ operators is still aspirational, so we don't bet V1 on it.
 **Delivery guarantee V1 = D1 (durable write + read-back + re-verify).** It is the
 cheapest thing meaningfully stronger than a receipt, needs **no online
 counterparty**, and **directly fills the exact gap ERC-8004/IPFS leave open**
-(hash committed, availability unguaranteed). That gap is Mnemonic's wedge:
-*"ERC-8004 proves a hash; Mnemonic proves the bytes are actually retrievable."*
+(hash committed, availability unguaranteed). That gap is Mnemonik's wedge:
+*"ERC-8004 proves a hash; Mnemonik proves the bytes are actually retrievable."*
 
 **Forward-shape, don't build yet:** receipt schema reserves room for D2
 (recipient ACK, optional `acks[]`) and directed exchange via the A2A bridge.

@@ -40,7 +40,7 @@ test.describe("Chat E2E", () => {
     page,
   }) => {
     const botAnswer =
-      "Mnemonic Protocol provides verifiable, persistent memory for AI agents.";
+      "Mnemonik Protocol provides verifiable, persistent memory for AI agents.";
 
     await mockChatSuccess(page, botAnswer);
 
@@ -85,16 +85,16 @@ test.describe("Chat E2E", () => {
 
     // Empty state prompt visible
     await expect(
-      page.getByText("Ask a question about the Mnemonic Protocol."),
+      page.getByText("Ask a question about the Mnemonik Protocol."),
     ).toBeVisible();
 
     // Send a question
-    await sendMessage(page, "What is Mnemonic Protocol?");
+    await sendMessage(page, "What is Mnemonik Protocol?");
 
     // User message appears in the log region
     const messageLog = page.getByRole("log");
     await expect(
-      messageLog.getByText("What is Mnemonic Protocol?"),
+      messageLog.getByText("What is Mnemonik Protocol?"),
     ).toBeVisible();
 
     // Bot answer appears in the log region
@@ -106,7 +106,7 @@ test.describe("Chat E2E", () => {
 
   test("out-of-scope question: verify rejection message", async ({ page }) => {
     const rejectionMsg =
-      "This question is outside the scope of the Mnemonic Protocol.";
+      "This question is outside the scope of the Mnemonik Protocol.";
 
     await mockChatSuccess(page, rejectionMsg);
     await navigateToChat(page);

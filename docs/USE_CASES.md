@@ -1,6 +1,6 @@
-# Mnemonic use cases
+# Mnemonik use cases
 
-Mnemonic gives an AI agent a memory that is **yours** (signed with your own
+Mnemonik gives an AI agent a memory that is **yours** (signed with your own
 key), **portable** (works across Claude, Cursor, VS Code) and **provable**
 (anyone can check who wrote it and that it was not changed).
 
@@ -19,7 +19,7 @@ Legend: ✅ works today · 🔜 planned (P0/P1) · 🧪 later (P2)
 Cursor, then again tomorrow.
 
 **How it works:** every tool on your machine talks to the same local
-Mnemonic memory (`~/.mnemonic/attestations.db`). Local memory is free, works
+Mnemonik memory (`~/.mnemonic/attestations.db`). Local memory is free, works
 offline and never leaves your machine.
 
 **Try it (2 min):**
@@ -69,7 +69,7 @@ checked in her browser. No account needed.
 claims, or changed afterwards.
 
 **How it will work:** paste a link or share code into any agent with
-Mnemonic (or open the web page). You get: author identity, whether the
+Mnemonik (or open the web page). You get: author identity, whether the
 content matches the signature, and (if anchored) the public timestamp.
 No login.
 
@@ -120,9 +120,9 @@ recall from. Built only if P1 shows people want it.
 
 - **Agent:** an AI assistant that can call tools (Claude, Cursor, …).
 - **MCP (Model Context Protocol):** the standard those assistants use to
-  call tools like Mnemonic.
+  call tools like Mnemonik.
 - **Signature / key:** a private key on your machine (in the OS keychain)
-  proves that you wrote a memory. Mnemonic asks to unlock it only when you
+  proves that you wrote a memory. Mnemonik asks to unlock it only when you
   share or anchor.
 - **DID (Decentralized Identifier):** your public identity, e.g.
   `did:sol:…`. Safe to show.

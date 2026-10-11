@@ -26,7 +26,7 @@ obvious, and getting the order wrong is the only way this work destroys value.
 | 1 | [`chain-agnostic`](chain-agnostic/) stage 1 — enumeration | The Solana memo is today the ONLY working enumeration source. Nothing may remove it before a replacement is **measured** | next |
 | 2 | [`pluggable-anchoring`](pluggable-anchoring/) — Solana as a **choice** | Makes step 3 a config change rather than a code deletion, so it is reversible on a deploy | after 1 |
 | 3 | [`chain-agnostic`](chain-agnostic/) stage 2 — select `Anchor::None` | Frees the per-write Solana fee. Readers stay for ever | after 2, and only past the gate |
-| 4 | [`dual-key-identity`](dual-key-identity/) | ERC-8004 needs an EVM address bound to the Mnemonic identity. Cheap, and it removes the only urgent reason for step 7 | parallel with 1–3 |
+| 4 | [`dual-key-identity`](dual-key-identity/) | ERC-8004 needs an EVM address bound to the Mnemonik identity. Cheap, and it removes the only urgent reason for step 7 | parallel with 1–3 |
 | 5 | [`erc8004-reputation`](erc8004-reputation/) | Consumes the dual-key binding. Otherwise the `mnemonic` namespace proves nothing about the rater | after 4 |
 | 6 | [`pluggable-storage`](pluggable-storage/) | Generalises the enumeration problem solved in step 1. Doing it first would mean solving that problem twice | after 1 |
 | 7 | [`multi-suite-signing`](multi-suite-signing/) | Unrecoverable failure mode. Last, and only if dual-key identity proves insufficient | last |

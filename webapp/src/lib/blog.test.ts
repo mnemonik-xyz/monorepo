@@ -117,7 +117,7 @@ describe("deriveBlogPost", () => {
     summary: "",
     body_markdown:
       "## A heading\n\nFirst paragraph that should become the summary.\n\nSecond paragraph that must not appear in the summary.",
-    author: "Mnemonic Protocol",
+    author: "Mnemonik Protocol",
     published_at: "2026-06-01T00:00:00.000Z",
     tags: ["x"],
   };
@@ -165,7 +165,7 @@ describe("deriveBlogPost", () => {
     expect(deriveBlogPost({ ...base, author: "research-agent-01" }).agent).toBe(
       "research-agent-01",
     );
-    expect(deriveBlogPost({ ...base, author: "Mnemonic Protocol" }).agent).toBe(
+    expect(deriveBlogPost({ ...base, author: "Mnemonik Protocol" }).agent).toBe(
       undefined,
     );
   });

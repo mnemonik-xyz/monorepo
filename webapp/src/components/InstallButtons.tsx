@@ -14,7 +14,7 @@ import { useMemo, useState } from "react";
  *
  * WindSurf's `windsurf://windsurf-mcp-registry?serverName=` deeplink only
  * accepts entries from WindSurf's first-party MCP registry — it cannot encode
- * an arbitrary remote HTTP MCP URL. Until Mnemonic is published to that
+ * an arbitrary remote HTTP MCP URL. Until Mnemonik is published to that
  * registry, we mirror the Claude Desktop modal: a copy-the-URL prompt that
  * instructs the user to paste the JSON snippet into
  * `~/.codeium/windsurf/mcp_config.json`.
@@ -187,7 +187,7 @@ function cursorDeeplink(): string {
   // Reference: https://cursor.com/docs/context/mcp/install-links
   const config = JSON.stringify(buildInstallConfig({}, /* bakeJwt */ true));
   const b64 = btoa(config);
-  const params = new URLSearchParams({ name: "Mnemonic", config: b64 });
+  const params = new URLSearchParams({ name: "Mnemonik", config: b64 });
   return `cursor://anysphere.cursor-deeplink/mcp/install?${params.toString()}`;
 }
 
@@ -208,7 +208,7 @@ function vscodeDeeplink(): string {
   //   - HTTP transport: { name, type: "http", url }
   //   - stdio transport: { name, command, args }
   // We use HTTP (streamable per Decision 1).
-  const config = { name: "Mnemonic", type: "http", url: MCP_URL };
+  const config = { name: "Mnemonik", type: "http", url: MCP_URL };
   return `vscode:mcp/install?${encodeURIComponent(JSON.stringify(config))}`;
 }
 
@@ -371,7 +371,7 @@ export default function InstallButtons({
   return (
     <section
       className="space-y-4"
-      aria-label="Install Mnemonic in your AI tool"
+      aria-label="Install Mnemonik in your AI tool"
     >
       <h2 className="text-lg font-semibold text-text-primary">Install</h2>
 
@@ -581,7 +581,7 @@ export default function InstallButtons({
             </h3>
             <p className="mt-3 text-sm text-text-muted">
               WindSurf&rsquo;s deeplink registry only accepts first-party
-              entries, so add Mnemonic by editing{" "}
+              entries, so add Mnemonik by editing{" "}
               <span className="font-mono text-text-primary">
                 ~/.codeium/windsurf/mcp_config.json
               </span>{" "}

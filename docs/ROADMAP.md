@@ -4,7 +4,7 @@
 > public [/roadmap](https://mnemonik.xyz/roadmap) page and is bundled into the
 > webapp when it is built.
 
-Mnemonic's immediate goal is not to add more protocol surface. It is to make
+Mnemonik's immediate goal is not to add more protocol surface. It is to make
 the existing non-custodial memory flow reliable and understandable in every
 client: the client owns the signing key, local memory is free, and durable
 anchoring is an explicit paid operation.
@@ -94,7 +94,7 @@ the release gates below:
 
 ### 3. Build native plugins for major IDEs and coding agents
 
-Create first-class Mnemonic plugins for the environments where developers and
+Create first-class Mnemonik plugins for the environments where developers and
 agents already work, beginning with Claude Code, Codex, Cursor, VS Code/Copilot,
 and Windsurf. MCP connectivity remains the common protocol surface; each plugin
 adds host-specific lifecycle integration and commands.
@@ -148,7 +148,7 @@ Product rules:
 - One-time x402 must remain available without creating a vault, deposit, or
   recurring spending permission. After wallet connection, the target is one
   payment approval for one anchor.
-- A recurring allowance is opt-in, restricted to the Mnemonic payee, capped,
+- A recurring allowance is opt-in, restricted to the Mnemonik payee, capped,
   expiring, visible, and revocable. It reduces future wallet prompts but never
   removes the explicit **Anchor on-chain** action.
 - Automatic capture, context-compaction checkpoints, background sync, and
@@ -165,7 +165,7 @@ Canonical paid journey:
    and, when available, the user's existing allowance.
 5. For one-time x402, the wallet approves exactly this operation. With an active
    allowance, the payment rail atomically reserves the quoted amount after the
-   user confirms in Mnemonic; no wallet prompt is required.
+   user confirms in Mnemonik; no wallet prompt is required.
 6. MCP uploads the client-signed bytes to Arweave through ArDrive Turbo, writes the Solana Memo, refetches
    and verifies delivery, then commits an allowance reservation if applicable
    and returns a complete receipt.
@@ -228,7 +228,7 @@ These items follow the stabilization work above; they must not displace it:
   replay, and cross-runtime conformance rules before promotion.
 - Publish the Chrome extension and establish a regular adapter-update cadence.
 - Add A2A and Hermes bridges using the same client-signed artifact contract.
-- Register Mnemonic verification with ERC-8004 once the verification contract
+- Register Mnemonik verification with ERC-8004 once the verification contract
   and identity mapping are specified.
 - Expand portable memory composition, capability-scoped sharing, and safe
   rehydration only after their protocol specifications have executable

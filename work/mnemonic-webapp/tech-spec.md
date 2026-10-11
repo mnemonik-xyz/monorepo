@@ -172,7 +172,7 @@ Browser (React webapp)
 | 2. Health check | `bash: curl http://localhost:3000/health` | `{"status":"ok"}` |
 | 3. Ollama warm-up | `bash: curl http://localhost:11434/api/tags` | Model `qwen2.5:3b` listed |
 | 4. Knowledge seeded | `bash: curl -s -X POST http://localhost:3000/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mnemonic_whoami","arguments":{}}}'` | `attestation_count > 0` |
-| 5. Chat works | `bash: curl -s -X POST http://localhost:3000/chat -H 'Content-Type: application/json' -d '{"message":"What is Mnemonic Protocol?","session_id":"test"}'` | JSON with `response` field containing protocol info |
+| 5. Chat works | `bash: curl -s -X POST http://localhost:3000/chat -H 'Content-Type: application/json' -d '{"message":"What is Mnemonik Protocol?","session_id":"test"}'` | JSON with `response` field containing protocol info |
 | 6. Artifact download | `bash: curl -s -o knowledge.zip http://localhost:3000/download-knowledge && unzip -l knowledge.zip` | Contains `.md` and `.json` files |
 | 7. Rate limit | `bash: for i in $(seq 12); do curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:3000/chat -H 'Content-Type: application/json' -d '{"message":"test","session_id":"rl"}'; done` | 11th request returns 429 |
 | 8. Input validation | `bash: curl -s -w "%{http_code}" -X POST http://localhost:3000/chat -H 'Content-Type: application/json' -d "{\"message\":\"$(python3 -c 'print("x"*2001)')\",\"session_id\":\"test\"}"` | HTTP 400 |
@@ -207,7 +207,7 @@ Implement chat handler, rate limiting, and download endpoint. Chat handler: vali
 
 - Skill: `code-writing`
 - Reviewers: `code-reviewer`, `security-auditor`
-- Verify-smoke: `curl -X POST http://localhost:3000/chat -d '{"message":"What is Mnemonic?","session_id":"t"}'` returns relevant answer
+- Verify-smoke: `curl -X POST http://localhost:3000/chat -d '{"message":"What is Mnemonik?","session_id":"t"}'` returns relevant answer
 - Files to modify: `mcp/src/main.rs`, `mcp/Cargo.toml`
 - Files to create: `mcp/src/chat.rs`
 - Files to read: `mcp/src/tools.rs` (recall), `mcp/src/mcp.rs` (McpState)

@@ -1,4 +1,4 @@
-# How Mnemonic Works
+# How Mnemonik Works
 
 Companion to [Yellow paper §5.3 Pipeline Walkthrough](./YELLOWPAPER.md#53-pipeline-walkthrough-sign--recall--verify). Where the whitepaper sketches the sign / recall / verify flows at protocol granularity, this document maps each step onto the actual `mnemonic-core` and `mnemonic-mcp` modules so contributors can navigate the codebase, understand the dependency direction, and reason about operational concerns such as lock discipline, storage modes, and payment gating.
 

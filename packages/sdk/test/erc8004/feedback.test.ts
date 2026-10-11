@@ -1,7 +1,7 @@
 // prepareFeedback and verifyFeedbackDocument tests.
 //
 // Uses a deterministic mock signer (fixed private key via @noble/ed25519) so
-// the tests are hermetic and the fixture is reproducible without Mnemonic code.
+// the tests are hermetic and the fixture is reproducible without Mnemonik code.
 
 import { signAsync, getPublicKeyAsync } from "@noble/ed25519";
 import { describe, expect, it } from "vitest";

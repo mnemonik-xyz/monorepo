@@ -1,4 +1,4 @@
-// Unit tests for MnemonicClient A2A methods:
+// Unit tests for MnemonikClient A2A methods:
 //   attestA2ATask, attestA2AMessage, attestA2AArtifact, recallA2AContext
 //
 // Plus T14 conformance vectors for sealed A2A DataPart helpers:
@@ -8,7 +8,7 @@
 
 import { beforeEach, afterEach, describe, expect, it } from "vitest";
 
-import { MnemonicClient } from "../src/client.js";
+import { MnemonikClient } from "../src/client.js";
 import { ServerError, UserError } from "../src/errors.js";
 import { Keypair } from "../src/keypair.js";
 import { LocalSigner } from "../src/signer.js";
@@ -75,7 +75,7 @@ function makeMockFetch(responses: Array<{ status?: number; body: unknown }>): {
 // ── shared client factory ───────────────────────────────────────────────────
 
 async function makeClient(responses: Array<{ status?: number; body: unknown }>): Promise<{
-  client: MnemonicClient;
+  client: MnemonikClient;
   calls: CapturedCall[];
 }> {
   const wasm = buildWasmMock();
@@ -83,7 +83,7 @@ async function makeClient(responses: Array<{ status?: number; body: unknown }>):
   const keypair = await Keypair.fromJSON(kp);
   const signer = new LocalSigner(keypair);
   const { fetchImpl, calls } = makeMockFetch(responses);
-  const client = new MnemonicClient({
+  const client = new MnemonikClient({
     baseUrl: "https://mcp.mnemonik.xyz",
     signer,
     jwt: "test-jwt",

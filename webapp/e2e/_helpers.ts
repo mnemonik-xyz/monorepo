@@ -1,5 +1,5 @@
 /**
- * Playwright e2e shared helpers — Mnemonic Protocol.
+ * Playwright e2e shared helpers — Mnemonik Protocol.
  *
  * The webapp dev server runs at http://localhost:5173 (Vite). Tests can
  * point the webapp's MCP fetch base at either the LIVE deployment

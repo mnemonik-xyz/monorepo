@@ -5,7 +5,7 @@ type: feature
 size: L
 ---
 
-# User Spec: отвязать Mnemonic от Solana
+# User Spec: отвязать Mnemonik от Solana
 
 ## Что делаем
 

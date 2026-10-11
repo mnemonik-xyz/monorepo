@@ -6,7 +6,7 @@ Append-only. Owner decisions, task reports and audit findings go here.
 
 ## Fixed inputs (owner)
 
-- **2026-09-28.** Make Mnemonic chain-agnostic. First implementation step: remove Solana
+- **2026-09-28.** Make Mnemonik chain-agnostic. First implementation step: remove Solana
   anchoring.
 - **2026-09-28.** Document how deep the Solana integration goes before planning the removal.
 

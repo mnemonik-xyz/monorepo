@@ -2,7 +2,7 @@
 
 ## Pattern summary
 
-Use Mnemonic to attest, index, and retrieve artifacts produced by A2A workflows.
+Use Mnemonik to attest, index, and retrieve artifacts produced by A2A workflows.
 
 Artifacts can include:
 
@@ -15,7 +15,7 @@ Artifacts can include:
 
 ## What gets stored
 
-For each artifact, Mnemonic can store:
+For each artifact, Mnemonik can store:
 
 - artifact hash
 - producing agent identity
@@ -33,13 +33,13 @@ A2A systems can pass artifacts around, but without attestation it is harder to p
 - what upstream evidence it depended on
 - which version was used in a downstream task
 
-Mnemonic gives each artifact a durable provenance trail.
+Mnemonik gives each artifact a durable provenance trail.
 
 ## Example
 
 A verification agent produces a final evidence pack for a journalistic story.
 
-Mnemonic stores:
+Mnemonik stores:
 
 - the artifact hash
 - the source bundle references
@@ -48,7 +48,7 @@ Mnemonic stores:
 
 Later, a reviewer can check whether the delivered artifact matches the originally attested version.
 
-## Mnemonic value in this pattern
+## Mnemonik value in this pattern
 
 - tamper-evident artifact history
 - retrievable semantic index over produced outputs

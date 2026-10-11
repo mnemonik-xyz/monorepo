@@ -8,7 +8,7 @@
  * JSON-LD is an inline script, which is same-origin, not a remote `src`.
  */
 
-const SITE_NAME = "Mnemonic Protocol";
+const SITE_NAME = "Mnemonik Protocol";
 const ORIGIN = "https://mnemonik.xyz";
 const DEFAULT_IMAGE = `${ORIGIN}/og-image.png`;
 

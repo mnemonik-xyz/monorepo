@@ -114,7 +114,7 @@ function deriveReadingMinutes(bodyMarkdown: string): number {
  * has no agent column, so an agent-published post arrives with only its author
  * name (e.g. `research-agent-01`). We badge it only when the name clearly looks
  * automated — `agent`/`bot` in the name, or a trailing `-NN` instance id — so a
- * human author like "Mnemonic Protocol" never gets an (incorrect) agent badge.
+ * human author like "Mnemonik Protocol" never gets an (incorrect) agent badge.
  */
 function looksLikeAgent(author: string): boolean {
   return /agent|bot/i.test(author) || /-\d+$/.test(author);

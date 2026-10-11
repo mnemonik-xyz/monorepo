@@ -9,9 +9,9 @@ This file provides high-level project overview for AI agents. Helps agents under
 
 **Name:** mnemonic-protocol (monorepo)
 
-**Positioning (locked-in 2026-05-01):** Mnemonic is **verifiable memory for trustless agents**. Cryptographic provenance over content the agent itself claims to remember, composed underneath the trustless-agent stack (A2A + ERC-8004) rather than competing with general-purpose AI memory products on retrieval quality. Strategic rationale, gap analysis, and what this positioning explicitly forecloses: see [`work/a2a-bridge/research/positioning-trustless-agents.md`](../../../../work/a2a-bridge/research/positioning-trustless-agents.md).
+**Positioning (locked-in 2026-05-01):** Mnemonik is **verifiable memory for trustless agents**. Cryptographic provenance over content the agent itself claims to remember, composed underneath the trustless-agent stack (A2A + ERC-8004) rather than competing with general-purpose AI memory products on retrieval quality. Strategic rationale, gap analysis, and what this positioning explicitly forecloses: see [`work/a2a-bridge/research/positioning-trustless-agents.md`](../../../../work/a2a-bridge/research/positioning-trustless-agents.md).
 
-**Description:** Monorepo for the Mnemonic Protocol — verifiable, persistent memory for AI agents with cryptographic attestation. Today anchors on Arweave only: the signed bytes are uploaded through ArDrive Turbo, and Arweave is the single record of each anchored memory.
+**Description:** Monorepo for the Mnemonik Protocol — verifiable, persistent memory for AI agents with cryptographic attestation. Today anchors on Arweave only: the signed bytes are uploaded through ArDrive Turbo, and Arweave is the single record of each anchored memory.
 
 Contains four components: protocol documentation, a Rust core library, an MCP server for Cursor/Claude Desktop, and a demo web app. The core library compiles to both native Rust and WASM, so all components share one implementation. See architecture.md for the full directory structure.
 
@@ -21,15 +21,15 @@ Contains four components: protocol documentation, a Rust core library, an MCP se
 
 **Primary users:** Developers building AI agents who need persistent, tamper-proof memory across sessions and provider switches.
 
-**Use case:** Connect an AI agent to Mnemonic via MCP (Cursor, Claude Desktop) so it remembers decisions and context across sessions — and can cryptographically prove that memory has not been altered. Developers can also import `mnemonic-core` directly or use the WASM package in TypeScript.
+**Use case:** Connect an AI agent to Mnemonik via MCP (Cursor, Claude Desktop) so it remembers decisions and context across sessions — and can cryptographically prove that memory has not been altered. Developers can also import `mnemonic-core` directly or use the WASM package in TypeScript.
 
 ---
 
 ## Core Problem
 
-AI agents lose all context when a session ends. Even when memory is stored, there is no way to verify it has not been changed. Mnemonic solves both: it persists agent memory across sessions and stores the signed bytes permanently on Arweave, so any party can independently verify that a memory item is authentic and unmodified.
+AI agents lose all context when a session ends. Even when memory is stored, there is no way to verify it has not been changed. Mnemonik solves both: it persists agent memory across sessions and stores the signed bytes permanently on Arweave, so any party can independently verify that a memory item is authentic and unmodified.
 
-Provider portability is the secondary problem: memory stored via Mnemonic is provider-agnostic — a user can switch from Claude to GPT to a local model and continue working with the same attested memory.
+Provider portability is the secondary problem: memory stored via Mnemonik is provider-agnostic — a user can switch from Claude to GPT to a local model and continue working with the same attested memory.
 
 ---
 

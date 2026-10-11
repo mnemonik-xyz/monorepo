@@ -41,7 +41,7 @@
     },
     "R1-MAJOR-2": {
       "status": "RESOLVED",
-      "assessment": "with_home_override replaced with with_config_dir_override using MNEMONIC_CONFIG_DIR. The env var is Mnemonic-namespaced and unlikely to be read by other code; the static Mutex guards within the test binary. Unsafe is still technically present (set_var) but the blast radius is scoped to a Mnemonic-specific env var rather than the process-global HOME. Residual note R2-NOTE-1 tracks the remaining unsafe in integration_token.rs but is not blocking."
+      "assessment": "with_home_override replaced with with_config_dir_override using MNEMONIC_CONFIG_DIR. The env var is Mnemonik-namespaced and unlikely to be read by other code; the static Mutex guards within the test binary. Unsafe is still technically present (set_var) but the blast radius is scoped to a Mnemonik-specific env var rather than the process-global HOME. Residual note R2-NOTE-1 tracks the remaining unsafe in integration_token.rs but is not blocking."
     },
     "R1-MINOR-1": {
       "status": "RESOLVED",

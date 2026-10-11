@@ -170,7 +170,7 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
 - Deferred to backlog (per spec: "skip — defer"):
   - code-reviewer minor #1 (Signer/keypair dual-bind architecture for future TurnkeySigner/WebAuthnSigner) — Phase 1.5+ concern.
   - code-reviewer minor #2 (extend JWT regex to also catch the third signature segment of full three-part JWTs) — current Decision-10 contract is met.
-  - code-reviewer minor #3 (`MnemonicError.cause` redaction) — `cause` is documented developer-facing per Decision 10; option (a) of the recommendation already in JSDoc spirit.
+  - code-reviewer minor #3 (`MnemonikError.cause` redaction) — `cause` is documented developer-facing per Decision 10; option (a) of the recommendation already in JSDoc spirit.
   - code-reviewer minor #6 (defense-in-depth comment in `readBodySafely` flagging double redaction is intentional) — superseded by the redact-then-slice fix; double-redaction comment no longer applies cleanly.
   - test-reviewer minor (delete redundant `signer-contract.test.ts` OR remove inline `runSignerContract` from `signer.test.ts`) — kept both for now; the duplication is intentional belt-and-suspenders for the contract suite.
   - test-reviewer minor (large-content >32KB chunking branch in `bytesToBase64`) — robustness gap, not correctness.
@@ -757,7 +757,7 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
   Wrote the public-facing documentation for `@mnemonik-xyz/sdk` and
   `@mnemonik-xyz/cli`. Replaced the Wave-1 placeholder SDK README with a
   full quick-start (5-line snippet using `Keypair.fromJSON` +
-  `MnemonicClient.setKeypair`), the runtime-targets table from Task 1's
+  `MnemonikClient.setKeypair`), the runtime-targets table from Task 1's
   smoke matrix (decision: `--target web` covers Node 20/22, Bun, Deno;
   Cloudflare Workers deferred to pre-release), the API reference for
   every public export (client / signer / keypair / OAuth / errors / COSE
@@ -773,7 +773,7 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
   `packages/sdk/src/{client,signer,keypair,oauth,types,cose,errors,
   index}.ts` — added explicit `@param`, `@returns`, `@throws` lines on
   the methods that previously had only narrative comments
-  (`MnemonicClient.{whoami, signMemory, recall, verify, proveIdentity,
+  (`MnemonikClient.{whoami, signMemory, recall, verify, proveIdentity,
   setJwt, setKeypair}`, `LocalSigner.sign`, `coseSignPayload`,
   `Keypair.{generate, fromJSON, fromBackupString, toBackupString}`, every
   OAuth public function and session helper, `redactJWT`, all five error
@@ -1003,7 +1003,7 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
   `describeError`, `bytesToBase64`, loopback callback URL construction
   ↔ Rust regex); `verify.ts` `--json` path emits both stdout JSON and
   stderr error message; IdentityPanel auto-expire `useEffect` depends
-  on full `cliState` instead of `cliState.kind`; `MnemonicError.cause`
+  on full `cliState` instead of `cliState.kind`; `MnemonikError.cause`
   is unredacted (Decision 10 documents this as developer-facing but
   the invariant is fragile — one `console.log(err)` from a leak);
   `BootstrapInsertError::LruExhausted` + 503 handler branch unreachable;

@@ -57,12 +57,12 @@ test.describe("/install page", () => {
   test("install buttons emit valid deeplinks", async ({ page }) => {
     await page.goto("/install");
 
-    // Cursor — base64 config payload + name=Mnemonic.
+    // Cursor — base64 config payload + name=Mnemonik.
     const cursorHref = await page
       .getByTestId("install-cursor")
       .getAttribute("href");
     expect(cursorHref).toMatch(
-      /^cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?name=Mnemonic&config=/
+      /^cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?name=Mnemonik&config=/
     );
     // Decode the base64 payload — should match the Cursor MCP HTTP shape.
     const cursorB64 = new URL(cursorHref!).searchParams.get("config")!;
@@ -80,7 +80,7 @@ test.describe("/install page", () => {
     );
     expect(vscodeCfg).toEqual(
       expect.objectContaining({
-        name: "Mnemonic",
+        name: "Mnemonik",
         type: "http",
         url: expect.stringContaining("/mcp"),
       })

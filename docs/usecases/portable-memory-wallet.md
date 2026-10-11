@@ -2,7 +2,7 @@
 
 ## What it is
 
-Mnemonic can become a portable memory wallet for agents.
+Mnemonik can become a portable memory wallet for agents.
 
 The idea is that an agent carries its durable memory across:
 
@@ -20,7 +20,7 @@ A2A assumes heterogeneous agents. In practice, those agents may move across vend
 
 Without portable memory, an agent can interoperate in the moment but still lose continuity when its underlying runtime changes.
 
-Mnemonic fills that gap by making memory snapshots:
+Mnemonik fills that gap by making memory snapshots:
 
 - portable
 - verifiable
@@ -36,7 +36,7 @@ An agent initially runs on one provider and later migrates to another because of
 - new model quality
 - policy restrictions
 
-Using Mnemonic, the agent restores:
+Using Mnemonik, the agent restores:
 
 - prior memory items
 - project history
@@ -46,7 +46,7 @@ Using Mnemonic, the agent restores:
 
 The agent remains functionally continuous even though the runtime changed.
 
-## What Mnemonic contributes
+## What Mnemonik contributes
 
 - snapshot and restore path
 - provider-independent durable memory layer

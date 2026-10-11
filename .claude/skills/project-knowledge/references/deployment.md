@@ -234,7 +234,7 @@ mkdir -p /home/claude/data
 # 8. Create systemd service (first deploy only)
 sudo tee /etc/systemd/system/mnemonic-mcp.service << 'EOF'
 [Unit]
-Description=Mnemonic MCP Server
+Description=Mnemonik MCP Server
 After=network.target docker.service
 Wants=docker.service
 [Service]

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Guide the user through first-time setup so Mnemonic is wired into their MCP-capable agent host (Claude Code, Claude Desktop, Cursor) and the local pipeline is ready for offline attestations. Use when the user is connecting to Mnemonic for the first time, or when the agent has detected the CLI is not installed.
+Guide the user through first-time setup so Mnemonik is wired into their MCP-capable agent host (Claude Code, Claude Desktop, Cursor) and the local pipeline is ready for offline attestations. Use when the user is connecting to Mnemonik for the first time, or when the agent has detected the CLI is not installed.
 
 ## Trigger
 

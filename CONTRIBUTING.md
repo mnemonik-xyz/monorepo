@@ -1,4 +1,4 @@
-# Contributing to Mnemonic Protocol
+# Contributing to Mnemonik Protocol
 
 Thanks for your interest. This document covers the practical bits. Repo conventions, architecture rules, and the spec-driven workflow are documented in [`CLAUDE.md`](./CLAUDE.md) — please skim it before opening a non-trivial PR.
 

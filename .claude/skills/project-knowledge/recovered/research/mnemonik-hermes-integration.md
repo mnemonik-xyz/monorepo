@@ -35,7 +35,7 @@ From `mnemonik-xyz/monorepo`:
 - **Hosted MCP server** at `https://mcp.mnemonik.xyz/mcp` (HTTP + stdio)
 - **Five MCP tools** — `whoami`, `sign_memory`, `recall`, `verify`, `prove_identity`
 - **`@mnemonik-xyz/cli`** — `mnemonic init / login / sign / …` (and reportedly `ask`)
-- **`@mnemonik-xyz/sdk`** — runtime-agnostic TypeScript SDK with `MnemonicClient`, `LocalSigner`, OAuth helpers; ESM, runs on Node 20+, Bun, Deno, browsers
+- **`@mnemonik-xyz/sdk`** — runtime-agnostic TypeScript SDK with `MnemonikClient`, `LocalSigner`, OAuth helpers; ESM, runs on Node 20+, Bun, Deno, browsers
 - **Cryptographic substrate** — canonical CBOR + blake3 + COSE_Sign1 over Ed25519 identity (DID-sol / DID-key)
 - **Storage modes** — `local` (SQLite-only) and `full` (Arweave durable storage + Solana SPL Memo anchor)
 - **Payment modes** — `none`, `balance`, `x402`, `both`; only `sign_memory` is paid
@@ -64,7 +64,7 @@ Per-server tool filtering means agents see only the operational tools; `verify` 
 
 ### 3.2 First-class Memory Provider *(effort: 1–2 weeks; PR upstream)*
 
-This is the strategic move. Hermes' Memory Providers interface is the canonical extension point for persistence backends. Mnemonik fits the contract directly: the SDK already provides `MnemonicClient.write()` / `recall()` semantics that map to a `MemoryProvider` trait.
+This is the strategic move. Hermes' Memory Providers interface is the canonical extension point for persistence backends. Mnemonik fits the contract directly: the SDK already provides `MnemonikClient.write()` / `recall()` semantics that map to a `MemoryProvider` trait.
 
 What Mnemonik uniquely contributes vs the existing seven:
 
@@ -107,9 +107,9 @@ Suggested artifact: a joint blog post + reference dataset (signed Hermes traject
 
 Hermes exposes an OpenAI-compatible HTTP endpoint. A small middleware:
 
-- Honors `X-Mnemonic-Attest: true` on incoming requests
+- Honors `X-Mnemonik-Attest: true` on incoming requests
 - Calls `sign_memory` on the assistant response
-- Returns `X-Mnemonic-Solana-Tx` and `X-Mnemonic-Arweave-Tx` headers
+- Returns `X-Mnemonik-Solana-Tx` and `X-Mnemonik-Arweave-Tx` headers
 
 Every downstream client (Open WebUI, LibreChat, NextChat, ChatBox) inherits attestation transparently with no client changes.
 

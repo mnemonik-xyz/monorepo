@@ -1,8 +1,8 @@
-# MCP registries: register and renew the Mnemonic server
+# MCP registries: register and renew the Mnemonik server
 
 ## Purpose and scope
 
-This document tells you how to list the Mnemonic Model Context Protocol (MCP) server in public registries and directories.
+This document tells you how to list the Mnemonik Model Context Protocol (MCP) server in public registries and directories.
 It also tells you how to update each listing when you release a new version.
 It shows which steps you can automate in GitHub Actions and which steps stay manual.
 
@@ -187,7 +187,7 @@ Notes:
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.mnemonik-xyz/mnemonic",
-  "title": "Mnemonic",
+  "title": "Mnemonik",
   "description": "Verifiable, persistent memory for AI agents: signed memories you can recall and verify.",
   "repository": { "url": "https://github.com/mnemonik-xyz/monorepo", "source": "github", "subfolder": "packages/mcp" },
   "websiteUrl": "https://mnemonik.xyz",

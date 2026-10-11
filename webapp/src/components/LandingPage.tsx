@@ -132,7 +132,7 @@ function LandingPage({
       <div className="w-full max-w-2xl space-y-10 text-center">
         <header>
           <h1 className="text-4xl font-bold tracking-tight text-accent-primary sm:text-5xl">
-            Mnemonic Protocol
+            Mnemonik Protocol
           </h1>
           <p className="mt-3 text-lg text-text-muted">
             Verifiable memory infrastructure for AI agents.
@@ -163,7 +163,7 @@ function LandingPage({
           </p>
 
           <p className="leading-relaxed text-text-primary">
-            Mnemonic Protocol introduces a verifiable memory layer for AI
+            Mnemonik Protocol introduces a verifiable memory layer for AI
             agents. It treats memory as a portable, signed artifact rather than
             an opaque database row: something an agent can{" "}
             <span className="font-mono text-accent-primary">recall</span>, carry
@@ -184,7 +184,7 @@ function LandingPage({
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               disabled={isLoading || isLimitReached}
-              placeholder="Ask about the Mnemonic Protocol..."
+              placeholder="Ask about the Mnemonik Protocol..."
               rows={1}
               className="flex-1 resize-none rounded-lg border border-text-muted/20 bg-white/5 px-4 py-3 text-sm text-text-primary placeholder-text-muted/50 outline-none transition-colors focus:border-accent-primary/50 disabled:cursor-not-allowed disabled:opacity-50"
               aria-label="Message input"

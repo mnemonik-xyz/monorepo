@@ -1,6 +1,6 @@
 # Research
 
-This section holds research artefacts that motivated and inform Mnemonic Protocol's design — TurboQuant compression analysis, agent-identity protocol research, and the foundational scientific paper. Files are preserved verbatim from upstream recovery; treat them as historical references rather than living documentation.
+This section holds research artefacts that motivated and inform Mnemonik Protocol's design — TurboQuant compression analysis, agent-identity protocol research, and the foundational scientific paper. Files are preserved verbatim from upstream recovery; treat them as historical references rather than living documentation.
 
 ## Contents
 

@@ -27,7 +27,7 @@ test.describe.configure({ mode: "serial", retries: 0 });
  *      auth — no JWT required), decodes the canonical-CBOR, renders the
  *      preview + countdown.
  *
- *   4. Click "Sign with my Mnemonic identity". The page calls
+ *   4. Click "Sign with my Mnemonik identity". The page calls
  *      WASM `sign_cose_payload(server_cbor_bytes, keypair)` and POSTs
  *      `{correlation_id, cose_signed_bytes, signer_pubkey}` to
  *      `/api/sign-callback`. Server validates the COSE chain (kid ↔

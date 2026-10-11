@@ -1,7 +1,7 @@
 # Open Problems
 
 This section holds open system problem statements and pricing validation that
-the Mnemonic Protocol roadmap must address before broad multi-party deployment.
+the Mnemonik Protocol roadmap must address before broad multi-party deployment.
 Each document captures a known gap between the current single-owner Rust MCP
 implementation and the multi-agent, economically-validated production target.
 

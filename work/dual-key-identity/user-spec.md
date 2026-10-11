@@ -2,7 +2,7 @@
 
 ## What is this?
 
-A Mnemonic agent currently has one key: an Ed25519 keypair tied to a Solana address. That
+A Mnemonik agent currently has one key: an Ed25519 keypair tied to a Solana address. That
 key signs every memory artifact. It is what makes `did:sol:<pubkey>` mean something.
 
 Ethereum works on a different curve — secp256k1 — so the Solana key cannot be reused as an
@@ -12,7 +12,7 @@ Ethereum key. The solution is not to replace the Ed25519 key; it is to let the a
 ## The binding
 
 The agent creates a short record called `KEY_BINDING_V1`. It contains:
-- the Ed25519 public key (the agent's Mnemonic identity),
+- the Ed25519 public key (the agent's Mnemonik identity),
 - the Ethereum address the agent also controls,
 - a timestamp and a nonce (to prevent replay attacks).
 
@@ -29,12 +29,12 @@ both keys at the moment the binding was created.
 ## Why this is needed
 
 Ethereum's ERC-8004 standard (reputation NFTs) requires a `clientAddress` field: an Ethereum
-address that identifies who is making a claim. Without dual-key identity, a Mnemonic agent
+address that identifies who is making a claim. Without dual-key identity, a Mnemonik agent
 cannot supply a verifiable `clientAddress` — it has no Ethereum key to sign with.
 
 With this binding in place, a verifier reading an ERC-8004 statement can confirm that the
 `clientAddress` listed there genuinely belongs to the same agent whose Ed25519 identity signed
-the Mnemonic memory artifacts.
+the Mnemonik memory artifacts.
 
 ## What does not change
 

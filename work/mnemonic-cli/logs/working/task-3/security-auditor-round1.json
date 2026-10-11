@@ -77,7 +77,7 @@
       "severity": "info",
       "title": "AuthError cause chain is not redaction-passed-through",
       "location": "packages/sdk/src/errors.ts:46-51",
-      "impact": "MnemonicError.redactJWT runs only on the constructor's message argument; the cause field is preserved as-is. If the underlying fetch error message contains a JWT or secret (highly unlikely — fetch errors carry status/URL only), it would leak when consumers call err.cause.message. Decision 10 lists redaction as a Task 8 deliverable (CLI-side redaction tests).",
+      "impact": "MnemonikError.redactJWT runs only on the constructor's message argument; the cause field is preserved as-is. If the underlying fetch error message contains a JWT or secret (highly unlikely — fetch errors carry status/URL only), it would leak when consumers call err.cause.message. Decision 10 lists redaction as a Task 8 deliverable (CLI-side redaction tests).",
       "recommendation": "Out of scope for Task 3. T8 should validate redaction transitively across cause chains."
     },
     {

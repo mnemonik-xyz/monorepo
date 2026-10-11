@@ -9,7 +9,7 @@ size: L
 
 ## Что делаем
 
-Превращаем Mnemonic из локального протокола в **доступный сервис cross-provider памяти для AI-агентов**. Ключевая идея: интеграция = установка Mnemonic MCP в нужный AI-tool. После установки модель в Tool A (например, ChatGPT) вызывает `mnemonic_sign_memory` на естественноязыковую команду пользователя ("save findings onchain"), модель в Tool B (например, Claude.ai) вызывает `mnemonic_recall` и получает атестованный контекст. Всё через MCP-протокол, без скрейпинга, копи-паста или DOM-инъекций.
+Превращаем Mnemonik из локального протокола в **доступный сервис cross-provider памяти для AI-агентов**. Ключевая идея: интеграция = установка Mnemonik MCP в нужный AI-tool. После установки модель в Tool A (например, ChatGPT) вызывает `mnemonic_sign_memory` на естественноязыковую команду пользователя ("save findings onchain"), модель в Tool B (например, Claude.ai) вызывает `mnemonic_recall` и получает атестованный контекст. Всё через MCP-протокол, без скрейпинга, копи-паста или DOM-инъекций.
 
 Phase 1 шипает три delivery-канала:
 1. **MCP сервер** — hosted `mcp.mnemonik.xyz` (streamable HTTP + OAuth 2.1 + PKCE) для browser-only юзеров, плюс docker-образ для self-host и листинг в Smithery для discovery.
@@ -20,7 +20,7 @@ Phase 1 (хакатонный MVP) использует **localStorage Ed25519 k
 
 ## Зачем
 
-Сегодня память AI-агента живёт внутри одного провайдера и теряется при switch'е. Юзер делает research в Cursor — продолжить в Claude.ai невозможно без ручного re-explanation. Mnemonic уже решает persistence + verifiability на уровне core, но без hosted MCP протокол доступен только тем, кто умеет собирать docker и настраивать stdio. **Hosted MCP + Turnkey onboarding = протокол доступен любому юзеру с email** и работает в любом MCP-capable AI tool. Это тот скачок UX, без которого "verifiable persistent memory" остаётся академическим тезисом.
+Сегодня память AI-агента живёт внутри одного провайдера и теряется при switch'е. Юзер делает research в Cursor — продолжить в Claude.ai невозможно без ручного re-explanation. Mnemonik уже решает persistence + verifiability на уровне core, но без hosted MCP протокол доступен только тем, кто умеет собирать docker и настраивать stdio. **Hosted MCP + Turnkey onboarding = протокол доступен любому юзеру с email** и работает в любом MCP-capable AI tool. Это тот скачок UX, без которого "verifiable persistent memory" остаётся академическим тезисом.
 
 Дополнительно: MCP стал de facto стандартом handoff в 2026 (см. `research.md`). Окно стать первым атестованным MCP-сервером в каталогах открыто сейчас. Phase 1 ship'ается под презентацию на хакатоне — успех = working demo + первые внешние юзеры/разработчики, не production-grade scale.
 
@@ -30,9 +30,9 @@ Phase 1 (хакатонный MVP) использует **localStorage Ed25519 k
 
 Юзер открывает `mnemonik.xyz`, кликает "Get started". WASM core генерит Ed25519 keypair прямо в браузере, сохраняет в localStorage (encrypted with passphrase или as-is для MVP). Webapp показывает identity: DID/pubkey + кнопку "Download keypair backup" (JSON-файл). Cross-device — юзер импортирует backup на втором устройстве через "Restore from backup" (Phase 1.5 заменит на Turnkey email-recovery без изменения pubkey).
 
-### Сценарий 2 — Установка Mnemonic в Tool A (Cursor)
+### Сценарий 2 — Установка Mnemonik в Tool A (Cursor)
 
-На webapp юзер кликает "Install in Cursor" → deeplink `cursor://anysphere.cursor-deeplink/mcp/install?...` открывает Cursor → коннектор `mcp.mnemonik.xyz` устанавливается → запускается OAuth 2.1 PKCE flow → юзер на webapp подтверждает "Allow Cursor to access your Mnemonic" → WASM core подписывает OAuth challenge localStorage-ключом → JWT токен в Cursor. Идентично для VS Code, Claude.ai (через Settings → Connectors → Add custom), Perplexity Pro.
+На webapp юзер кликает "Install in Cursor" → deeplink `cursor://anysphere.cursor-deeplink/mcp/install?...` открывает Cursor → коннектор `mcp.mnemonik.xyz` устанавливается → запускается OAuth 2.1 PKCE flow → юзер на webapp подтверждает "Allow Cursor to access your Mnemonik" → WASM core подписывает OAuth challenge localStorage-ключом → JWT токен в Cursor. Идентично для VS Code, Claude.ai (через Settings → Connectors → Add custom), Perplexity Pro.
 
 ### Сценарий 3 — sign_memory в Tool A
 
@@ -40,7 +40,7 @@ Phase 1 (хакатонный MVP) использует **localStorage Ed25519 k
 
 ### Сценарий 4 — recall в Tool B
 
-Юзер открывает свежий чат в Claude.ai (с уже установленным Mnemonic коннектором). Говорит "recall my recent blockchain research". Claude вызывает `mnemonic_recall(query="recent blockchain research", limit=5)`. Hosted MCP: cosine search по user's attestations → top-K с подписью → Claude видит контент, продолжает работу. Recall бесплатный.
+Юзер открывает свежий чат в Claude.ai (с уже установленным Mnemonik коннектором). Говорит "recall my recent blockchain research". Claude вызывает `mnemonic_recall(query="recent blockchain research", limit=5)`. Hosted MCP: cosine search по user's attestations → top-K с подписью → Claude видит контент, продолжает работу. Recall бесплатный.
 
 ### Сценарий 5 — Self-host через Docker (backlog)
 

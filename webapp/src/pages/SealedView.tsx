@@ -157,7 +157,7 @@ export default function SealedView() {
             setStatus({
               kind: "error",
               message:
-                "Sealed memory decryption requires a newer version of the Mnemonic WASM module. " +
+                "Sealed memory decryption requires a newer version of the Mnemonik WASM module. " +
                 "The signature and metadata are displayed below.",
             });
             return;

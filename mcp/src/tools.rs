@@ -1,4 +1,4 @@
-//! Implementation of the 5 Mnemonic MCP tools.
+//! Implementation of the 5 Mnemonik MCP tools.
 //!
 //! Week 3: sign_memory and verify now use the CBOR/COSE codec pipeline.
 //! - Content hash: blake3(canonical_cbor) instead of SHA-256(content)

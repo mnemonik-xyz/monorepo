@@ -146,7 +146,7 @@ In Rust: `ed25519_dalek::VerifyingKey::to_montgomery()` returns the X25519
 public key. The corresponding secret scalar comes from
 `SigningKey::to_scalar_bytes()`.
 
-This means: anyone who knows a Mnemonic DID can derive the recipient's X25519
+This means: anyone who knows a Mnemonik DID can derive the recipient's X25519
 public key and seal to them without a key directory. No extra key material is
 stored in the keychain. A planned K2 path (`work/sealed-memories/tech-spec.md §5.3`)
 uses a separate X25519 key published in a signed record; the wire format is
@@ -239,10 +239,10 @@ export class TurnkeySigner implements Signer {
 }
 ```
 
-Drop-in for `MnemonicClient`:
+Drop-in for `MnemonikClient`:
 
 ```typescript
-const client = new MnemonicClient({
+const client = new MnemonikClient({
   baseUrl: 'https://mcp.mnemonik.xyz',
   signer: new TurnkeySigner(turnkeyClient, pubkey, privateKeyId),
   jwt,  // OAuth JWT, same flow
@@ -309,8 +309,8 @@ Migration: missing `version` → assumed `type: local` legacy shape. Webapp's `I
 ### Open decisions before Phase 1.x
 
 - **Sub-Org per user vs shared Org with read-only sub-orgs?** Sub-Org-per-user is industry standard for end-user MPC; allow user to revoke / export.
-- **Authentication chain:** Mnemonic OAuth → Turnkey passkey, or Turnkey passkey → Mnemonic OAuth, or both side-by-side? Recommend: OAuth issues Mnemonic JWT, Turnkey passkey is the actual signing authority. Two factors, complementary.
-- **Pricing pass-through:** does Mnemonic absorb the Turnkey sig cost or surface to user? Tied to Phase 1.5 billing decisions.
+- **Authentication chain:** Mnemonik OAuth → Turnkey passkey, or Turnkey passkey → Mnemonik OAuth, or both side-by-side? Recommend: OAuth issues Mnemonik JWT, Turnkey passkey is the actual signing authority. Two factors, complementary.
+- **Pricing pass-through:** does Mnemonik absorb the Turnkey sig cost or surface to user? Tied to Phase 1.5 billing decisions.
 - **Self-custody escape hatch:** can a user export their Turnkey-managed key to a `LocalSigner` profile? Turnkey allows export — UX flow needed.
 
 ---
@@ -329,7 +329,7 @@ Three new artifact schemas reuse the **unchanged** envelope (deterministic CBOR
 - **`VERDICT_V1`** — an independent judge's verdict, signed by the **judge**
   keypair (must differ from the step `producer`). Binds an optional external
   correctness proof by hash via `proof_ref` + `proof_kind`
-  (prm/deterministic/zkml/tee/opml/ocp) — Mnemonic signs *that the verdict
+  (prm/deterministic/zkml/tee/opml/ocp) — Mnemonik signs *that the verdict
   exists*, never that the model math is sound.
 - **`TRAJECTORY_V1`** — anchored summary; `batch_root` is anchored, `prev_root`
   links checkpoints (root-of-roots).

@@ -118,7 +118,7 @@ describe("encodeGiveFeedback", () => {
 
   // ── Pinned calldata fixture ─────────────────────────────────────────────
   //
-  // To reproduce independently (no Mnemonic code):
+  // To reproduce independently (no Mnemonik code):
   //   cast calldata "giveFeedback(uint256,int128,uint8,string,string,string,string,bytes32)" \
   //     42 9800 2 "quality" "research" "https://agent.example.com/a2a" \
   //     "https://example.com/feedback/1.json" \

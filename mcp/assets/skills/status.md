@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Report on the local Mnemonic installation's health: which host configs contain a mnemonik entry, whether the hosted endpoint is reachable, binary integrity, local SQLite read/write, identity availability, and token availability. Use when the user reports something is broken, or when the agent needs to know which capabilities are currently available before suggesting a workflow.
+Report on the local Mnemonik installation's health: which host configs contain a mnemonik entry, whether the hosted endpoint is reachable, binary integrity, local SQLite read/write, identity availability, and token availability. Use when the user reports something is broken, or when the agent needs to know which capabilities are currently available before suggesting a workflow.
 
 ## Trigger
 

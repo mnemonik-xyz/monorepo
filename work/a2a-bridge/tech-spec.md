@@ -54,7 +54,7 @@ Three layers, deployable independently:
 
 ### Decision 1 — Two canonicalization formats, one attestation envelope
 
-A2A AgentCard signing uses RFC 8785 (JCS) over JSON. Mnemonic uses deterministic CBOR. We do NOT merge them. Instead the bridge canonicalizes the A2A object via JCS, then wraps the canonical JSON bytes verbatim inside a CBOR envelope (`A2A_TASK_V1` = `{schema, jcs_bytes, agent_pubkey, ts, prev_id?}`). The CBOR is canonicalized and COSE-signed; the inner JCS-bytes are byte-for-byte the same A2A canonical form. Verification: re-canonicalize A2A object via JCS → compare bytes → check COSE signature. Two independent canonicalizations, neither modified.
+A2A AgentCard signing uses RFC 8785 (JCS) over JSON. Mnemonik uses deterministic CBOR. We do NOT merge them. Instead the bridge canonicalizes the A2A object via JCS, then wraps the canonical JSON bytes verbatim inside a CBOR envelope (`A2A_TASK_V1` = `{schema, jcs_bytes, agent_pubkey, ts, prev_id?}`). The CBOR is canonicalized and COSE-signed; the inner JCS-bytes are byte-for-byte the same A2A canonical form. Verification: re-canonicalize A2A object via JCS → compare bytes → check COSE signature. Two independent canonicalizations, neither modified.
 
 ### Decision 2 — `contextId` is the primary index, not `messageId`
 
@@ -105,5 +105,5 @@ Common conflict points: `Cargo.toml` (root), `core/src/codec/mod.rs`, `mcp/src/m
 
 - **A2A pre-GA churn** — V1 schema lock would create migration debt if A2A renames a Task field. Mitigation: ship behind `experimental` feature flag until A2A GA; final schema bytes only frozen at flip.
 - **JCS implementation in Rust** — the canonical-json crate ecosystem is thinner than serde_json. Mitigation: vet the crate during Wave 1 (`serde_jcs` is the leading candidate); fallback is a small in-house implementation since JCS is ~150 LOC.
-- **Identity binding ambiguity** — if AgentCard has both a `signatures[]` JWS and our `x-mnemonic.ed25519_pubkey_base58`, which is authoritative? Decision: JWS verifies the AgentCard itself; `x-mnemonic` declares the Mnemonic attestation key; both must be present and the JWS must cover the extension payload. Tested explicitly.
+- **Identity binding ambiguity** — if AgentCard has both a `signatures[]` JWS and our `x-mnemonic.ed25519_pubkey_base58`, which is authoritative? Decision: JWS verifies the AgentCard itself; `x-mnemonic` declares the Mnemonik attestation key; both must be present and the JWS must cover the extension payload. Tested explicitly.
 - **Adoption tied to A2A adoption** — if A2A flatlines, bridge ROI drops. Mitigation: same adapter pattern is reusable for ACP / MCP-to-MCP delegation (see `backlog.md`).

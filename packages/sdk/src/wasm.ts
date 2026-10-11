@@ -39,7 +39,7 @@
 // inline rather than importing the relative `.d.ts` so that source-side
 // `tsc -b` does not require the WASM artifact to exist before
 // `build:wasm` runs.
-export interface MnemonicCoreModule {
+export interface MnemonikCoreModule {
   // `--target web` exports a `default` init function. With no argument it
   // resolves the .wasm via `fetch(import.meta.url)`; with a BufferSource
   // argument it instantiates from those bytes directly (used on Node/Bun/Deno
@@ -83,7 +83,7 @@ export interface MnemonicCoreModule {
   parse_link_fragment?: (fragment: string) => Uint8Array;
 }
 
-let modulePromise: Promise<MnemonicCoreModule> | null = null;
+let modulePromise: Promise<MnemonikCoreModule> | null = null;
 
 /**
  * Lazily instantiate and return the WASM module.
@@ -94,7 +94,7 @@ let modulePromise: Promise<MnemonicCoreModule> | null = null;
  * If `WASM_OVERRIDE` is set via `__setWasmForTesting` (vitest only), it
  * replaces the dynamic import — that's the entire test-mocking surface.
  */
-export async function loadWasm(): Promise<MnemonicCoreModule> {
+export async function loadWasm(): Promise<MnemonikCoreModule> {
   if (WASM_OVERRIDE) return WASM_OVERRIDE;
   if (modulePromise) return modulePromise;
   modulePromise = (async () => {
@@ -103,7 +103,7 @@ export async function loadWasm(): Promise<MnemonicCoreModule> {
     // BufferSource — we use that to skip the broken `fetch(file://)` path
     // on Node/Bun/Deno.
     const wasmJsUrl = new URL("./wasm/mnemonic_core.js", import.meta.url);
-    const mod = (await import(wasmJsUrl.href)) as MnemonicCoreModule;
+    const mod = (await import(wasmJsUrl.href)) as MnemonikCoreModule;
 
     // Host detection. Anything that's NOT a browser (no `window` +
     // `window.document`) gets the fs-shim path: Node, Bun, Deno via their
@@ -178,10 +178,10 @@ export async function loadWasm(): Promise<MnemonicCoreModule> {
 //
 // Marked with double-underscore prefix to discourage application-level use.
 
-let WASM_OVERRIDE: MnemonicCoreModule | null = null;
+let WASM_OVERRIDE: MnemonikCoreModule | null = null;
 
 /** @internal — tests only. Pass `null` to clear. */
-export function __setWasmForTesting(mock: MnemonicCoreModule | null): void {
+export function __setWasmForTesting(mock: MnemonikCoreModule | null): void {
   WASM_OVERRIDE = mock;
   // Reset the cached promise so the next loadWasm() picks up the new state.
   modulePromise = null;

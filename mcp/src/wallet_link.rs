@@ -1,7 +1,7 @@
-//! Fresh EIP-191 wallet links for paid Mnemonic operations.
+//! Fresh EIP-191 wallet links for paid Mnemonik operations.
 //!
 //! A quote may use a wallet only after it signs a short-lived challenge bound
-//! to the authenticated Mnemonic subject and the exact operation id.
+//! to the authenticated Mnemonik subject and the exact operation id.
 
 use std::str::FromStr;
 

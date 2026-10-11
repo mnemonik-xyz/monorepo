@@ -1,5 +1,5 @@
 # Interview Plan for mnemonic-cli
-# Phase 1: command-line utility for interacting with Mnemonic Protocol
+# Phase 1: command-line utility for interacting with Mnemonik Protocol
 
 interview_metadata:
   started: "2026-04-29"
@@ -26,7 +26,7 @@ phase1_feature_overview:
   feature_description:
     score: 40
     status: "partial"
-    value: "Command-line utility for working with Mnemonic Protocol, similar to claude/codex/qwen CLIs for AI tools."
+    value: "Command-line utility for working with Mnemonik Protocol, similar to claude/codex/qwen CLIs for AI tools."
     gaps: "What commands? Speaks to hosted MCP via HTTP+OAuth, or stdio to a local mnemonic-mcp binary, or both? Auth UX (keypair file vs browser login)?"
     required: true
 
@@ -48,7 +48,7 @@ phase1_feature_overview:
     score: 30
     status: "partial"
     value: "Developers comfortable with terminal CLIs."
-    gaps: "Mnemonic protocol authors only? Or end-users who don't run Cursor/VS Code/Claude.ai? Hackathon judges?"
+    gaps: "Mnemonik protocol authors only? Or end-users who don't run Cursor/VS Code/Claude.ai? Hackathon judges?"
     required: true
 
   feature_size:
@@ -161,7 +161,7 @@ phase3_integration:
 
 notes: |
   User explicitly compared to claude/codex/qwen CLIs. Open questions:
-  - Is this for Mnemonic protocol authors (debugging, scripting), or for end users
+  - Is this for Mnemonik protocol authors (debugging, scripting), or for end users
     who don't have a supported MCP editor (terminal-only personas)?
   - Should it embed the agent loop (an actual chat REPL with LLM + tool calls)
     or be purely a thin client for the 5 MCP tools?

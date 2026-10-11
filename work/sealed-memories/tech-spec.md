@@ -384,7 +384,7 @@ pure hosted connector gets when (d) is off.
   decision). The server keeps `RK` in memory only, never on disk or in logs.
 - During the session, `mnemonic_recall` decrypts embeddings in memory, ranks,
   decrypts the top results and returns plaintext.
-- Honest label in UI and docs: "While a recall session is on, the Mnemonic
+- Honest label in UI and docs: "While a recall session is on, the Mnemonik
   server can read your private memories in memory."
 
 ### 7.5 Keychain and unlock

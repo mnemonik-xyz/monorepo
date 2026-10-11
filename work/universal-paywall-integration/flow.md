@@ -15,9 +15,9 @@ Local writes remain free and do not enter this flow.
 ```mermaid
 sequenceDiagram
     autonumber
-    participant C as Mnemonic client / IDE
-    participant M as Mnemonic MCP
-    participant DB as Mnemonic SQLite
+    participant C as Mnemonik client / IDE
+    participant M as Mnemonik MCP
+    participant DB as Mnemonik SQLite
     participant W as Approval webapp + wallet
     participant UP as Universal Paywall
     participant A as Arweave (ArDrive Turbo)
@@ -96,9 +96,9 @@ flowchart LR
 
 ## Wallet link requirement
 
-Before a quote, Mnemonic issues an EIP-191 `personal_sign` message bound to
-the opaque Mnemonic subject hash, operation id, configured EVM chain, random
-nonce, and five-minute expiry. Mnemonic recovers the signer address server
+Before a quote, Mnemonik issues an EIP-191 `personal_sign` message bound to
+the opaque Mnemonik subject hash, operation id, configured EVM chain, random
+nonce, and five-minute expiry. Mnemonik recovers the signer address server
 side and stores the verified link as single-use metadata. The Universal Paywall
 binding uses that recovered address; `UNIVERSAL_PAYWALL_PAYER_WALLET` is no
 longer used as the production quote source.

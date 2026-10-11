@@ -7,7 +7,7 @@
 
 Status: **TODO — mostly already built; needs assembling, not inventing.**
 
-Lets one agent hold an Ed25519 Mnemonic identity **and** a secp256k1 Ethereum key, with a
+Lets one agent hold an Ed25519 Mnemonik identity **and** a secp256k1 Ethereum key, with a
 verifiable link between them.
 
 Siblings:
@@ -40,7 +40,7 @@ That is the whole argument for doing it this way first.
 
 ## What already exists
 
-- **`mcp/src/wallet_link.rs`** — binds an EVM address to a Mnemonic subject over EIP-191, with a
+- **`mcp/src/wallet_link.rs`** — binds an EVM address to a Mnemonik subject over EIP-191, with a
   challenge, a nonce and a `paid_wallet_links` table. The right precedent for message discipline
   (domain-tagged, one field per line). Not directly reusable: it is server-side state, scoped to
   a paid operation id, expires in five minutes, and publishes only a subject hash. A durable

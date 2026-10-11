@@ -1,4 +1,4 @@
-# Mnemonic — Pre-demo Manual Smoke Checklist
+# Mnemonik — Pre-demo Manual Smoke Checklist
 
 Manual end-to-end smoke test for Phase 1 hosted MCP. Executed by a single operator
 against the deployed system before each stage demo, by pre-deploy QA (Task 12),
@@ -95,7 +95,7 @@ Click `Install in Cursor`. Accept the OS prompt to open Cursor when it appears.
 
 ### Expected
 Cursor focuses to the foreground and shows an MCP-connector confirmation dialog
-naming `Mnemonic` with URL `https://mcp.mnemonik.xyz/mcp`. Accepting the
+naming `Mnemonik` with URL `https://mcp.mnemonik.xyz/mcp`. Accepting the
 dialog adds the connector to Cursor's MCP settings.
 
 ### Recovery
@@ -117,7 +117,7 @@ Cursor opens the browser to
 
 ### Expected
 Browser shows `Approved` confirmation; tab returns control to Cursor. Cursor
-status indicator for the Mnemonic connector reads `Connected` (or equivalent
+status indicator for the Mnemonik connector reads `Connected` (or equivalent
 ready state). DevTools → Application → Local Storage now also has
 `mnemonic.jwt` populated.
 
@@ -143,7 +143,7 @@ The tool result JSON contains
 `{"status":"awaiting_signature","approve_url":"https://mnemonik.xyz/sign/<uuid>","correlation_id":"<uuid>","expires_in":300}`.
 Open `approve_url` in the same browser. The `/sign/<correlation_id>` page
 shows a content preview reading `smoke-test memory 1`, a countdown timer
-formatted `Expires in mm:ss`, and a `Sign with my Mnemonic identity` button.
+formatted `Expires in mm:ss`, and a `Sign with my Mnemonik identity` button.
 Click `Sign`. Page reports success (status text changes to `Signed` or a
 green confirmation). DevTools → Network shows
 `POST https://mcp.mnemonik.xyz/api/sign-callback` returned `200`.
@@ -189,7 +189,7 @@ and confirm. When the OAuth flow opens, click `Approve`.
 ### Expected
 The OAuth flow redirects to the same consent page from step 5; the
 IdentityPanel still shows the same `did:sol:<pubkey>`. After approval,
-Claude.ai's Connectors list shows `Mnemonic` with status `Connected`.
+Claude.ai's Connectors list shows `Mnemonik` with status `Connected`.
 
 ### Recovery
 If Claude.ai rejects the URL with `unable to reach server`: confirm

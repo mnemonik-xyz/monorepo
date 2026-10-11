@@ -23,7 +23,7 @@ export default function SiteFooter() {
               aria-hidden="true"
               className="inline-block h-1.5 w-1.5 rounded-full bg-accent-primary shadow-[0_0_12px_var(--color-accent-primary)]"
             />
-            <span className="font-semibold">Mnemonic</span>
+            <span className="font-semibold">Mnemonik</span>
             <span className="text-text-muted/60">/ protocol</span>
           </Link>
           <p className="max-w-sm text-sm leading-relaxed text-text-muted">
@@ -89,7 +89,7 @@ export default function SiteFooter() {
 
       <div className="border-t border-white/5">
         <div className="mx-auto flex max-w-6xl flex-col gap-2 px-4 py-5 font-mono text-[11px] uppercase tracking-[0.16em] text-text-muted/70 sm:flex-row sm:items-center sm:justify-between sm:px-6">
-          <span>© {new Date().getFullYear()} Mnemonic Protocol</span>
+          <span>© {new Date().getFullYear()} Mnemonik Protocol</span>
           <span className="flex items-center gap-3">
             <Link
               to="/privacy"

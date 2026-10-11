@@ -1,8 +1,8 @@
-# AGENTS.md — Mnemonic Protocol
+# AGENTS.md — Mnemonik Protocol
 
-> This file describes how AI agents can discover and use the Mnemonic Protocol service. It is the human-readable companion to [`/.well-known/agent.json`](https://www.mnemonik.xyz/.well-known/agent.json) (machine-readable card served from the site root).
+> This file describes how AI agents can discover and use the Mnemonik Protocol service. It is the human-readable companion to [`/.well-known/agent.json`](https://www.mnemonik.xyz/.well-known/agent.json) (machine-readable card served from the site root).
 
-Mnemonic Protocol is itself an *agent service*: an MCP server that any AI agent can call to give itself persistent, verifiable memory. This document tells other agents (and the humans configuring them) how to plug in.
+Mnemonik Protocol is itself an *agent service*: an MCP server that any AI agent can call to give itself persistent, verifiable memory. This document tells other agents (and the humans configuring them) how to plug in.
 
 ## TL;DR
 
@@ -82,7 +82,7 @@ modes still follow the operator default.
 
 ## Verification model
 
-A consumer of a memory can independently verify it without trusting Mnemonic:
+A consumer of a memory can independently verify it without trusting Mnemonik:
 
 1. Fetch `arweave_tx` from any Arweave gateway → raw COSE_Sign1 bytes.
 2. Recompute `blake3(canonical_cbor_payload)` → 32-byte hash.
@@ -95,9 +95,9 @@ Reference verifier code is in `core/src/codec/sign.rs` (`verify_artifact`) and `
 
 | Protocol | Status | Notes |
 |---|---|---|
-| **MCP** (Anthropic) | shipping | Mnemonic is itself an MCP server. Native. |
-| **A2A** (Google) | bridge planned | `work/a2a-bridge/` — adapter crate `mnemonic-a2a` will turn `Task` / `Message` / `Artifact` into signed Mnemonic attestations. |
-| **ERC-8004** (Ethereum) | planned | Mnemonic registration as a `signed-memory-attestation` validator in the Validation Registry. |
+| **MCP** (Anthropic) | shipping | Mnemonik is itself an MCP server. Native. |
+| **A2A** (Google) | bridge planned | `work/a2a-bridge/` — adapter crate `mnemonic-a2a` will turn `Task` / `Message` / `Artifact` into signed Mnemonik attestations. |
+| **ERC-8004** (Ethereum) | planned | Mnemonik registration as a `signed-memory-attestation` validator in the Validation Registry. |
 | **ACP** (IBM/BeeAI) | watch | Adapter once protocol stabilizes. |
 
 ## License + governance

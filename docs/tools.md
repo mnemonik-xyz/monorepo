@@ -1,6 +1,6 @@
 # MCP Tool Reference
 
-Every tool the Mnemonic MCP server exposes over JSON-RPC 2.0, with its inputs,
+Every tool the Mnemonik MCP server exposes over JSON-RPC 2.0, with its inputs,
 outputs, and auth requirements. Source of truth: `mcp/src/mcp.rs`
 (`tool_definitions()` for the schemas, the `call_tool` dispatch for behaviour).
 
@@ -311,7 +311,7 @@ Complete it one of two ways:
    development servers.
 2. **Headless** — sign the canonical-CBOR bundle locally with your Ed25519 key
    and `POST {correlation_id, signed}` to `/api/sign-callback`, then call
-   `mnemonic_check_pending`. The SDK's `MnemonicClient.signMemory()` does this
+   `mnemonic_check_pending`. The SDK's `MnemonikClient.signMemory()` does this
    for you.
 
 A pending signature does not establish external delivery. Arweave is the
@@ -417,7 +417,7 @@ Arweave is the single record of an anchored memory. Verification checks the
 original signed bytes and needs no operator receipt row.
 
 You do not need this server to verify a memory. See
-[Verifying without Mnemonic](./QUICKSTART.md#5-verify-independently) for the
+[Verifying without Mnemonik](./QUICKSTART.md#5-verify-independently) for the
 gateway-only recipe.
 
 ---

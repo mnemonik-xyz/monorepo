@@ -2,9 +2,9 @@
 
 ## What it is
 
-Mnemonic can serve as a shared persistent memory layer for A2A agents working on the same task, project, or namespace.
+Mnemonik can serve as a shared persistent memory layer for A2A agents working on the same task, project, or namespace.
 
-A2A handles agent communication and task exchange. Mnemonic adds a common memory substrate that survives across sessions, processes, providers, and runtime changes.
+A2A handles agent communication and task exchange. Mnemonik adds a common memory substrate that survives across sessions, processes, providers, and runtime changes.
 
 ## Why it matters
 
@@ -17,7 +17,7 @@ Without a shared memory layer, multi-agent systems usually rely on:
 
 These approaches are fragile, hard to audit, and usually not portable.
 
-Mnemonic improves this by providing:
+Mnemonik improves this by providing:
 
 - persistent memory across sessions
 - semantic retrieval over shared records
@@ -34,7 +34,7 @@ A research workflow has four A2A-connected agents:
 - writing agent
 - verification agent
 
-Each agent contributes findings into a shared Mnemonic namespace:
+Each agent contributes findings into a shared Mnemonik namespace:
 
 - discovered sources
 - extracted claims
@@ -45,7 +45,7 @@ Each agent contributes findings into a shared Mnemonic namespace:
 
 The next time any agent joins the workflow, it can retrieve the accumulated context instead of starting from zero.
 
-## Why this is a strong fit for Mnemonic
+## Why this is a strong fit for Mnemonik
 
 This is the cleanest near-term role because it directly matches the core product thesis:
 
@@ -53,7 +53,7 @@ This is the cleanest near-term role because it directly matches the core product
 - that context should outlive any one runtime
 - memory should not be locked to one vendor or framework
 
-## What Mnemonic contributes
+## What Mnemonik contributes
 
 - durable memory store
 - semantic recall across agent contributions
@@ -70,4 +70,4 @@ This is the cleanest near-term role because it directly matches the core product
 
 ## Recommended priority
 
-Highest priority. This is the most straightforward and defensible A2A building block for Mnemonic.
+Highest priority. This is the most straightforward and defensible A2A building block for Mnemonik.

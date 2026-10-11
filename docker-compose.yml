@@ -1,4 +1,4 @@
-# Production compose stack for the Mnemonic MCP server.
+# Production compose stack for the Mnemonik MCP server.
 #
 #   docker compose --env-file mcp.env up -d
 #

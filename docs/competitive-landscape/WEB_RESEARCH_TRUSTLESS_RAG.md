@@ -1,5 +1,5 @@
 # Web Research: Decentralized Trustless RAG Protocols
-## Validation Research for Mnemonic Protocol
+## Validation Research for Mnemonik Protocol
 
 **Date:** 2026-04-02
 **Queries:** Decentralized trustless RAG, verifiable vector search on-chain, zkTAM, V3DB, compressed agent memory Arweave Solana
@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-The market thesis is real, articulated, and being built by multiple teams independently. ICME explicitly states: **"Trustless agents can't work without trustless agentic memory."** This is the same thesis Mnemonic is built on. The ecosystem is early, fragmented, and no single system is winning. Mnemonic's combination of compression + hash commitment + provider-agnostic snapshot sits in a gap that none of the current systems fill.
+The market thesis is real, articulated, and being built by multiple teams independently. ICME explicitly states: **"Trustless agents can't work without trustless agentic memory."** This is the same thesis Mnemonik is built on. The ecosystem is early, fragmented, and no single system is winning. Mnemonik's combination of compression + hash commitment + provider-agnostic snapshot sits in a gap that none of the current systems fill.
 
 ---
 
@@ -18,7 +18,7 @@ The market thesis is real, articulated, and being built by multiple teams indepe
 
 **Source:** [Trustless Agents can't work without Trustless Agentic Memory](https://blog.icme.io/trustless-agents-cant-work-without-trustless-agentic-memory/)
 
-The most direct peer to Mnemonic found in the search. ICME is building **zkTAM** (Trustless Agentic Memory) using zkML (zero-knowledge machine learning). Their stack:
+The most direct peer to Mnemonik found in the search. ICME is building **zkTAM** (Trustless Agentic Memory) using zkML (zero-knowledge machine learning). Their stack:
 
 - **Vectune** — vector database running on WASM-compatible data availability layers, built with ideas from freshVamana (a disk-optimized graph-based ANN index). RAM usage kept within the DA layer.
 - **JOLT Atlas** — zkML framework extended to tackle embedding models. Generates ZK proofs that embeddings are correct (the embedding provider ran the model faithfully on the stated input).
@@ -33,9 +33,9 @@ The most direct peer to Mnemonic found in the search. ICME is building **zkTAM**
 - No fast compressed candidate retrieval + exact rerank cascade
 - ICP-specific (not Arweave + Solana)
 
-**Mnemonic vs. zkTAM:**
+**Mnemonik vs. zkTAM:**
 
-| | Mnemonic | zkTAM |
+| | Mnemonik | zkTAM |
 |---|---|---|
 | Trust model | Hash commitment (cheaper, faster) | ZK proof of embedding (stronger, expensive) |
 | Compression | ✅ 4/8-bit shadow index | ✗ |
@@ -44,7 +44,7 @@ The most direct peer to Mnemonic found in the search. ICME is building **zkTAM**
 | Encryption | AES-256-GCM | vetKey (ICP-native) |
 | Status | active Rust MCP server | Live (Kinic-CLI shipped) |
 
-**Strategic note:** zkTAM proves more (embedding correctness via ZK) but costs dramatically more in proving time and is ICP-locked. Mnemonic's hash commitment is weaker in ZK sense but orders of magnitude cheaper and chain-agnostic. The key question: do users need proof of *embedding correctness*, or proof of *memory integrity*? Mnemonic bets the latter is sufficient for V1.
+**Strategic note:** zkTAM proves more (embedding correctness via ZK) but costs dramatically more in proving time and is ICP-locked. Mnemonik's hash commitment is weaker in ZK sense but orders of magnitude cheaper and chain-agnostic. The key question: do users need proof of *embedding correctness*, or proof of *memory integrity*? Mnemonik bets the latter is sufficient for V1.
 
 ---
 
@@ -59,11 +59,11 @@ V3DB is a verifiable, versioned vector-search service with audit-on-demand ZK pr
 - Built on Plonky2 — achieves 40% lower peak memory than circuit-only baseline, millisecond-level verification time
 - Avoids costly in-circuit sorting via multiset equality/inclusion checks + boundary conditions
 
-**Relevance to Mnemonic:**
+**Relevance to Mnemonik:**
 - V3DB is an ANN retrieval verifier, not an agent memory system
-- Mnemonic commits the memory blob; V3DB proves the retrieval result
-- V3DB-style proofs are the answer to Mnemonic's open question Q3 (Section 9.2): "Is there a practical ZK proof that a retrieval result came from a committed blob?"
-- Combining Mnemonic's commitment + V3DB's retrieval proof would give end-to-end trustless agent memory
+- Mnemonik commits the memory blob; V3DB proves the retrieval result
+- V3DB-style proofs are the answer to Mnemonik's open question Q3 (Section 9.2): "Is there a practical ZK proof that a retrieval result came from a committed blob?"
+- Combining Mnemonik's commitment + V3DB's retrieval proof would give end-to-end trustless agent memory
 
 ---
 
@@ -89,10 +89,10 @@ An emerging two-layer architecture for trustless agents:
 
 Together: agents can prove they executed the right model on the right inputs, enabling trustless agent-to-agent interaction. JOLT Atlas supports classification, embedding, automated reasoning, and small LMs. Uses folding scheme for fast, space-efficient ZKPs that run in browsers and constrained devices.
 
-**Relevance to Mnemonic:**
-- Mnemonic's per-entry signing (ADR-009) + reliability oracle (ADR-018) is the lightweight version of this stack
-- A future Mnemonic integration could use JOLT Atlas to prove that each memory item was embedded by the stated model — resolving the embedding correctness gap vs. zkTAM
-- ERC-8004 agent identity is compatible with Mnemonic's Solana keypair model
+**Relevance to Mnemonik:**
+- Mnemonik's per-entry signing (ADR-009) + reliability oracle (ADR-018) is the lightweight version of this stack
+- A future Mnemonik integration could use JOLT Atlas to prove that each memory item was embedded by the stated model — resolving the embedding correctness gap vs. zkTAM
+- ERC-8004 agent identity is compatible with Mnemonik's Solana keypair model
 
 ---
 
@@ -102,22 +102,22 @@ Together: agents can prove they executed the right model on the right inputs, en
 
 - Arweave and Solana have an official partnership for decentralized ledger data storage
 - Arweave "pay-once, store forever" model is mature infrastructure used in production by Solana validators
-- The `arweave-storage-sdk` supports paying for Arweave storage using Solana stablecoins — a direct fit with Mnemonic's economic model
-- A 2025 paper on Blockweave (Arweave-based) reports: 48-byte on-chain metadata, 7200 TPS, 99% storage savings — validates the efficiency of Mnemonic's approach
+- The `arweave-storage-sdk` supports paying for Arweave storage using Solana stablecoins — a direct fit with Mnemonik's economic model
+- A 2025 paper on Blockweave (Arweave-based) reports: 48-byte on-chain metadata, 7200 TPS, 99% storage savings — validates the efficiency of Mnemonik's approach
 
-**Strategic note:** Mnemonic's Arweave + Solana choice is not a novel bet — it is backed by production deployments at scale. This is infrastructure, not research.
+**Strategic note:** Mnemonik's Arweave + Solana choice is not a novel bet — it is backed by production deployments at scale. This is infrastructure, not research.
 
 ---
 
 ## 2. Market Signal: The Thesis Is Established
 
-Three independent sources articulate the same thesis as Mnemonic, in the same terms:
+Three independent sources articulate the same thesis as Mnemonik, in the same terms:
 
-1. **ICME (2025):** *"Trustless agents can't work without trustless agentic memory."* — direct match to Mnemonic's founding thesis.
+1. **ICME (2025):** *"Trustless agents can't work without trustless agentic memory."* — direct match to Mnemonik's founding thesis.
 2. **D-RAG (NSF-funded, 2025):** Decentralized RAG is framed as necessary infrastructure for AI agent trust.
 3. **Blockchain Agent Economy (arXiv:2602.14219):** Blockchain infrastructure for autonomous AI agents is active academic research with multiple teams building coordination + verification primitives.
 
-No system has yet combined: compression + hash commitment + provider-agnostic portability + open embedder. This is Mnemonic's gap.
+No system has yet combined: compression + hash commitment + provider-agnostic portability + open embedder. This is Mnemonik's gap.
 
 ---
 
@@ -129,23 +129,23 @@ No system has yet combined: compression + hash commitment + provider-agnostic po
 | V3DB | Retrieval correctness (ZK) | ✗ | N/A | None (service) | Research |
 | D-RAG Lu et al. | Source reliability | ✗ | ✓ | Ethereum/generic | Paper |
 | D-RAG NSF | Data quality (permissioned) | ✗ | Partial | Permissioned | Paper |
-| Mnemonic | Memory integrity (hash) | ✅ 4/8-bit | ✅ | Arweave+Solana | v1.0 (active) |
+| Mnemonik | Memory integrity (hash) | ✅ 4/8-bit | ✅ | Arweave+Solana | v1.0 (active) |
 
-**Mnemonic's unique position:** The only system combining compression with decentralized verifiable agent memory. zkTAM is the closest peer but is proof-heavy, ICP-locked, and uncompressed. V3DB solves a different layer (retrieval verification, not memory storage).
+**Mnemonik's unique position:** The only system combining compression with decentralized verifiable agent memory. zkTAM is the closest peer but is proof-heavy, ICP-locked, and uncompressed. V3DB solves a different layer (retrieval verification, not memory storage).
 
 ---
 
-## 4. Implications for Mnemonic
+## 4. Implications for Mnemonik
 
 ### 4.1 Immediate validation
-- The market thesis ("trustless agent memory is necessary infrastructure") is articulated and funded by multiple independent teams. Mnemonic is not a speculative bet — it is in an established research and product direction.
+- The market thesis ("trustless agent memory is necessary infrastructure") is articulated and funded by multiple independent teams. Mnemonik is not a speculative bet — it is in an established research and product direction.
 - Arweave + Solana as the storage/commitment layer is validated production infrastructure, not an experimental choice.
 
 ### 4.2 Key differentiator to emphasize
-Compression is Mnemonic's clearest technical gap vs. all competitors. No other system in this space addresses the cost/performance tradeoff of storing embeddings at scale. This should be the lead technical claim in all positioning.
+Compression is Mnemonik's clearest technical gap vs. all competitors. No other system in this space addresses the cost/performance tradeoff of storing embeddings at scale. This should be the lead technical claim in all positioning.
 
 ### 4.3 ZK upgrade path is well-defined
-- Near term: hash commitment (Mnemonic V1) — cheapest, fastest, sufficient for single-user
+- Near term: hash commitment (Mnemonik V1) — cheapest, fastest, sufficient for single-user
 - Medium term: reliability oracle (ADR-018) — per-writer quality tracking, no ZK needed
 - Long term: JOLT Atlas integration for embedding correctness proofs — closes the gap vs. zkTAM
 - Aspirational: V3DB-style retrieval correctness proofs — full end-to-end trustless agent memory
@@ -153,10 +153,10 @@ Compression is Mnemonic's clearest technical gap vs. all competitors. No other s
 This is a credible and sequential upgrade path, not a vague future vision.
 
 ### 4.4 ICP vs. Arweave+Solana
-zkTAM chose ICP for cheap storage + vetKey encryption + cross-chain signing. Mnemonic chose Arweave + Solana. Key difference: Arweave's permanence guarantee is stronger (pay-once endowment model); Solana's throughput is higher than ICP for commitment anchoring. ICP's vetKey is a compelling encryption primitive but requires ICP lock-in. Mnemonic's AES-256-GCM with HKDF is simpler and chain-agnostic.
+zkTAM chose ICP for cheap storage + vetKey encryption + cross-chain signing. Mnemonik chose Arweave + Solana. Key difference: Arweave's permanence guarantee is stronger (pay-once endowment model); Solana's throughput is higher than ICP for commitment anchoring. ICP's vetKey is a compelling encryption primitive but requires ICP lock-in. Mnemonik's AES-256-GCM with HKDF is simpler and chain-agnostic.
 
 ### 4.5 "Trustless agents" framing is the right marketing angle
-ICME's framing — "trustless agents can't work without trustless agentic memory" — is the correct positioning hook. Mnemonic should adopt this language explicitly. The progression is: trustless inference (JOLT Atlas) + trustless memory (Mnemonic) + trustless coordination (ERC-8004) = fully trustless agent stack.
+ICME's framing — "trustless agents can't work without trustless agentic memory" — is the correct positioning hook. Mnemonik should adopt this language explicitly. The progression is: trustless inference (JOLT Atlas) + trustless memory (Mnemonik) + trustless coordination (ERC-8004) = fully trustless agent stack.
 
 ---
 

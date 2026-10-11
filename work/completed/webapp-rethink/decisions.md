@@ -218,8 +218,8 @@ SUCCESS; `npm test` 105 pass / 1 fail (+15 net-new tests). Committed.
 TRACKED FOR T6/QA (pre-existing, NOT regressions):
 - src/pages/Sign.test.tsx > countdown_displays_mm_ss: flaky waitFor timeout, failing since
   before this feature. T6/QA to stabilize or quarantine.
-- e2e/app.spec.ts expects a heading named "Mnemonic Protocol" on "/", but Landing h1 is
-  "Verifiable memory for AI agents." ("Mnemonic Protocol" is the eyebrow/wordmark). Pre-existing
+- e2e/app.spec.ts expects a heading named "Mnemonik Protocol" on "/", but Landing h1 is
+  "Verifiable memory for AI agents." ("Mnemonik Protocol" is the eyebrow/wordmark). Pre-existing
   mismatch; e2e not in `npm test`. T6 to reconcile assertion vs markup.
 
 ## 2026-06-27 — Task 9 done (agent-native publish surfaces)
@@ -325,7 +325,7 @@ Implemented unit+integration suite is strong (privacy e2e, publish auth both sur
 Gaps = the deferred E2E layer (T6 scope):
 - F1 (HIGH): Playwright e2e smoke for /ledger /analytics /blog /blog/:slug ABSENT -> T6.
 - F2 (HIGH): pre-existing e2e heading asserts RED against re-skinned Landing in TWO files —
-  app.spec.ts:6 AND chat.spec.ts:62,237 ("Mnemonic Protocol" vs new h1 "Verifiable memory for AI
+  app.spec.ts:6 AND chat.spec.ts:62,237 ("Mnemonik Protocol" vs new h1 "Verifiable memory for AI
   agents"). e2e not in npm test so CI falsely green. -> T6 fix BOTH files.
 - F3 (MED): ledger.ts fetchArtifacts/fetchAttestationTimeline have no direct fallback test
   (asymmetric w/ blog.ts) -> T6 mirror blog.test.ts.

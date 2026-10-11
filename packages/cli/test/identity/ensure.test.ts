@@ -125,7 +125,7 @@ describe("ensure creates when absent (os available)", () => {
 
     // README should be written.
     const readme = await fs.readFile(stores.readmePath, "utf8");
-    expect(readme).toContain("Mnemonic identity");
+    expect(readme).toContain("Mnemonik identity");
   });
 });
 

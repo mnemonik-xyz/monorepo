@@ -3,7 +3,7 @@
 ## Overview
 
 Introduce `KEY_BINDING_V1`: a dual-signed payload that cryptographically links an agent's
-Ed25519 Mnemonic identity to a secp256k1 Ethereum address. Both signatures are required for
+Ed25519 Mnemonik identity to a secp256k1 Ethereum address. Both signatures are required for
 the binding to be considered valid. The Ed25519 signing path (`core/src/codec/sign.rs`) is
 unchanged. No new crates are required.
 
@@ -124,7 +124,7 @@ is recoverable from the `kid` inside that envelope, which equals the agent's kno
 
 ## 5. Verification Logic
 
-`core::identity::dual_key::verify_binding(card_extension: &XMnemonicExtension) -> Result<()>`
+`core::identity::dual_key::verify_binding(card_extension: &XMnemonikExtension) -> Result<()>`
 
 Steps:
 1. Decode `evm_binding_cose` from base64url to bytes.

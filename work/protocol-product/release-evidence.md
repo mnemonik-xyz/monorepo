@@ -70,7 +70,7 @@ Exit **2** means missing pins or unsuccessful positive observation; malformed in
 Build the SDK first using the repository build instructions.
 
 Separate public surface probes returned MCP health HTTP 200, anonymous `mnemonic_whoami` rejection for missing JWT, and HTTP 404 for the advertised agent-card path on the apex site.
-A follow-up at `https://www.mnemonik.xyz/.well-known/agent.json` returned HTTP 200 and a valid Mnemonic service card. README/agent-guide discovery links now use that observed working host.
+A follow-up at `https://www.mnemonik.xyz/.well-known/agent.json` returned HTTP 200 and a valid Mnemonik service card. README/agent-guide discovery links now use that observed working host.
 No authentication bypass or state-changing request was attempted.
 
 ## Deployment build findings

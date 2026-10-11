@@ -1,6 +1,6 @@
-# Mnemonic as ERC-8004 Reputation Layer
+# Mnemonik as ERC-8004 Reputation Layer
 
-This document describes how the Mnemonic Protocol extends ERC-8004 ("Trustless Agents") with cryptographically verifiable reputation evidence. It covers the architecture, the `MNEMONIC_FEEDBACK_V1` document format, all interaction flows, and the verification procedure.
+This document describes how the Mnemonik Protocol extends ERC-8004 ("Trustless Agents") with cryptographically verifiable reputation evidence. It covers the architecture, the `MNEMONIC_FEEDBACK_V1` document format, all interaction flows, and the verification procedure.
 
 Related: `work/erc8004-reputation/tech-spec.md`, issue `#73`.
 
@@ -10,7 +10,7 @@ Related: `work/erc8004-reputation/tech-spec.md`, issue `#73`.
 
 ERC-8004 Reputation Registry accepts any rating from any wallet. A score of 98/100 stored on-chain carries no proof that the rater ever interacted with the rated agent, no proof the rater's identity has a history worth trusting, and no proof the specific claim was not fabricated after the fact.
 
-Mnemonic closes that gap. Every agent interaction is signed with a long-lived Ed25519 identity and anchored on Arweave and Solana before the rating is written. The anchoring is time-ordered and content-addressed — a fabricated memory cannot be backdated, because the anchor transaction already exists at a block height that predates the rating.
+Mnemonik closes that gap. Every agent interaction is signed with a long-lived Ed25519 identity and anchored on Arweave and Solana before the rating is written. The anchoring is time-ordered and content-addressed — a fabricated memory cannot be backdated, because the anchor transaction already exists at a block height that predates the rating.
 
 ---
 
@@ -25,7 +25,7 @@ flowchart TD
         sdk["📦 @mnemonik-xyz/sdk\nprepareFeedback()"]
     end
 
-    subgraph MnemonicBox["Mnemonic Protocol"]
+    subgraph MnemonikBox["Mnemonik Protocol"]
         mcp["⚙️ MCP Server\n(sign_memory, recall)"]
         arweave["🌊 Arweave Anchor\n(COSE envelope, permanent)"]
         solana["☀️ Solana Memo Anchor\n(SPL Memo, content hash)"]
@@ -60,13 +60,13 @@ flowchart TD
 
 ## Two-layer trust model
 
-Mnemonic adds a distinct trust category to the ERC-8004 ecosystem, which already has:
+Mnemonik adds a distinct trust category to the ERC-8004 ecosystem, which already has:
 
 | Trust type | Providers | How it works |
 |---|---|---|
 | TEE attestation | Phala, Marlin | Hardware-signed execution proof |
 | Crypto-economic | Staking protocols | Slashable bond as collateral |
-| **Signed memory** | **Mnemonic** | **Ed25519 identity + time-anchored evidence** |
+| **Signed memory** | **Mnemonik** | **Ed25519 identity + time-anchored evidence** |
 
 The third category is unclaimed. The key property: a staking deposit can be posted today with a fresh wallet. A year of anchored memory history cannot be backdated — it would require rewriting Arweave blocks that are already globally replicated.
 
@@ -74,7 +74,7 @@ The third category is unclaimed. The key property: a staking deposit can be post
 
 ## The `MNEMONIC_FEEDBACK_V1` document
 
-A plain JSON file hosted at `feedbackURI`. Any viem/ethers consumer can `JSON.parse` it. The Mnemonic signature lives inside it as a `proofs[]` entry; no CBOR stack is needed to read or verify the document.
+A plain JSON file hosted at `feedbackURI`. Any viem/ethers consumer can `JSON.parse` it. The Mnemonik signature lives inside it as a `proofs[]` entry; no CBOR stack is needed to read or verify the document.
 
 ```jsonc
 {
@@ -97,7 +97,7 @@ A plain JSON file hosted at `feedbackURI`. Any viem/ethers consumer can `JSON.pa
     },
     "endpoint": "https://agent.example.com/a2a",  // optional: rated agent's service endpoint
 
-    // The Mnemonic evidence. The cited attestation must have been anchored
+    // The Mnemonik evidence. The cited attestation must have been anchored
     // BEFORE this document is created — that is the tamper-evident property.
     "mnemonic": {
       "schema": "MEMORY_V1",
@@ -252,7 +252,7 @@ flowchart TD
 
 ---
 
-### Flow 4 — Evidence chain (why Mnemonic ratings are harder to fake)
+### Flow 4 — Evidence chain (why Mnemonik ratings are harder to fake)
 
 ```mermaid
 flowchart LR
@@ -325,7 +325,7 @@ MNEMONIC_FEEDBACK_V1:0x<payload_hash lowercase hex>
 
 The Ed25519 proof is a raw 64-byte signature over the UTF-8 bytes of that string. Not COSE: a verifier with `@noble/ed25519` or `ed25519-dalek` can verify in three lines and no CBOR stack.
 
-The optional EIP-191 proof is a standard personal_sign over the same string. The caller produces it with their own wallet; Mnemonic never holds the EVM key.
+The optional EIP-191 proof is a standard personal_sign over the same string. The caller produces it with their own wallet; Mnemonik never holds the EVM key.
 
 ---
 
@@ -341,7 +341,7 @@ The optional EIP-191 proof is a standard personal_sign over the same string. The
 ### Does not prove
 
 - That the cited memory is *about* Agent B. `blake3` and the anchor prove existence and time, not semantic content.
-- Anti-Sybil protection. A single operator can hold many identities. Mnemonic adds cost: a long history cannot be backdated. It does not make new identities impossible.
+- Anti-Sybil protection. A single operator can hold many identities. Mnemonik adds cost: a long history cannot be backdated. It does not make new identities impossible.
 - A permanent rater-to-address binding. The EVM address is committed per-document, not globally linked to the Ed25519 key forever.
 
 ---

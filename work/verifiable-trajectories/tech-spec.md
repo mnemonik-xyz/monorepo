@@ -13,7 +13,7 @@ size: L
 Let a verifier prove, offline and without model weights, that an agent's sequence
 of steps was **good** = (a) ordered + tamper-evident (chain integrity) **and**
 (b) each step carries an independently-signed correctness verdict (verdict
-binding). Mnemonic owns the *commitment + lineage* layer (OCP's "confirm
+binding). Mnemonik owns the *commitment + lineage* layer (OCP's "confirm
 inclusion"); it **binds** correctness proofs (PRM / zkML / opML / TEE / OCP) by
 hash, it never produces them.
 
@@ -29,7 +29,7 @@ bundle's ordered step hashes. One inclusion proof simultaneously proves
 
 "Prove the steps were good" decomposes into three guarantees at three layers:
 
-| Guarantee | Producer | Mnemonic role |
+| Guarantee | Producer | Mnemonik role |
 |---|---|---|
 | A. Steps happened in this order, unaltered | hash-linked signed chain | **Produces** |
 | B. Each step was a valid/quality move | PRM / judge / deterministic check | **Attests the verdict** (co-sign) |

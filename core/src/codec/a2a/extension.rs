@@ -1,7 +1,7 @@
 //! AgentCard `x-mnemonic` extension — Decision 3 in `work/a2a-bridge/decisions.md`.
 //!
 //! Publishes the agent's Ed25519 pubkey inside an A2A AgentCard extension so that
-//! any A2A-native verifier can locate the Mnemonic-attestation key without a
+//! any A2A-native verifier can locate the Mnemonik-attestation key without a
 //! separate lookup.
 //!
 //! Extension URI: `https://mnemonik.xyz/extensions/x-mnemonic/v1`
@@ -18,7 +18,7 @@
 //!
 //! Authority rules (Risks section, tech-spec.md):
 //! - JWS in `signatures[]` verifies AgentCard authenticity.
-//! - `x-mnemonic` declares the Mnemonic attestation key.
+//! - `x-mnemonic` declares the Mnemonik attestation key.
 //! - Both must be present; the JWS must cover the extension payload.
 //! - Pubkey mismatch between JWS-covered card and attestation envelope → error.
 
@@ -26,7 +26,7 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Extension URI identifying the Mnemonic x-mnemonic AgentCard extension.
+/// Extension URI identifying the Mnemonik x-mnemonic AgentCard extension.
 pub const EXTENSION_URI: &str = "https://mnemonik.xyz/extensions/x-mnemonic/v1";
 
 /// Minimum conformance version shipped in V1.
@@ -34,13 +34,13 @@ pub const CONFORMANCE_VERSION: &str = "1";
 
 /// The `x-mnemonic` AgentCard extension payload (Decision 3).
 ///
-/// Carries the Ed25519 pubkey that signs Mnemonic attestations and optionally
+/// Carries the Ed25519 pubkey that signs Mnemonik attestations and optionally
 /// the attestation endpoint URL.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct XMnemonicExtension {
+pub struct XMnemonikExtension {
     /// Extension URI — always `EXTENSION_URI`.
     pub uri: String,
-    /// Base58-encoded Ed25519 public key used to sign Mnemonic attestations.
+    /// Base58-encoded Ed25519 public key used to sign Mnemonik attestations.
     pub ed25519_pubkey_base58: String,
     /// Optional URL of the attestation endpoint (e.g. `https://api.mnemonik.xyz/a2a`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -49,10 +49,10 @@ pub struct XMnemonicExtension {
     pub conformance_version: String,
 }
 
-impl XMnemonicExtension {
-    /// Create a new `XMnemonicExtension` with the given pubkey and optional endpoint.
+impl XMnemonikExtension {
+    /// Create a new `XMnemonikExtension` with the given pubkey and optional endpoint.
     pub fn new(pubkey_base58: &str, endpoint: Option<&str>) -> Self {
-        XMnemonicExtension {
+        XMnemonikExtension {
             uri: EXTENSION_URI.to_string(),
             ed25519_pubkey_base58: pubkey_base58.to_string(),
             attestation_endpoint: endpoint.map(|s| s.to_string()),
@@ -71,8 +71,8 @@ impl XMnemonicExtension {
 /// # Returns
 /// A `serde_json::Value` representing the full extension object.
 pub fn build_x_mnemonic_extension(pubkey: &str, endpoint: Option<&str>) -> Value {
-    let ext = XMnemonicExtension::new(pubkey, endpoint);
-    serde_json::to_value(&ext).expect("XMnemonicExtension is always serializable")
+    let ext = XMnemonikExtension::new(pubkey, endpoint);
+    serde_json::to_value(&ext).expect("XMnemonikExtension is always serializable")
 }
 
 /// Extract the `x-mnemonic` extension from an AgentCard JSON value.
@@ -83,8 +83,8 @@ pub fn build_x_mnemonic_extension(pubkey: &str, endpoint: Option<&str>) -> Value
 ///
 /// # Errors
 /// Returns an error if the extensions field has an unexpected shape or if the
-/// matching entry cannot be deserialized as [`XMnemonicExtension`].
-pub fn extract_x_mnemonic(agent_card: &Value) -> Result<Option<XMnemonicExtension>> {
+/// matching entry cannot be deserialized as [`XMnemonikExtension`].
+pub fn extract_x_mnemonic(agent_card: &Value) -> Result<Option<XMnemonikExtension>> {
     let extensions = match agent_card.get("extensions") {
         None => return Ok(None),
         Some(v) => v,
@@ -98,7 +98,7 @@ pub fn extract_x_mnemonic(agent_card: &Value) -> Result<Option<XMnemonicExtensio
     for entry in arr {
         let uri = entry.get("uri").and_then(|v| v.as_str()).unwrap_or("");
         if uri == EXTENSION_URI {
-            let ext: XMnemonicExtension = serde_json::from_value(entry.clone())
+            let ext: XMnemonikExtension = serde_json::from_value(entry.clone())
                 .map_err(|e| anyhow::anyhow!("x-mnemonic extension parse error: {e}"))?;
             return Ok(Some(ext));
         }
@@ -240,7 +240,7 @@ mod tests {
     // -- extension::roundtrip_serialization --
     #[test]
     fn roundtrip_serialization() {
-        let original = XMnemonicExtension {
+        let original = XMnemonikExtension {
             uri: EXTENSION_URI.to_string(),
             ed25519_pubkey_base58: "3MrF7MAkQV3vNtNPeXqfWtLFGNYFMmT2gkS5PVJGQ1ej".to_string(),
             attestation_endpoint: Some("https://api.mnemonik.xyz/a2a".to_string()),
@@ -248,7 +248,7 @@ mod tests {
         };
 
         let json_str = serde_json::to_string(&original).unwrap();
-        let restored: XMnemonicExtension = serde_json::from_str(&json_str).unwrap();
+        let restored: XMnemonikExtension = serde_json::from_str(&json_str).unwrap();
         assert_eq!(
             original, restored,
             "serde round-trip must be byte-for-byte equal"
@@ -261,13 +261,13 @@ mod tests {
 
     #[test]
     fn roundtrip_without_endpoint() {
-        let ext = XMnemonicExtension::new("3MrF7MAkQV3vNtNPeXqfWtLFGNYFMmT2gkS5PVJGQ1ej", None);
+        let ext = XMnemonikExtension::new("3MrF7MAkQV3vNtNPeXqfWtLFGNYFMmT2gkS5PVJGQ1ej", None);
         let json = serde_json::to_string(&ext).unwrap();
         assert!(
             !json.contains("attestation_endpoint"),
             "None endpoint must be skipped in serialization"
         );
-        let back: XMnemonicExtension = serde_json::from_str(&json).unwrap();
+        let back: XMnemonikExtension = serde_json::from_str(&json).unwrap();
         assert_eq!(ext, back);
     }
 

@@ -215,7 +215,7 @@ export default function Install() {
             Install
           </h1>
           <p className="text-sm text-text-muted">
-            Connect Mnemonic to your AI tool, then create or import the Ed25519
+            Connect Mnemonik to your AI tool, then create or import the Ed25519
             keypair that will sign your memories.
           </p>
         </header>
@@ -286,7 +286,7 @@ export default function Install() {
                 <li>2. Approve the deeplink prompt in your browser.</li>
                 <li>
                   3. Confirm{" "}
-                  <span className="font-mono text-text-primary">Mnemonic</span>{" "}
+                  <span className="font-mono text-text-primary">Mnemonik</span>{" "}
                   in the Cursor MCP install dialog.
                 </li>
                 <li>4. Complete OAuth in the popup window.</li>
@@ -308,7 +308,7 @@ export default function Install() {
                 </li>
                 <li>
                   3. Accept the{" "}
-                  <span className="font-mono text-text-primary">Mnemonic</span>{" "}
+                  <span className="font-mono text-text-primary">Mnemonik</span>{" "}
                   MCP server in the install dialog.
                 </li>
                 <li>

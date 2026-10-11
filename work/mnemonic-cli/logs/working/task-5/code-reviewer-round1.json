@@ -70,9 +70,9 @@
       "dimension": "Code Readability",
       "file": "packages/cli/src/commands/whoami.ts",
       "lines": "84-86",
-      "issue": "Inside the `--with-count` branch, `Keypair` is dynamically imported with `await import('@mnemonik-xyz/sdk').then((m) => m.Keypair.fromJSON(id))` even though the file already statically imports `LocalSigner, MnemonicClient, parseJwtPayload` from the same module at the top. The dynamic import provides no real laziness benefit (the module is already loaded) and adds a microtask + an opaque-looking call.",
+      "issue": "Inside the `--with-count` branch, `Keypair` is dynamically imported with `await import('@mnemonik-xyz/sdk').then((m) => m.Keypair.fromJSON(id))` even though the file already statically imports `LocalSigner, MnemonikClient, parseJwtPayload` from the same module at the top. The dynamic import provides no real laziness benefit (the module is already loaded) and adds a microtask + an opaque-looking call.",
       "impact": "Cosmetic.",
-      "recommendation": "Add `Keypair` to the static import at the top: `import { Keypair, LocalSigner, MnemonicClient, parseJwtPayload } from '@mnemonik-xyz/sdk';`. Remove the dynamic import."
+      "recommendation": "Add `Keypair` to the static import at the top: `import { Keypair, LocalSigner, MnemonikClient, parseJwtPayload } from '@mnemonik-xyz/sdk';`. Remove the dynamic import."
     },
     {
       "id": "S2",

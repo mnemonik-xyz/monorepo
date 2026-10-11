@@ -126,7 +126,7 @@ Each stage reduces the candidate set. This avoids a single scoring function need
 
 ---
 
-## 4. Scoring Function Design for Mnemonic
+## 4. Scoring Function Design for Mnemonik
 
 ### Proposed composite score
 
@@ -300,7 +300,7 @@ Build the engine once, parameterize everything, ship sensible defaults.
 
 ---
 
-## 8. Recommendation for Mnemonic
+## 8. Recommendation for Mnemonik
 
 ### Phase 1 (MVP eviction)
 - Implement `DefaultEvictionPolicy` with the weighted composite score

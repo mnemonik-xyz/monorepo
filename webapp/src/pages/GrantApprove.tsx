@@ -93,7 +93,7 @@ export default function GrantApprove() {
         typeof wasmRecord.wrap_content_key_to_recipient !== "function"
       ) {
         throw new Error(
-          "Sealed memory grants require a newer version of the Mnemonic WASM module. " +
+          "Sealed memory grants require a newer version of the Mnemonik WASM module. " +
             "This feature will be available once the sealed crypto tasks are merged.",
         );
       }

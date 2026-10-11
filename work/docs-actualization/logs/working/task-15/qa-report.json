@@ -43,7 +43,7 @@
       "step": 7,
       "name": "WHITEPAPER references paper.pdf",
       "result": "pass",
-      "details": "Line 337: '8. [Mnemonic Protocol Foundational Paper](./research/paper.pdf)'. WHITEPAPER uses ./research/paper.pdf relative form per Decision 6 — accepted."
+      "details": "Line 337: '8. [Mnemonik Protocol Foundational Paper](./research/paper.pdf)'. WHITEPAPER uses ./research/paper.pdf relative form per Decision 6 — accepted."
     },
     {
       "step": 8,

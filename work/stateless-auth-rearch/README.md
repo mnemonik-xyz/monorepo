@@ -73,8 +73,8 @@ The proxy:
 - Runs as a stdio MCP server (MCP-host sees it as a normal stdio server).
 - Holds the user's Ed25519 keypair locally (file in `~/.config/mnemonik/`).
 - For each `tools/call`, signs canonical request body with the keypair.
-- Forwards to upstream HTTPS endpoint with `X-Mnemonic-Signature` +
-  `X-Mnemonic-Pubkey` headers (or HTTP Message Signatures per RFC 9421).
+- Forwards to upstream HTTPS endpoint with `X-Mnemonik-Signature` +
+  `X-Mnemonik-Pubkey` headers (or HTTP Message Signatures per RFC 9421).
 
 Upstream server (refactored, breaking change):
 - Drops `bearer_auth_middleware` for tool-call routes.

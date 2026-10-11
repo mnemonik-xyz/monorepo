@@ -29,7 +29,7 @@ Append-only. Owner decisions, task reports and audit findings go here.
 - **F4.** `core/src/codec/canonical.rs::to_canonical_cbor` must not be used for this document:
   non-integer numbers become text and RFC 3339 strings become CBOR tag 1 epoch seconds, so both
   the score and the timestamp would be corrupted.
-- **F5.** `mcp/src/wallet_link.rs` already binds an EVM address to a Mnemonic subject over
+- **F5.** `mcp/src/wallet_link.rs` already binds an EVM address to a Mnemonik subject over
   EIP-191. It is the right message-discipline precedent but not reusable: server-side state,
   scoped to a paid operation id, five-minute expiry, and it publishes only a subject hash. A
   durable public reputation artifact must stay verifiable forever.

@@ -6,16 +6,16 @@ Append-only log. Each entry: date, who, what, why, what changes downstream.
 
 ## 2026-06-30 — Feature folder created
 
-Author: claude (in response to owner request to evolve Mnemonic toward
+Author: claude (in response to owner request to evolve Mnemonik toward
 "cryptographically verifiable provenance of agent actions against the initial
 intent/task," framed against Delta Network's thesis).
 
 Origin: Delta Network proves an agent's *action* matches a user-signed *intent*
 via a centralized closed-source SP1 zkVM + zkTLS, gating before funds move. The
-owner wants Mnemonic to occupy the same problem — action↔intent correspondence —
+owner wants Mnemonik to occupy the same problem — action↔intent correspondence —
 but **decentralized, efficient, and as provenance not only a gate**.
 
-Substrate audit found Mnemonic already ships 2 of the 3 legs (chain integrity +
+Substrate audit found Mnemonik already ships 2 of the 3 legs (chain integrity +
 per-step verdict, via `work/verifiable-trajectories/`). The missing leg is
 **intent binding**. This feature extends — not replaces — that work.
 
@@ -24,21 +24,21 @@ per-step verdict, via `work/verifiable-trajectories/`). The missing leg is
 ## 2026-06-30 — Decision: correspondence is re-runnable policy eval, NOT a zkVM
 
 The central architectural choice. Delta's correspondence proof is a hosted SP1
-zkVM evaluation you must trust the operator to run. Mnemonic's is a **pure,
+zkVM evaluation you must trust the operator to run. Mnemonik's is a **pure,
 total, deterministic policy evaluator** (`core/src/trajectory/policy.rs`) over
 **hash-committed evidence**. Any verifier re-executes it and gets the same
 verdict — no trusted prover, no hosted service.
 
 Why: it is strictly more decentralized than a hosted prover (re-runnable from the
 permaweb), strictly cheaper (microseconds, no proving overhead), and it stays
-inside the locked-in philosophy — Mnemonic *produces* the commitment/lineage/
+inside the locked-in philosophy — Mnemonik *produces* the commitment/lineage/
 correspondence layer and *binds* external correctness proofs by hash, never
 produces them (mirrors verifiable-trajectories Decision "scope to A+B, bind C").
 
 Consequence: zk is used ONLY where evidence must stay private — bound via
 `COMPLIANCE_V1.proof_ref` / `proof_kind` (a Delta SP1 proof, a TEE quote, a zkTLS
-notarization). Mnemonic orders + anchors + makes it recallable. Composition, not
-competition: a Delta proof can be a leaf in a Mnemonic record.
+notarization). Mnemonik orders + anchors + makes it recallable. Composition, not
+competition: a Delta proof can be a leaf in a Mnemonik record.
 
 ---
 

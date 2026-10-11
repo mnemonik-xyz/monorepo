@@ -20,7 +20,7 @@ services:
     networks:
       - a2a-net
 
-  # ── Mnemonic bridge sidecar ───────────────────────────────────────────────
+  # ── Mnemonik bridge sidecar ───────────────────────────────────────────────
   bridge:
     image: bridge-a2a:latest
     build:

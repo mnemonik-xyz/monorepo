@@ -27,7 +27,7 @@ Each script:
 
 1. Triggers the install deeplink for that app
 2. Uses `cliclick` to click through the MCP install dialog
-3. Asserts (file-system level — NOT AX-opaque UI scraping) that the app's MCP config file gained the Mnemonic entry
+3. Asserts (file-system level — NOT AX-opaque UI scraping) that the app's MCP config file gained the Mnemonik entry
 
 Per [m13v's note on issue #59](https://github.com/mnemonik-xyz/monorepo/issues/59): we deliberately do NOT scrape terminal output via AppleScript / OCR — that's flaky. The MCP config file IS persisted and is the deterministic source of truth.
 

@@ -12,7 +12,7 @@ Items deliberately out of scope for Phase 1 (≤5 dev-days, hackathon MVP). Arch
 - **Reported:** 2026-05-02
 - **Severity:** P0 — primary demo path is broken end-to-end on a clean install. `init` + `login` succeed, `sign` fails immediately.
 - **Repro:** `yarn add @mnemonik-xyz/cli@0.1.5` → `mnemonic init` (existing `~/.mnemonic/identity.json`, no `--force`, OK) → `mnemonic login` (OAuth completes, `sub=B3hTWwBvx2RjEwcCrq9cmybpg6g6NRapD2R9n9caP4uX`, JWT stored) → `mnemonic sign "hello"` → `AuthError: sign-callback rejected: HTTP 403`.
-- **Webapp side (concurrent):** Browser-signing UI loads with title "Authorize MCP client", body "An external AI tool is asking to act on your behalf via the Mnemonic protocol. Approving will sign a one-time challenge with your localStorage keypair so the client can call /mcp as you." Then renders **State (none)** + **Failed: Missing `challenge` or `state` query parameter. Restart the OAuth flow from your MCP client.** — i.e. the URL the CLI opened lacks `challenge=` and `state=`.
+- **Webapp side (concurrent):** Browser-signing UI loads with title "Authorize MCP client", body "An external AI tool is asking to act on your behalf via the Mnemonik protocol. Approving will sign a one-time challenge with your localStorage keypair so the client can call /mcp as you." Then renders **State (none)** + **Failed: Missing `challenge` or `state` query parameter. Restart the OAuth flow from your MCP client.** — i.e. the URL the CLI opened lacks `challenge=` and `state=`.
 - **Working hypothesis:** `sign` is taking the browser-mediated signing fallback (because local `identity.json` pubkey ≠ JWT `sub`, or the 0.1.5 pre-flight is mis-routing to fallback instead of erroring). The fallback URL builder omits `challenge` and `state`, so the webapp can't verify and returns 403 to the polling CLI. Two issues stacked: (a) why is CLI not signing locally with the file at `/Users/syi/.mnemonic/identity.json`?  (b) the browser-signing handoff URL is malformed.
 - **Likely fixes:**
   1. CLI: `sign` should always attempt **local** Ed25519 signing first when `~/.mnemonic/identity.json` (or `id.json`) is present — only fall back to browser when there is genuinely no local key.
@@ -160,7 +160,7 @@ Flip `STORAGE_MODE=local` → `STORAGE_MODE=full` (Arweave + Solana anchoring) A
 - **Agent loop** — `mnemonic chat` runs LLM-driven REPL with auto tool-calls, similar to `claude` / `codex` CLIs. Requires LLM provider integration (Anthropic API key or local Ollama). Lower priority — Cursor/Claude.ai already cover this UX. Phase 2.
 - **Plugin system** — third parties register their own MCP tools accessible via `mnemonic plugins/<name>`. Phase 2.
 - **Self-host commands** — `mnemonic serve` to spawn a local `mnemonic-mcp` instance, `mnemonic init-server` to set up env vars + keypair file. Phase 1.5.
-- **Git-hook integration** — `mnemonic precommit-sign` auto-signs commit metadata into Mnemonic. Phase 2.
+- **Git-hook integration** — `mnemonic precommit-sign` auto-signs commit metadata into Mnemonik. Phase 2.
 - **Auto-tagging from context** — `mnemonic sign` infers tags from current git branch, dir name, package.json. Phase 2.
 - **`mnemonic export` / `mnemonic import`** — bulk export/import of attestations as JSONL for backup. Phase 1.5.
 - **`mnemonic search`** — server-side full-text search over content (currently only embedding-based recall). Phase 2.
@@ -173,7 +173,7 @@ Flip `STORAGE_MODE=local` → `STORAGE_MODE=full` (Arweave + Solana anchoring) A
 - **WebSocket / SSE transport** — currently HTTP request/response only; add streaming for long-running tool calls. Phase 2.
 - **TypeScript declaration bundle** — single-file `.d.ts` for easier consumption in mixed-tool codebases. Phase 1.5 (trivial).
 - **Browser-mediated signing path in CLI** — for cases where CLI runs without local key (e.g. future Turnkey-only environment). CLI opens browser via `open` package, polls for callback. Phase 1.5 alongside TurnkeySigner.
-- **MCP client extras** — currently SDK exposes 5 Mnemonic tools. Could expose generic MCP-client primitives (`callTool`, `listTools`) for using SDK against any MCP server, not just Mnemonic. Phase 2.
+- **MCP client extras** — currently SDK exposes 5 Mnemonik tools. Could expose generic MCP-client primitives (`callTool`, `listTools`) for using SDK against any MCP server, not just Mnemonik. Phase 2.
 
 ## Chrome Extension (Phase 2 product, depends on SDK)
 
@@ -185,7 +185,7 @@ The whole reason SDK exists separately from CLI. Open product surface:
 
 ## Agent framework integration (Phase 2)
 
-- LangChain/LangGraph: publish `@mnemonik-xyz/langchain` adapter that exposes Mnemonic tools as LangChain `Tool` objects.
+- LangChain/LangGraph: publish `@mnemonik-xyz/langchain` adapter that exposes Mnemonik tools as LangChain `Tool` objects.
 - AutoGen / CrewAI / PydanticAI: similar adapters in their respective ecosystems.
 - These all consume the same `@mnemonik-xyz/sdk`.
 

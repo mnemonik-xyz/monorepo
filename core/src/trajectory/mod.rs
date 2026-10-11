@@ -7,7 +7,7 @@
 //! - **Verdict binding** ([`verify::verdict_coverage`]): each step carries a
 //!   verdict signed by an **independent** judge (`judge != producer`).
 //!
-//! Mnemonic owns the commitment + lineage layer; it *binds* external correctness
+//! Mnemonik owns the commitment + lineage layer; it *binds* external correctness
 //! proofs (PRM / zkML / opML / TEE / OCP) by hash via the verdict's `proof_ref`,
 //! it never produces them. The order-preserving Merkle root over the steps'
 //! content hashes ([`crate::merkle::trajectory_root`]) is the trajectory's

@@ -9,8 +9,8 @@ import {
   IntegrityError,
   Keypair,
   LocalSigner,
-  MnemonicClient,
-  MnemonicError,
+  MnemonikClient,
+  MnemonikError,
   ServerError,
   UserError,
   buildAuthorizeUrl,
@@ -29,10 +29,10 @@ describe("public barrel exports", () => {
     // Classes and functions exist with the expected shape. We do not
     // exercise behavior here — that's covered by their dedicated tests —
     // we only verify the barrel wires up.
-    expect(typeof MnemonicClient).toBe("function");
+    expect(typeof MnemonikClient).toBe("function");
     expect(typeof LocalSigner).toBe("function");
     expect(typeof Keypair).toBe("function");
-    expect(typeof MnemonicError).toBe("function");
+    expect(typeof MnemonikError).toBe("function");
     expect(typeof AuthError).toBe("function");
     expect(typeof ServerError).toBe("function");
     expect(typeof IntegrityError).toBe("function");

@@ -2,13 +2,13 @@
 
 ## Pattern summary
 
-Use Mnemonic as the persistent ledger for A2A task execution history.
+Use Mnemonik as the persistent ledger for A2A task execution history.
 
 Each task exchanged in an A2A workflow leaves behind a durable record that can be retrieved later.
 
 ## What gets stored
 
-For each task, Mnemonic can record:
+For each task, Mnemonik can record:
 
 - task request hash
 - assigned agent identity
@@ -45,7 +45,7 @@ Each delegation becomes a memory entry. Later agents can query:
 - what risks were already identified?
 - which approval conditions failed?
 
-## Mnemonic value in this pattern
+## Mnemonik value in this pattern
 
 - persistent task history
 - semantic recall across previous tasks

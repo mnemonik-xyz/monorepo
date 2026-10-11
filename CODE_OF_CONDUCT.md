@@ -54,7 +54,7 @@ Maintainers are held to the same standard as contributors. A maintainer who viol
 
 ## Acknowledgments
 
-This document is original to the Mnemonic Protocol project. It is informed by the spirit of widely adopted community guidelines without copying them verbatim.
+This document is original to the Mnemonik Protocol project. It is informed by the spirit of widely adopted community guidelines without copying them verbatim.
 
 ---
 

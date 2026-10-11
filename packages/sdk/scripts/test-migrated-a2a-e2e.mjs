@@ -4,7 +4,7 @@ import {readFileSync} from 'node:fs';
 import {runResearchCryptoFailures} from './research-crypto-failures.mjs';
 import {runResearchDiscoveryFailures} from './research-discovery-failures.mjs';
 import {
-  MnemonicClient, Keypair, LocalSigner, signRecoveryCheckpoint,
+  MnemonikClient, Keypair, LocalSigner, signRecoveryCheckpoint,
   ArweaveStorageAdapter, HttpObjectStorageAdapter, migrateA2AStorage,
   restoreMigratedA2A, verifyLocatorManifest, createRecoveryBackup, openRecoveryBackup, envelopeSha256,
 } from '../dist/index.js';
@@ -13,7 +13,7 @@ const source=process.env.A2A_SOURCE_URL, destination=process.env.A2A_DESTINATION
 if(process.argv[2]==='dedup'){
   const expected=JSON.parse(process.env.A2A_DEDUP_PACKET);
   const kp=new Keypair(v.reader);
-  const c=new MnemonicClient({baseUrl:'http://127.0.0.1:1',signer:new LocalSigner(kp),a2aGatewayUrl:source,a2aIndexUrl:`${source}/graphql`,fetch:async(url,init)=>{
+  const c=new MnemonikClient({baseUrl:'http://127.0.0.1:1',signer:new LocalSigner(kp),a2aGatewayUrl:source,a2aIndexUrl:`${source}/graphql`,fetch:async(url,init)=>{
     assert(String(url).startsWith(source),'dedup contacted an operator');
     assert(!new Headers(init?.headers).has('authorization'));
     return fetch(url,init);
@@ -40,7 +40,7 @@ const request=async(url,init)=>{
 };
 const client=(identity,store,jwt)=>{
   const kp=identity instanceof Keypair?identity:new Keypair(identity);
-  const c=new MnemonicClient({baseUrl:process.env.A2A_OPERATOR_URL,signer:new LocalSigner(kp),a2aIndex:store.index,a2aGatewayUrl:process.argv[2]==='restore'?destination:source,a2aIndexUrl:`${source}/graphql`,fetch:request,...(jwt?{jwt}:{})});
+  const c=new MnemonikClient({baseUrl:process.env.A2A_OPERATOR_URL,signer:new LocalSigner(kp),a2aIndex:store.index,a2aGatewayUrl:process.argv[2]==='restore'?destination:source,a2aIndexUrl:`${source}/graphql`,fetch:request,...(jwt?{jwt}:{})});
   c.setKeypair(kp);return c;
 };
 const recipients=[{card:v.card,trustedCardSigner:v.reader.pubkey_base58}];

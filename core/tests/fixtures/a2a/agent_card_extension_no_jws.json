@@ -1,5 +1,5 @@
 {
-  "name": "Mnemonic Protocol Agent (unsigned)",
+  "name": "Mnemonik Protocol Agent (unsigned)",
   "description": "An agent with the x-mnemonic extension present but JWS signatures absent — MUST FAIL coverage check.",
   "url": "https://mnemonik.xyz",
   "version": "1",

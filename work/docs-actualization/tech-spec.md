@@ -77,7 +77,7 @@ None. No DB, no API client, no ML model. Only the local clone at `/Users/syi/src
 **Alternatives considered:** Manual-only lychee at PR review time — rejected (no enforcement). Add to existing `ci.yml` — rejected (pulls in the cargo `paths-ignore`, complicates the matrix).
 
 ### Decision 6: paper.pdf reference placement in WHITEPAPER §References and README
-**Decision:** In `WHITEPAPER.md`, add a new entry numbered 8 to the `## References` ordered list pointing to `docs/research/paper.pdf` with the relative link form `[Mnemonic Protocol Foundational Paper](./research/paper.pdf)`. Title finalised by opening the PDF during Task 7. In `README.md`, insert a new "## Foundational research" H2 immediately after the Introduction block, with a one-sentence summary and the same relative link `[paper.pdf](docs/research/paper.pdf)`.
+**Decision:** In `WHITEPAPER.md`, add a new entry numbered 8 to the `## References` ordered list pointing to `docs/research/paper.pdf` with the relative link form `[Mnemonik Protocol Foundational Paper](./research/paper.pdf)`. Title finalised by opening the PDF during Task 7. In `README.md`, insert a new "## Foundational research" H2 immediately after the Introduction block, with a one-sentence summary and the same relative link `[paper.pdf](docs/research/paper.pdf)`.
 **Rationale:** Keeps citation style consistent with existing 7 references in WHITEPAPER (numbered, descriptive title + URL). Adds a discoverable section to README without touching its existing copy. Both links are relative — works on GitHub web rendering, GitHub raw, and Cloudflare Pages. `[Supports US: Mandatory references]`
 **Alternatives considered:** Inline reference in README Introduction — rejected (less discoverable). Footer reference in WHITEPAPER body — rejected (deviates from the existing References section convention).
 
@@ -275,7 +275,7 @@ Technical acceptance criteria (supplement user-spec criteria):
 ### Wave 4: Documentation edits + decisions + CI gate (depends on Wave 3; 5 tasks parallel — disjoint files)
 
 #### Task 7: Expand WHITEPAPER §9 + add §References entry for paper.pdf
-- **Description:** Edit `docs/WHITEPAPER.md`: rewrite §9 from 4 subsections to 10 subsections matching the 10 use-case docs (mapping in `code-research.md` §8); each subsection is 1-2 sentences + `[See deep-dive in docs/usecases/<file>.md.]`. Add 8th entry to `## References` ordered list pointing to `[Mnemonic Protocol Foundational Paper](./research/paper.pdf)`; open the PDF metadata to populate the title precisely. Single commit.
+- **Description:** Edit `docs/WHITEPAPER.md`: rewrite §9 from 4 subsections to 10 subsections matching the 10 use-case docs (mapping in `code-research.md` §8); each subsection is 1-2 sentences + `[See deep-dive in docs/usecases/<file>.md.]`. Add 8th entry to `## References` ordered list pointing to `[Mnemonik Protocol Foundational Paper](./research/paper.pdf)`; open the PDF metadata to populate the title precisely. Single commit.
 - **Skill:** documentation-writing
 - **Reviewers:** code-reviewer
 - **Verify-smoke:** `grep -cE '^### 9\.' docs/WHITEPAPER.md` returns `>=10`. `grep './research/paper.pdf' docs/WHITEPAPER.md` returns non-empty.

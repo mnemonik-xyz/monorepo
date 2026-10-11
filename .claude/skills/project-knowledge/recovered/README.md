@@ -1,4 +1,4 @@
-# Recovered Mnemonic docs (staging area)
+# Recovered Mnemonik docs (staging area)
 
 **Status:** Promoted to `docs/` tree on 2026-04-27.
 **Promoted on 2026-04-27 in commits 8ed0b6c (usecases), d8df681 (competitive-landscape), 82704c7 (research), eacb6ff (problems).**
@@ -7,7 +7,7 @@
 
 ## Why this folder exists
 
-These documents were written when Mnemonic lived in the prototype repo `sivo4kin/mnemonic-protocol` and described an earlier design (encrypted blobs, SHA3-256 commitments, Python + Rust backends, ADR-numbered design records). They were accidentally destroyed by an agent and then recovered from the `docs/usecases` branch.
+These documents were written when Mnemonik lived in the prototype repo `sivo4kin/mnemonic-protocol` and described an earlier design (encrypted blobs, SHA3-256 commitments, Python + Rust backends, ADR-numbered design records). They were accidentally destroyed by an agent and then recovered from the `docs/usecases` branch.
 
 Rather than push them straight into the public `docs/` folder of the monorepo, they are staged here under `.claude/skills/project-knowledge/recovered/` so the team can:
 
@@ -42,7 +42,7 @@ recovered/
 | Document | State | Action |
 |---|---|---|
 | `usecases/*.md` (×10 + README) | Evergreen, aligns with WHITEPAPER §9 | Promoted verbatim to `docs/usecases/` (commit 8ed0b6c) |
-| `competitive-landscape/DECENTRALIZED_RAG_LANDSCAPE.md` | Academic survey, no Mnemonic-specific claims | Promoted verbatim to `docs/competitive-landscape/` (commit d8df681) |
+| `competitive-landscape/DECENTRALIZED_RAG_LANDSCAPE.md` | Academic survey, no Mnemonik-specific claims | Promoted verbatim to `docs/competitive-landscape/` (commit d8df681) |
 | `competitive-landscape/DRAG_ANALYSIS.md` | Restored verbatim; 1 token replacement (line 37 `SHA3-256` → `blake3`) applied during promotion. | Promoted to `docs/competitive-landscape/` with token replacement (commit d8df681) |
 | `competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md` | Restored verbatim; 3 token replacements (lines 45/64/132) applied during promotion. | Promoted to `docs/competitive-landscape/` with token replacements (commit d8df681) |
 | `research/TURBOQUANT_DEEP_ANALYSIS.md` | Source was truncated mid-Mermaid block; closed cleanly with a recovery note | Promoted verbatim to `docs/research/` (commit 82704c7) |
@@ -51,7 +51,7 @@ recovered/
 | `problems/MEMORY_EVICTION.md` | Open system problem statement: lifecycle/retention/pruning policy. | Promoted verbatim to `docs/problems/` (commit eacb6ff) |
 | `problems/CONCURRENT_WRITERS.md` | Open problem: shared-context multi-agent write semantics; 2 token replacements (SHA3-256 → blake3, encrypted_blob → canonical CBOR bytes; lines 157/217) applied during promotion. | Promoted to `docs/problems/` with 2 token replacements (commit eacb6ff) |
 | `problems/ARWEAVE_PRICING_VALIDATION.md` | Economic-model validation for full-mode persistence. | Promoted verbatim to `docs/problems/` (commit eacb6ff) |
-| `research/Agent Identity for Autonomous AI_...pdf` | Mnemonic-positioning analysis paper (PDF). | Promoted verbatim (binary copy) to `docs/research/` (commit 82704c7) |
+| `research/Agent Identity for Autonomous AI_...pdf` | Mnemonik-positioning analysis paper (PDF). | Promoted verbatim (binary copy) to `docs/research/` (commit 82704c7) |
 | `research/paper.pdf` | **Foundational scientific paper that motivated the project.** | Promoted verbatim (binary copy) to `docs/research/` (commit 82704c7); referenced from WHITEPAPER §References and root README. |
 
 ## Dropped per owner decision

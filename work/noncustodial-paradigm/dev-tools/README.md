@@ -1,4 +1,4 @@
-# Dev tools — local Mnemonic round-trip
+# Dev tools — local Mnemonik round-trip
 
 Helpers to stand up a local `mnemonic-mcp` and exercise sign → recall → verify
 without the hosted endpoint. Reproduces the live verification from the paradigm

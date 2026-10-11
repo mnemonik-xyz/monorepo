@@ -27,7 +27,7 @@ SQLite-backed `PaidOperation` record keyed by `operation_id`.
 
 ## Acceptance criteria
 
-- Reopening the approval URL and restarting Mnemonic return the same operation
+- Reopening the approval URL and restarting Mnemonik return the same operation
   and receipt.
 - Provider and MCP restart scenarios preserve idempotency.
 - A delivery retry reuses the original exact receipt.

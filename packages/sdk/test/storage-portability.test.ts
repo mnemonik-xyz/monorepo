@@ -3,7 +3,7 @@ import * as wasm from '../../../core/pkg-nodejs/mnemonic_core.js';
 import {__setWasmForTesting} from '../src/wasm.js';
 import {Keypair} from '../src/keypair.js';
 import {LocalSigner} from '../src/signer.js';
-import {MnemonicClient} from '../src/client.js';
+import {MnemonikClient} from '../src/client.js';
 import {decodeAttestation} from '../src/a2a-recovery.js';
 import {checkpointBytes,signRecoveryCheckpoint} from '../src/checkpoint.js';
 import {ArweaveStorageAdapter,HttpObjectStorageAdapter,envelopeSha256} from '../src/storage.js';
@@ -45,11 +45,11 @@ describe('exact-byte portable A2A storage',()=>{
   const freshDestination=new HttpObjectStorageAdapter('https://destination.invalid',f.destinationRequest);
   const report=await restoreMigratedA2A(fallback,cp,owner,context,[freshDestination],index);
   expect(report.completeToHeads).toBe(true);expect(report.attestations).toHaveLength(3);expect(report.source.status).toBe('disabled');expect(f.stats().sourceFetches).toBe(calls);
-  const kp=new Keypair(v.reader),client=new MnemonicClient({baseUrl:'https://disabled-operator.invalid',signer:new LocalSigner(kp),a2aIndex:index,fetch:async()=>{throw new Error('operator disabled');}});client.setKeypair(kp);
+  const kp=new Keypair(v.reader),client=new MnemonikClient({baseUrl:'https://disabled-operator.invalid',signer:new LocalSigner(kp),a2aIndex:index,fetch:async()=>{throw new Error('operator disabled');}});client.setKeypair(kp);
   for(const row of report.attestations)expect((await client.openA2AAttestation(row,owner)).payload).toEqual(f.payloads.get(row.attestationId));
   // Local continuation retains original parent binding after backend replacement.
   const child=await client.attestA2AMessage({...v.payload,messageId:'continuation'},context,{mode:'local',prevId:f.rows[1]!.attestationId});expect(child).toMatch(/^a2a:/);
-  const outsider=new Keypair(v.outsider),outsiderClient=new MnemonicClient({baseUrl:'https://disabled.invalid',signer:new LocalSigner(outsider)});outsiderClient.setKeypair(outsider);
+  const outsider=new Keypair(v.outsider),outsiderClient=new MnemonikClient({baseUrl:'https://disabled.invalid',signer:new LocalSigner(outsider)});outsiderClient.setKeypair(outsider);
   await expect(outsiderClient.openA2AAttestation(report.attestations[0]!,owner)).rejects.toThrow();
  });
  it('rejects missing ancestry before any destination write, and rejects forged manifest/checkpoint scope',async()=>{

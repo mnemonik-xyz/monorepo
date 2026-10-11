@@ -5,9 +5,9 @@ type: design
 size: L
 ---
 
-# Tech Spec: Mnemonic protocol economics and a native token
+# Tech Spec: Mnemonik protocol economics and a native token
 
-This document designs how value moves through the Mnemonic protocol. It also decides when a
+This document designs how value moves through the Mnemonik protocol. It also decides when a
 native token is justified, and what jobs it may do. Nothing here is implemented unless the text
 says "available now". Every external claim links to a source in [Sources](#sources).
 
@@ -89,7 +89,7 @@ These rules hold in every phase. A governance vote cannot change them.
   token, if it exists, lives on one home chain and is not required on the others.
 - **I-9. The token never pays for storage.** Storage networks have their own economics: Arweave
   funds permanent storage from an endowment [T16], and Walrus pays nodes and stakers over time
-  [T17]. The operator pays each backend in its own currency. Mnemonic does not compete with them.
+  [T17]. The operator pays each backend in its own currency. Mnemonik does not compete with them.
 
 ## 4. Roles, and which ones need collateral
 
@@ -100,7 +100,7 @@ harm is provable. This table tests each role in the chain-agnostic design.
 |---|---|---|---|---|---|
 | Agent (writer) | Creates and signs memories | — (pays) | — | No | available now |
 | Operator (relayer) | Sends signed bytes to storage; pays storage and chain fees | Cost + margin, x402 | "Charged but not stored" | **No.** The charge happens only after recall + verify pass | available now, one operator |
-| Storage backend | Keeps bytes (Arweave today) | Operator, in the backend's own currency | External to Mnemonic | No | Arweave available now; others planned |
+| Storage backend | Keeps bytes (Arweave today) | Operator, in the backend's own currency | External to Mnemonik | No | Arweave available now; others planned |
 | Indexer | Lists every item of one owner, for restore | Per query, x402 | Omission, provable against a signed owner Merkle root | **Candidate** | planned |
 | Batcher | Puts many content hashes under one anchor | Share of the saved fee | Exclusion; the client pays only for an inclusion proof | No | planned |
 | Validator (ERC-8004) | Posts a `validationResponse` about a memory claim | Per validation, x402 | False response, provable by COSE re-verification | **Candidate** | planned |
@@ -231,7 +231,7 @@ tokens for verified work rewards the service itself. Counsel must check both opt
 the SEC and CFTC interpretation of 2026-03-17 [S1].
 
 **Why not burn-and-mint credits.** Helium sells USD-pegged, non-transferable Data Credits that
-users create by burning the network token [T3]. That gives users a stable price. Mnemonic already
+users create by burning the network token [T3]. That gives users a stable price. Mnemonik already
 has a stable price, because x402 settles in USDC. A credit layer would add a step and no value.
 
 ### 7.3 Revenue-bounded emissions

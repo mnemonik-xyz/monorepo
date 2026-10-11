@@ -18,7 +18,7 @@ describe("<Seo>", () => {
     );
 
     await waitFor(() => {
-      expect(document.title).toBe("Ledger — Mnemonic Protocol");
+      expect(document.title).toBe("Ledger — Mnemonik Protocol");
     });
 
     const desc = document.head.querySelector('meta[name="description"]');

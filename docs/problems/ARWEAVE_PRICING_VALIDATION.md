@@ -16,7 +16,7 @@
 
 **Note:** Small uploads (<100KB) have a base fee that makes per-GB rate higher (~$137/GB at 10KB). Pricing is linear from ~100KB upward at $16.74/GB.
 
-### Mnemonic snapshot costs (measured)
+### Mnemonik snapshot costs (measured)
 
 | Scenario | Snapshot size | Cost/snapshot | Cost if daily | Cost/month |
 |----------|--------------|--------------|---------------|-----------|
@@ -30,7 +30,7 @@
 The whitepaper's $5/GB figure is **3.3x too low** at current AR price ($1.75). This affects:
 - Section 5.1 storage cost table
 - The "sub-$1 for 100K memories" claim in the conclusion (actual: ~$1.67 at 384-dim, ~$16.74 at 1536-dim)
-- Comparison table vs Pinecone/pgvector (Mnemonic is still cheaper, but margins are tighter)
+- Comparison table vs Pinecone/pgvector (Mnemonik is still cheaper, but margins are tighter)
 
 The per-snapshot costs are still economically viable for the target use case (researchers, not high-frequency traders), but the whitepaper must use accurate numbers.
 

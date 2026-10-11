@@ -40,7 +40,7 @@ phase1_feature_overview:
   user_problem:
     score: 80
     status: "partial"
-    value: "Cross-provider context portability: пользователь делает research в ChatGPT (или любом другом AI tool), хочет продолжить в Claude.ai/Cursor/etc. БЕЗ потери контекста. Текущий путь — копировать-вставлять вручную, теряется attestation, теряется semantic structure. Mnemonic = capture в одном tool, attestation, replay в другом — сохраняется и контекст и доказуемость целостности."
+    value: "Cross-provider context portability: пользователь делает research в ChatGPT (или любом другом AI tool), хочет продолжить в Claude.ai/Cursor/etc. БЕЗ потери контекста. Текущий путь — копировать-вставлять вручную, теряется attestation, теряется semantic structure. Mnemonik = capture в одном tool, attestation, replay в другом — сохраняется и контекст и доказуемость целостности."
     gaps: "Уточнить capture механизм (manual paste / extension DOM grab / something else) и replay механизм (copy-as-prompt / extension inject / MCP tool call). Кто триггерит attestation — юзер вручную или auto?"
     required: true
 
@@ -228,7 +228,7 @@ notes: |
 
   ROUND 4 CRITICAL SHIFT (2026-04-26):
   - MNEMONIC IS NOT A CAPTURE TOOL. The integration IS the MCP connector itself.
-  - Flow: Tool A & Tool B both have Mnemonic MCP installed. User in Tool A says natural-language
+  - Flow: Tool A & Tool B both have Mnemonik MCP installed. User in Tool A says natural-language
     "save this onchain" → model calls `sign_memory` (user approves prompt) → Arweave + Solana.
     User in Tool B says "recall my X" → model calls `recall` → cosine search → context returned.
   - NO DOM scraping, NO copy-paste, NO chat history extraction. Capture is explicit

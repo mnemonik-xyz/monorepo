@@ -1,6 +1,6 @@
 # Memvid — Technical Analysis
 
-> **Scope.** Technical due-diligence on Memvid v2 (the `mnemonik-dev/memvid` mirror tracks the public `memvid/memvid` repo, currently at `2.0.139`), compared against the Mnemonic Protocol. Written 2026-05-21.
+> **Scope.** Technical due-diligence on Memvid v2 (the `mnemonik-dev/memvid` mirror tracks the public `memvid/memvid` repo, currently at `2.0.139`), compared against the Mnemonik Protocol. Written 2026-05-21.
 
 ## 1. What Memvid is
 
@@ -95,11 +95,11 @@ The `src/` tree gives a more honest picture of scope than the README:
 * **Index rebuild cost.** Append-only means tombstones accumulate; the `doctor` and `maintenance` modules exist precisely to repack.
 * **Heavy on Rust deps.** Tantivy, HNSW, ONNX Runtime, Candle, Symphonia, lopdf/pdf-extract — full-feature builds are large and have native-compile gotchas (extractous needs GraalVM; pdfium needs the C++ lib).
 
-## 6. Is Memvid a Mnemonic competitor?
+## 6. Is Memvid a Mnemonik competitor?
 
 **No — they sit in different layers of the agent-memory stack and address different problems.**
 
-| Dimension | Memvid | Mnemonic |
+| Dimension | Memvid | Mnemonik |
 |---|---|---|
 | **Primary problem** | "I need a portable, infra-free RAG store" | "I need *verifiable* memory whose authenticity any third party can re-check" |
 | **Layer** | Local data engine (file-as-DB) | Attestation / provenance layer over storage |
@@ -116,18 +116,18 @@ The `src/` tree gives a more honest picture of scope than the README:
 | **Payment / settlement** | Not a concern | First-class — x402 + USDC, dynamic pricing engine |
 | **Decentralisation** | None — local file | Public anchors on permissionless chains |
 
-**The honest framing:** if you want a great local-only RAG engine, Memvid is more featureful than Mnemonic and out of Mnemonic's scope to compete with. If you want third-party-verifiable provenance and a settlement-aware MCP service for agent memory, Memvid doesn't address it — Mnemonic does.
+**The honest framing:** if you want a great local-only RAG engine, Memvid is more featureful than Mnemonik and out of Mnemonik's scope to compete with. If you want third-party-verifiable provenance and a settlement-aware MCP service for agent memory, Memvid doesn't address it — Mnemonik does.
 
-They are **complementary**, not substitutes. You could very plausibly use Memvid *as the retrieval engine underneath* a Mnemonic-attested workflow.
+They are **complementary**, not substitutes. You could very plausibly use Memvid *as the retrieval engine underneath* a Mnemonik-attested workflow.
 
-## 7. Can we reuse the approach in Mnemonic?
+## 7. Can we reuse the approach in Mnemonik?
 
-There are specific, well-bounded pieces of Memvid that map cleanly onto Mnemonic's roadmap. Listed roughly by impact ÷ effort.
+There are specific, well-bounded pieces of Memvid that map cleanly onto Mnemonik's roadmap. Listed roughly by impact ÷ effort.
 
 ### 7.1 High value, fits today's architecture
 
 **(a) Single-file packaging for the "portable memory wallet" use case.**
-`docs/usecases/portable-memory-wallet.md` describes operator-owned memory across providers. Mnemonic currently stores attestations in `~/.mnemonic/attestations.db` (SQLite) plus on-chain. Adopting a `.mv2`-like envelope as the **export/import format** would give us a single-file "memory wallet" the user can carry between machines. Memvid's TOC + per-segment checksum + footer scan are a battle-tested pattern; we don't need WAL/Tantivy/HNSW inside it, but the envelope idea is directly reusable.
+`docs/usecases/portable-memory-wallet.md` describes operator-owned memory across providers. Mnemonik currently stores attestations in `~/.mnemonic/attestations.db` (SQLite) plus on-chain. Adopting a `.mv2`-like envelope as the **export/import format** would give us a single-file "memory wallet" the user can carry between machines. Memvid's TOC + per-segment checksum + footer scan are a battle-tested pattern; we don't need WAL/Tantivy/HNSW inside it, but the envelope idea is directly reusable.
 
 **(b) Embedded full-text search via Tantivy.**
 Today `recall` is cosine-only over embeddings. A lexical lane (Tantivy BM25 on `attestations.content` + tags) would noticeably improve recall on keyword-heavy queries at very small footprint cost. Tantivy is `mmap`-friendly and already feature-gated in Memvid in a way we can copy.
@@ -139,7 +139,7 @@ Right now `recall` is brute-force cosine over every row's BLOB. HNSW would scale
 Memvid's `replay/` module is exactly the shape of our "Agent Continuity Layer" use case (`docs/usecases/agent-continuity-layer.md`) — checkpoints, action log, divergence detection. The format/types in `src/replay/` can be lifted (Apache-2.0) and adapted to live on top of `lineage::` parent-child graphs.
 
 **(e) PII detection, ACL, audit.**
-`pii.rs`, `acl.rs`, `audit.rs` are self-contained. Mnemonic's MCP server gates writes through OAuth scope; adding frame-level ACL fields (`acl_read_principals`, `acl_visibility`) would give us tenant-internal sharing without bolting on a new system.
+`pii.rs`, `acl.rs`, `audit.rs` are self-contained. Mnemonik's MCP server gates writes through OAuth scope; adding frame-level ACL fields (`acl_read_principals`, `acl_visibility`) would give us tenant-internal sharing without bolting on a new system.
 
 **(f) Doctor / repair tool.**
 The `doctor` pattern (scan footer chain, rebuild missing index from surviving frames) is exactly the kind of operational hygiene that helps a long-running attestation DB. We have `migrate_owner_pubkey_columns`; we don't have a generalised `mnemonic-doctor`. Worth a small spike.
@@ -147,7 +147,7 @@ The `doctor` pattern (scan footer chain, rebuild missing index from surviving fr
 ### 7.2 Architecturally aligned but bigger lift
 
 **(g) "Smart frame" framing of attestations.**
-Today attestations are flat rows. A frame-and-segment layout would let us batch many attestations into a single Arweave upload (cost win) while still letting individual COSE_Sign1 envelopes be extracted and verified. This is essentially "Mnemonic v2 file format" and would be a multi-week design effort, but it composes naturally with point (a).
+Today attestations are flat rows. A frame-and-segment layout would let us batch many attestations into a single Arweave upload (cost win) while still letting individual COSE_Sign1 envelopes be extracted and verified. This is essentially "Mnemonik v2 file format" and would be a multi-week design effort, but it composes naturally with point (a).
 
 **(h) Multi-modal (CLIP / Whisper) on attested content.**
 If we want attestations over images and audio (e.g. an agent attesting "I observed this image"), Memvid's CLIP + Whisper integration is a working reference. Likely post-MVP.
@@ -157,8 +157,8 @@ If we want attestations over images and audio (e.g. an agent attesting "I observ
 
 ### 7.3 Where reuse is a trap
 
-* **Do not adopt their signature schema as-is.** `signature.rs` signs **JSON-serialised payloads** (`serde_json::to_vec` over a `TicketSignaturePayload` struct). That's not canonical — field ordering, whitespace, number normalisation are all unspecified. Mnemonic deliberately moved to **deterministic CBOR + COSE_Sign1** for exactly this reason. Memvid's signing is fine for internal ticket grants but is not safe as a general attestation envelope.
-* **Do not adopt their identity model.** Memvid has no notion of agent identity beyond "the signer of this ticket". Mnemonic's DID-sol/DID-key model is a deeper construct; merging them would be a downgrade.
+* **Do not adopt their signature schema as-is.** `signature.rs` signs **JSON-serialised payloads** (`serde_json::to_vec` over a `TicketSignaturePayload` struct). That's not canonical — field ordering, whitespace, number normalisation are all unspecified. Mnemonik deliberately moved to **deterministic CBOR + COSE_Sign1** for exactly this reason. Memvid's signing is fine for internal ticket grants but is not safe as a general attestation envelope.
+* **Do not adopt their identity model.** Memvid has no notion of agent identity beyond "the signer of this ticket". Mnemonik's DID-sol/DID-key model is a deeper construct; merging them would be a downgrade.
 * **Do not adopt the QR-video legacy.** The README explicitly deprecates Memvid v1. Anything you read elsewhere about "AI memory in MP4 files" is the old design and irrelevant.
 * **Don't take `.mv2e` encryption verbatim if you want cross-platform WASM.** AES-GCM + Argon2 in Rust is fine, but our `core/` compiles to WASM and the crypto deps need WASM-compatible variants — re-validate the dependency tree before adopting.
 
@@ -169,8 +169,8 @@ Apache-2.0. Compatible with our Apache-2.0 / MIT dual-licensing posture. Reuse n
 ## 8. Bottom line
 
 * **Memvid is a category-best local-file AI memory engine.** It's polished, fast, multi-modal, crash-safe, and operationally simpler than any vector-DB-plus-glue stack.
-* **It is not what Mnemonic is.** Mnemonic is a *verifiability* protocol — cryptographic provenance signed by the agent's own key, anchored on permissionless chains, exposed via a settlement-aware MCP server. Memvid has zero of that and isn't trying to.
-* **They compose well.** Memvid is a reasonable retrieval substrate underneath Mnemonic-attested content; nothing in their designs is mutually exclusive.
+* **It is not what Mnemonik is.** Mnemonik is a *verifiability* protocol — cryptographic provenance signed by the agent's own key, anchored on permissionless chains, exposed via a settlement-aware MCP server. Memvid has zero of that and isn't trying to.
+* **They compose well.** Memvid is a reasonable retrieval substrate underneath Mnemonik-attested content; nothing in their designs is mutually exclusive.
 * **Concrete reuse wins**, in priority order:
   1. Tantivy lexical lane in `recall`
   2. HNSW vector index in `recall`

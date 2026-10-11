@@ -14,7 +14,7 @@ import {
   it,
 } from "vitest";
 
-import { MnemonicClient } from "../../src/client.js";
+import { MnemonikClient } from "../../src/client.js";
 import { Keypair } from "../../src/keypair.js";
 import { LocalSigner } from "../../src/signer.js";
 import { __setWasmForTesting } from "../../src/wasm.js";
@@ -41,7 +41,7 @@ afterEach(() => {
 });
 
 interface ClientHandle {
-  client: MnemonicClient;
+  client: MnemonikClient;
   keypair: Keypair;
 }
 
@@ -50,7 +50,7 @@ async function makeClient(opts?: {
   fetch?: typeof fetch;
 }): Promise<ClientHandle> {
   const keypair = await Keypair.generate();
-  const client = new MnemonicClient({
+  const client = new MnemonikClient({
     baseUrl: server.url,
     signer: new LocalSigner(keypair),
     jwt: opts?.jwt ?? "eyJfake-but-jwt-shaped-token-1234567890",

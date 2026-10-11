@@ -2,13 +2,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {MnemonicClient, Keypair, LocalSigner} from '../dist/index.js';
+import {MnemonikClient, Keypair, LocalSigner} from '../dist/index.js';
 import {runResearchDiscoveryFailures} from './research-discovery-failures.mjs';
 
 const fixture = JSON.parse(readFileSync(new URL('../test/fixtures/sealed-a2a.json', import.meta.url), 'utf8'));
 function local(identity) {
   const key = new Keypair(identity), rows = new Map();
-  const client = new MnemonicClient({baseUrl: 'https://unused.invalid', signer: new LocalSigner(key),
+  const client = new MnemonikClient({baseUrl: 'https://unused.invalid', signer: new LocalSigner(key),
     fetch: async () => {throw new Error('fixture construction must stay offline');},
     a2aIndex: {list: async () => [...rows.values()], put: async row => {rows.set(row.attestationId, row);}},
   });

@@ -75,10 +75,10 @@ grep -rInE 'SHA3|SHA-3|sha3|mcp-server-rs|pre-V1|Pre-V1|HashEmbedder|Python back
 
 | File | Line | Original | Replacement | Verdict |
 |---|---|---|---|---|
-| competitive-landscape/DRAG_ANALYSIS.md | 37 | `Mnemonic records: SHA3-256 hash of the encrypted memory blob via Solana memo.` | delete the entire line (encryption is roadmap, not shipped; line is standalone in the table-context and removing it preserves paragraph coherence) | `replace-token` (delete-line variant) |
+| competitive-landscape/DRAG_ANALYSIS.md | 37 | `Mnemonik records: SHA3-256 hash of the encrypted memory blob via Solana memo.` | delete the entire line (encryption is roadmap, not shipped; line is standalone in the table-context and removing it preserves paragraph coherence) | `replace-token` (delete-line variant) |
 | competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md | 45 | `\| Status \| Pre-V1, prototype validated \| Live (Kinic-CLI shipped) \|` | `\| Status \| active Rust MCP server \| Live (Kinic-CLI shipped) \|` (replace `Pre-V1, prototype validated` → `active Rust MCP server`) | `replace-token` |
-| competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md | 64 | `Mnemonic commits the memory blob (SHA3 hash); V3DB proves the retrieval result` | `Mnemonic commits the memory blob; V3DB proves the retrieval result` (delete ` (SHA3 hash)`) | `replace-token` (delete-tokens variant) |
-| competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md | 132 | `\| Mnemonic \| Memory integrity (hash) \| ✅ 4/8-bit \| ✅ \| Arweave+Solana \| Pre-V1 \|` | `\| Mnemonic \| Memory integrity (hash) \| ✅ 4/8-bit \| ✅ \| Arweave+Solana \| v1.0 (active) \|` (replace `Pre-V1` → `v1.0 (active)`) | `replace-token` |
+| competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md | 64 | `Mnemonik commits the memory blob (SHA3 hash); V3DB proves the retrieval result` | `Mnemonik commits the memory blob; V3DB proves the retrieval result` (delete ` (SHA3 hash)`) | `replace-token` (delete-tokens variant) |
+| competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md | 132 | `\| Mnemonik \| Memory integrity (hash) \| ✅ 4/8-bit \| ✅ \| Arweave+Solana \| Pre-V1 \|` | `\| Mnemonik \| Memory integrity (hash) \| ✅ 4/8-bit \| ✅ \| Arweave+Solana \| v1.0 (active) \|` (replace `Pre-V1` → `v1.0 (active)`) | `replace-token` |
 | problems/CONCURRENT_WRITERS.md | 157 | `Adding parent_hashes for DAG structure: each SHA3-256 hash = 64 hex chars.` | `Adding parent_hashes for DAG structure: each blake3 hash = 64 hex chars.` (replace `SHA3-256` → `blake3`; both produce 32-byte / 64-hex-char outputs, table sizing preserved) | `replace-token` |
 | problems/CONCURRENT_WRITERS.md | 217 | `The current system commits SHA3-256(encrypted_blob) to Solana.` | `The current system commits blake3(canonical CBOR bytes) to Solana.` (replace `SHA3-256(encrypted_blob)` → `blake3(canonical CBOR bytes)`; aligns with shipped data-flow per architecture.md) | `replace-token` |
 
@@ -95,7 +95,7 @@ Sanity-grep run completed 2026-04-27 against `recovered/{competitive-landscape,r
 Applied during promotion of `recovered/competitive-landscape/` → `docs/competitive-landscape/` on 2026-04-27. Each entry quotes the exact line as written in the destination file after edit.
 
 **Entry 1 — `docs/competitive-landscape/DRAG_ANALYSIS.md` line 37 (delete-line)**
-- Before: `Mnemonic records: SHA3-256 hash of the encrypted memory blob via Solana memo.`
+- Before: `Mnemonik records: SHA3-256 hash of the encrypted memory blob via Solana memo.`
 - After: (line removed; preceding line `D-RAG records: source reliability scores via smart contracts.` is now followed by the blank line and the `Both systems are cheap to run on-chain ...` paragraph)
 
 **Entry 2 — `docs/competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md` line 45 (replace-token)**
@@ -103,12 +103,12 @@ Applied during promotion of `recovered/competitive-landscape/` → `docs/competi
 - After: `| Status | active Rust MCP server | Live (Kinic-CLI shipped) |`
 
 **Entry 3 — `docs/competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md` line 64 (replace-token, delete-tokens variant)**
-- Before: `- Mnemonic commits the memory blob (SHA3 hash); V3DB proves the retrieval result`
-- After: `- Mnemonic commits the memory blob; V3DB proves the retrieval result`
+- Before: `- Mnemonik commits the memory blob (SHA3 hash); V3DB proves the retrieval result`
+- After: `- Mnemonik commits the memory blob; V3DB proves the retrieval result`
 
 **Entry 4 — `docs/competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md` line 132 (replace-token)**
-- Before: `| Mnemonic | Memory integrity (hash) | ✅ 4/8-bit | ✅ | Arweave+Solana | Pre-V1 |`
-- After: `| Mnemonic | Memory integrity (hash) | ✅ 4/8-bit | ✅ | Arweave+Solana | v1.0 (active) |`
+- Before: `| Mnemonik | Memory integrity (hash) | ✅ 4/8-bit | ✅ | Arweave+Solana | Pre-V1 |`
+- After: `| Mnemonik | Memory integrity (hash) | ✅ 4/8-bit | ✅ | Arweave+Solana | v1.0 (active) |`
 
 Verify-smoke: `grep -RIE 'SHA3|Pre-V1|pre-V1' docs/competitive-landscape/` returned empty; `ls docs/competitive-landscape/*.md | wc -l` returned `4`.
 
@@ -192,6 +192,6 @@ Each subsection: 1-2 sentences quoting/paraphrasing the use-case doc + `[See dee
 
 ## 10. Open implementation questions
 
-- **paper.pdf title in §References citation.** PDF title not extracted yet; either open the PDF during implementation to copy the title, or use a generic citation `Mnemonic Protocol Foundational Paper (paper.pdf)` and link relatively. Decision deferred to Task 7.
+- **paper.pdf title in §References citation.** PDF title not extracted yet; either open the PDF during implementation to copy the title, or use a generic citation `Mnemonik Protocol Foundational Paper (paper.pdf)` and link relatively. Decision deferred to Task 7.
 - **README.md placement.** "Introduction" is currently 30 lines from top, then "Repository layout". Cleanest insertion: a new line in Introduction "This work builds on the foundational research in [paper.pdf](docs/research/paper.pdf)." Or a new H2 section "## Foundational research" right after Introduction. Decision deferred to Task 8.
 - **lychee CI job.** Add it in this feature or as a separate small chore? Recommendation: add inside this feature (Task 12) so the gate exists from day one.

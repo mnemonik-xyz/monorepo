@@ -551,7 +551,7 @@ fn generate_markdown(chunks: &[SignedChunk]) -> String {
     let mut out = String::new();
 
     out.push_str("---\n");
-    out.push_str("title: Mnemonic Protocol Knowledge Base\n");
+    out.push_str("title: Mnemonik Protocol Knowledge Base\n");
     out.push_str("type: protocol-knowledge\n");
     out.push_str(&format!("chunk_count: {}\n", chunks.len()));
     if let Some(first) = chunks.first() {

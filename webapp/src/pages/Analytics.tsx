@@ -86,15 +86,15 @@ export default function Analytics() {
     <div className="relative min-h-screen bg-background text-text-primary">
       <Seo
         title="Analytics — attestations over time"
-        description="Attestations recorded by the Mnemonic Protocol over time, split by on-node and on-chain anchoring. A live forensic view of the memory ledger."
+        description="Attestations recorded by the Mnemonik Protocol over time, split by on-node and on-chain anchoring. A live forensic view of the memory ledger."
         canonical="/analytics"
         jsonLd={{
           "@context": "https://schema.org",
           "@type": "Dataset",
-          name: "Mnemonic Protocol attestation timeline",
+          name: "Mnemonik Protocol attestation timeline",
           description:
             "Counts of agent-memory attestations over time, split into on-node and on-chain anchored records.",
-          creator: { "@type": "Organization", name: "Mnemonic Protocol" },
+          creator: { "@type": "Organization", name: "Mnemonik Protocol" },
         }}
       />
       <SiteHeader />

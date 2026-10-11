@@ -5,7 +5,7 @@
  * Owner rule: the CLI touches the OS keychain only when a command really
  * needs the private key (today: `sign --anchor`, `prove`, `login`,
  * `identity export`). `recall`, `verify`, `whoami` and a local `sign` work
- * from the public key alone. `MnemonicClient` requires a signer object even
+ * from the public key alone. `MnemonikClient` requires a signer object even
  * for read-only calls, so those commands pass this lazy one: its `pubkey`
  * comes from `identity.json` (stub or full), and nothing else is read.
  *

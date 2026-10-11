@@ -54,7 +54,7 @@ Without a sync story, every release post-mortem will contain a section about key
 
 ## Acceptance criteria
 
-- [ ] User can install the Mnemonic MCP connector in Cursor / VS Code via the webapp install button and have working tool calls without manually editing `mcp.json` or running `mnemonic login`.
+- [ ] User can install the Mnemonik MCP connector in Cursor / VS Code via the webapp install button and have working tool calls without manually editing `mcp.json` or running `mnemonic login`.
 - [ ] If user clicks "Generate new" in the webapp, they see an unambiguous warning AND have a one-click "Send to CLI" / "Download backup" path BEFORE the new key is created.
 - [ ] `mnemonic identity status` returns clean output identifying drift if any.
 - [ ] One click in either webapp or CLI reverses any drift back to alignment.

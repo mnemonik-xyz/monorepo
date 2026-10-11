@@ -3,7 +3,7 @@ import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import { __setWasmForTesting } from "../src/wasm.js";
 import * as wasm from "../../../core/pkg-nodejs/mnemonic_core.js";
 import vectors from "./fixtures/sealed-a2a.json";
-import { MnemonicClient } from "../src/client.js";
+import { MnemonikClient } from "../src/client.js";
 import { Keypair } from "../src/keypair.js";
 import { verifyA2AAttestation, verifyA2AInner } from "../src/a2a.js";
 import { LocalSigner } from "../src/signer.js";
@@ -15,7 +15,7 @@ afterAll(()=>__setWasmForTesting(null));
 
 function client(json: typeof vectors.author, fetchImpl?:typeof fetch) {
   const kp=new Keypair(json);
-  const c=new MnemonicClient({baseUrl:"https://test.invalid",jwt:"test",signer:new LocalSigner(kp),...(fetchImpl?{fetch:fetchImpl}:{})});
+  const c=new MnemonikClient({baseUrl:"https://test.invalid",jwt:"test",signer:new LocalSigner(kp),...(fetchImpl?{fetch:fetchImpl}:{})});
   c.setKeypair(kp);return c;
 }
 

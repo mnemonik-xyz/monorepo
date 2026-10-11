@@ -8,7 +8,7 @@ Items deliberately out of A2A-V1 scope. Architecture must remain open for them �
 
 This entire body of work — A2A bridge V1, ERC-8004 follow-on, MCP-to-MCP delegation, ACP, AGNTCY, framework adapters — exists to deliver a single positioning:
 
-> **Mnemonic is verifiable memory for trustless agents.**
+> **Mnemonik is verifiable memory for trustless agents.**
 
 Not "memory for AI agents" (head-to-head with letta / zep / mem0 / cognee on retrieval quality, where we lose). Not "agent identity" (head-to-head with ERC-8004 / DIDs, where we compose rather than compete). Not "execution attestation" (TEE territory). The defensible niche is **cryptographic provenance over content the agent itself claims to remember**, composed underneath the trustless-agent stack (A2A + ERC-8004).
 
@@ -22,8 +22,8 @@ Decision log entry: `decisions.md` → "2026-05-01 — Positioning lock-in: veri
 
 - **Streaming chunk attestation (`A2A_STREAM_CHUNK_V1`)** — per-SSE-chunk attestations for `SendStreamingMessage` / `SubscribeToTask`. V1 only fixes the final task state. Cost: high write-amplification; needs batched / Merkle-root strategy.
 - **Push-notification config attestation** — A2A's `CreateTaskPushNotificationConfig` registers webhooks; attesting these closes a side-channel where a malicious agent could exfiltrate task results.
-- **Cross-A2A-server lineage** — V1's `prev_id` lineage is per-Mnemonic-store. Cross-server lineage needs a portable handle (e.g. `did:mnemonic:<pubkey>/<attestation_id>`). Belongs together with the Phase 3 chain-pluggable anchor (see `work/mnemonic-cli/backlog.md`).
-- **AgentCard discovery indexing** — store + recall AgentCards themselves (with their JWS signatures) so a Mnemonic store becomes a queryable agent registry.
+- **Cross-A2A-server lineage** — V1's `prev_id` lineage is per-Mnemonik-store. Cross-server lineage needs a portable handle (e.g. `did:mnemonic:<pubkey>/<attestation_id>`). Belongs together with the Phase 3 chain-pluggable anchor (see `work/mnemonic-cli/backlog.md`).
+- **AgentCard discovery indexing** — store + recall AgentCards themselves (with their JWS signatures) so a Mnemonik store becomes a queryable agent registry.
 
 ---
 
@@ -40,8 +40,8 @@ When an MCP server (A) delegates a tool call to another MCP server (B) on behalf
 **Value:**
 
 - Closes the audit gap for "agent toolchains where an MCP server forwards calls to another MCP server" — currently the user only sees the outermost server's logs.
-- Mnemonic itself becomes a first-class delegation target (you can prove "agent X called mnemonic_sign_memory Y times in this session").
-- Differentiates Mnemonic against generic MCP-server registries (smithery, etc.) — they list servers, we attest interactions between them.
+- Mnemonik itself becomes a first-class delegation target (you can prove "agent X called mnemonic_sign_memory Y times in this session").
+- Differentiates Mnemonik against generic MCP-server registries (smithery, etc.) — they list servers, we attest interactions between them.
 
 **Cost:** ~70% reuse of A2A adapter; ~30% new schema + sidecar variant. Single mid-sized feature folder.
 
@@ -92,7 +92,7 @@ Not protocols — frameworks. Each has its own message and run abstractions.
 
 ## ERC-8004 — Phase 2 of the bridge stack (post A2A V1)
 
-**Status as of 2026-05-01:** ERC-8004 ("Trustless Agents") shipped on Ethereum mainnet on **2026-01-29**. It is *literally designed* to extend A2A with a trust layer via three on-chain registries (Identity / Reputation / Validation), each pointing at off-chain content-addressed documents. Mnemonic's signed-CBOR-with-Ed25519 envelope is one of the cleanest off-chain attestation shapes that fits the spec's "responseURI + responseHash" pattern. First-mover window is closing — TEE-attestation validators (Phala, Marlin) are already moving in. Mnemonic occupies a third, distinct trust category (signed-memory) that no current ERC-8004 participant holds.
+**Status as of 2026-05-01:** ERC-8004 ("Trustless Agents") shipped on Ethereum mainnet on **2026-01-29**. It is *literally designed* to extend A2A with a trust layer via three on-chain registries (Identity / Reputation / Validation), each pointing at off-chain content-addressed documents. Mnemonik's signed-CBOR-with-Ed25519 envelope is one of the cleanest off-chain attestation shapes that fits the spec's "responseURI + responseHash" pattern. First-mover window is closing — TEE-attestation validators (Phala, Marlin) are already moving in. Mnemonik occupies a third, distinct trust category (signed-memory) that no current ERC-8004 participant holds.
 
 **Hard prerequisite — break the Solana lock during or before this stage.** Path-b ("validator-as-a-service that still anchors via Solana memo and only *posts* to ERC-8004 off-chain") is explicitly REJECTED. Reason: it ships ERC-8004 integration while *deepening* the SVM dependency the protocol is trying to escape (Phase 3 of `work/mnemonic-cli/backlog.md`). We do not double-anchor. The chain-pluggable anchor work either (a) lands first and ERC-8004 inherits Ethereum as one of the supported anchors, or (b) lands inside this same effort. Status of `mnemonic-cli` Phase 3 is upgraded from "future Phase 3" to **"prerequisite or co-requisite of ERC-8004"** — see decision entry in `decisions.md` and the cross-reference in `work/mnemonic-cli/backlog.md`.
 
@@ -121,27 +121,27 @@ Off-chain registration file (the `tokenURI` target):
 
 ### Four integration paths
 
-#### Path 1 — Mnemonic as a registered validator (Validation Registry)
+#### Path 1 — Mnemonik as a registered validator (Validation Registry)
 
-Strongest fit. The Validation Registry is exactly an off-chain-attestation hook. Mnemonic registers as a validator address; agents call `validationRequest(MNEMONIC_VALIDATOR_ADDRESS, agentId, taskURI, taskHash)`; the validator service consumes the referenced A2A task through the existing `bridge-a2a/` middleware, produces an `A2A_TASK_V1` attestation, hosts it on Arweave (already in `core/src/arweave/`), and posts `validationResponse(requestHash, OK, mnemonic_attestation_uri, blake3_hash, tag="mnemonic-a2a-v1")`.
+Strongest fit. The Validation Registry is exactly an off-chain-attestation hook. Mnemonik registers as a validator address; agents call `validationRequest(MNEMONIC_VALIDATOR_ADDRESS, agentId, taskURI, taskHash)`; the validator service consumes the referenced A2A task through the existing `bridge-a2a/` middleware, produces an `A2A_TASK_V1` attestation, hosts it on Arweave (already in `core/src/arweave/`), and posts `validationResponse(requestHash, OK, mnemonic_attestation_uri, blake3_hash, tag="mnemonic-a2a-v1")`.
 
-Verification by any third party: fetch `responseURI` → COSE_Sign1-verify against Mnemonic's published Ed25519 pubkey → recompute blake3 → compare with on-chain `responseHash`. Trustless; no `mcp.mnemonik.xyz` in the trust path.
+Verification by any third party: fetch `responseURI` → COSE_Sign1-verify against Mnemonik's published Ed25519 pubkey → recompute blake3 → compare with on-chain `responseHash`. Trustless; no `mcp.mnemonik.xyz` in the trust path.
 
 This becomes a **new product surface**: validator-as-a-service on ERC-8004. Maps cleanly onto existing `mcp/src/payment.rs` (x402 / balance) — per-validation fee, same flow as `mnemonic_sign_memory`.
 
-#### Path 2 — Mnemonic declared in agents' own registration files
+#### Path 2 — Mnemonik declared in agents' own registration files
 
-Minimal integration. Any agent that uses Mnemonic to sign its memory adds in its registration file:
+Minimal integration. Any agent that uses Mnemonik to sign its memory adds in its registration file:
 
 - `services[]`: `{ type: "mnemonic", uri: "https://mcp.mnemonik.xyz/agent/<pubkey>" }`
 - `supportedTrust`: include `"signed-memory-attestation"` (proposed value; document upstream to ERC-8004 working group).
 - `setMetadata(agentId, "mnemonic.ed25519_pubkey", <bytes>)` on the Identity Registry.
 
-On-chain consumer resolves `agentId → registration file → Mnemonic pubkey` in two reads, then verifies any subsequent Mnemonic attestation independently.
+On-chain consumer resolves `agentId → registration file → Mnemonik pubkey` in two reads, then verifies any subsequent Mnemonik attestation independently.
 
 Ship: a CLI command `mnemonic erc8004 register-file --pubkey ...` emitting the JSON, plus a small Solidity helper or doc explaining `setMetadata` from the agent owner's wallet.
 
-#### Path 3 — Mnemonic-attested entries in the Reputation Registry
+#### Path 3 — Mnemonik-attested entries in the Reputation Registry
 
 `giveFeedback` accepts `feedbackURI` + `feedbackHash` for off-chain richness. The
 `MNEMONIC_FEEDBACK_V1` document schema is specified in `docs/spec/erc8004-feedback-v1.md`
@@ -182,10 +182,10 @@ Two hash roles (Decision 1 + Decision 2):
 `feedbackHash` uses keccak256 because every EVM tool (`cast keccak`, viem, ethers, Solidity)
 has it built in. Blake3 in that slot is well-formed but practically unverifiable.
 
-Trust upgrade: any wallet can spam `giveFeedback` today. Mnemonic-signed feedback proves
+Trust upgrade: any wallet can spam `giveFeedback` today. Mnemonik-signed feedback proves
 the rater is the same long-lived signing identity that produced N anchored attestations,
 none of which can be backdated. Calldata emitted by `mnemonic erc8004 feedback`; the
-wallet's owner submits the transaction — Mnemonic never holds the EVM key.
+wallet's owner submits the transaction — Mnemonik never holds the EVM key.
 
 #### Path 4 — Three-way identity reconciliation via `did:mnemonic:`
 
@@ -194,10 +194,10 @@ Today three identifiers coexist:
 | Layer | Identity |
 |---|---|
 | A2A | AgentCard JWS pubkey |
-| Mnemonic | Ed25519 pubkey, base58 |
+| Mnemonik | Ed25519 pubkey, base58 |
 | ERC-8004 | ERC-721 `tokenId` (+ `agentWallet`) |
 
-The reconciliation chain already has its first link in `work/a2a-bridge/tasks/4.md` (the AgentCard `x-mnemonic` extension). ERC-8004 closes it: `tokenId → registration file → AgentCard URL → x-mnemonic.ed25519_pubkey_base58`, with Mnemonic envelopes carrying that pubkey directly.
+The reconciliation chain already has its first link in `work/a2a-bridge/tasks/4.md` (the AgentCard `x-mnemonic` extension). ERC-8004 closes it: `tokenId → registration file → AgentCard URL → x-mnemonic.ed25519_pubkey_base58`, with Mnemonik envelopes carrying that pubkey directly.
 
 Ship: a `did:mnemonic:` resolver as the unified handle. Format: `did:mnemonic:<namespace>:<chainId>:<contract>:<tokenId>` (eip155 namespace) or `did:mnemonic:solana:<base58_pubkey>` (Solana namespace, legacy). One agent, multiple ecosystems, one cryptographic root.
 
@@ -234,7 +234,7 @@ For the validator-as-a-service in Path 1, the ERC-8004 `validationResponse` Ethe
   - **~5 dev-days.**
 
 - **erc8004-3 — Reputation feedback helper**
-  - SDK + CLI: `submitMnemonicFeedback(agentId, value, attestationId)`.
+  - SDK + CLI: `submitMnemonikFeedback(agentId, value, attestationId)`.
   - Off-chain JSON document spec for the `mnemonic` namespace inside feedback payload (open PR to ERC-8004 working group proposing canonical schema).
   - **~2 dev-days.**
 
@@ -251,9 +251,9 @@ For the validator-as-a-service in Path 1, the ERC-8004 `validationResponse` Ethe
 
 **Total: ~20 dev-days**, ordered as: erc8004-0 → (erc8004-1 || erc8004-3) → erc8004-2 → erc8004-5 → erc8004-4. Roughly half the size of A2A bridge V1, riding entirely on its substrate.
 
-### What it brings Mnemonic
+### What it brings Mnemonik
 
-- **Position on the highest-leverage substrate.** ERC-8004 is *built on* A2A and went mainnet five months ago. Validators that show up first own the namespace. The two declared validator categories already filling are TEE (Phala, Marlin) and crypto-economic (staking) — Mnemonic occupies a third (signed-memory) that nobody else holds.
+- **Position on the highest-leverage substrate.** ERC-8004 is *built on* A2A and went mainnet five months ago. Validators that show up first own the namespace. The two declared validator categories already filling are TEE (Phala, Marlin) and crypto-economic (staking) — Mnemonik occupies a third (signed-memory) that nobody else holds.
 - **Stacks atop the A2A bridge for free.** Path 1 is essentially "the A2A bridge with an Ethereum tx at the end". Most engineering is already in `work/a2a-bridge/`.
 - **On-chain reputation surface** that no off-chain memory competitor (letta / zep / mem0 / cognee) can replicate without first building signed attestations — a moat compounding on a moat.
 - **New revenue surface** — validator-as-a-service is a per-call fee market; infrastructure already exists in `mcp/src/payment.rs`.

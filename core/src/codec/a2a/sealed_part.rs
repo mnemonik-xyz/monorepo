@@ -29,7 +29,7 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::extension::XMnemonicExtension;
+use super::extension::XMnemonikExtension;
 use super::part::Part;
 
 /// Media type for a sealed-memory A2A DataPart.
@@ -96,7 +96,7 @@ pub enum SealedPartError {
 ///   (e.g. small-order point).
 pub fn recipient_x25519_from_agent_card(agent_card: &Value) -> Result<[u8; 32], SealedPartError> {
     // Extract the x-mnemonic extension.
-    let ext: XMnemonicExtension = {
+    let ext: XMnemonikExtension = {
         let extensions = agent_card.get("extensions");
         let arr = extensions
             .and_then(|v| v.as_array())
@@ -106,7 +106,7 @@ pub fn recipient_x25519_from_agent_card(agent_card: &Value) -> Result<[u8; 32], 
             if e.get("uri").and_then(|u| u.as_str())
                 == Some(crate::codec::a2a::extension::EXTENSION_URI)
             {
-                serde_json::from_value::<XMnemonicExtension>(e.clone()).ok()
+                serde_json::from_value::<XMnemonikExtension>(e.clone()).ok()
             } else {
                 None
             }

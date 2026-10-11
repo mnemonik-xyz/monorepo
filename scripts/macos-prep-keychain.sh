@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pre-authorize the Mnemonic identity keychain entry on macOS so that any
+# Pre-authorize the Mnemonik identity keychain entry on macOS so that any
 # Apple-signed CLI tool (and unsigned local binaries like `node` invoked from
 # Terminal) can read the secret without triggering the "Always Allow" GUI prompt.
 #

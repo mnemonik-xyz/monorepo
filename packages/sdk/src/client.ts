@@ -1,5 +1,5 @@
 import { boundedBody, decodeAttestation, fetchAttestation, importA2AAttestation, restoreA2AContext } from "./a2a-recovery.js";
-// MnemonicClient — stateless wrapper over the hosted MCP HTTP surface.
+// MnemonikClient — stateless wrapper over the hosted MCP HTTP surface.
 //
 // 5 tool methods (whoami, signMemory, recall, verify, proveIdentity) plus
 // the canonical pending-bundle handling for signMemory.
@@ -39,7 +39,7 @@ import { coseSignPayload } from "./cose.js";
 import {
   AuthError,
   IntegrityError,
-  MnemonicError,
+  MnemonikError,
   ServerError,
   UserError,
   redactJWT,
@@ -56,7 +56,7 @@ import type {
   Embedder,
   GrantEntry,
   KeypairProvider,
-  MnemonicClientConfig,
+  MnemonikClientConfig,
   OpenMemoryResult,
   ProveResult,
   RecallA2AContextOptions,
@@ -94,7 +94,7 @@ const REFRESH_SKEW_MS = 60_000;
  * you only need recall/verify and don't have a keypair yet, pass any
  * concrete `SignerInterface` (its `sign` method won't be invoked).
  */
-export class MnemonicClient {
+export class MnemonikClient {
   private readonly baseUrl: string;
   private readonly sealedLocal = new Map<string, { outerCbor: Uint8Array; signedBytes: Uint8Array }>();
   private readonly signer: SignerInterface;
@@ -129,14 +129,14 @@ export class MnemonicClient {
   }
   importA2AAttestation(locator:string,author:string){return importA2AAttestation.call(this,locator,author);}
   restoreA2AContext(context:string,opts:import("./types.js").A2ARestoreOptions){return restoreA2AContext.call(this,context,opts);}
-  constructor(config: MnemonicClientConfig) {
+  constructor(config: MnemonikClientConfig) {
     if (!config.baseUrl || !/^https?:\/\//.test(config.baseUrl)) {
       throw new UserError(
-        "MnemonicClient: baseUrl must be an absolute http(s) URL"
+        "MnemonikClient: baseUrl must be an absolute http(s) URL"
       );
     }
     if (!config.signer || typeof config.signer.sign !== "function") {
-      throw new UserError("MnemonicClient: signer is required");
+      throw new UserError("MnemonikClient: signer is required");
     }
     // Strip trailing slash so path concatenation produces e.g.
     // `https://host/mcp` not `https://host//mcp`.
@@ -1248,7 +1248,7 @@ async function safeFetch(
   try {
     return await f(url, init);
   } catch (e) {
-    if (e instanceof MnemonicError) throw e;
+    if (e instanceof MnemonikError) throw e;
     throw new ServerError(`network error: ${describeError(e)}`, undefined, e);
   }
 }

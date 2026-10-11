@@ -1,4 +1,4 @@
-# Concurrent Writers in Mnemonic — Research Report
+# Concurrent Writers in Mnemonik — Research Report
 
 **Date:** 2026-03-31
 **Addresses:** ADR-006, Gap #9
@@ -44,7 +44,7 @@ Agents contribute to a shared, unencrypted memory pool that anyone can read. Thi
 
 ### Product Implications
 
-- Turns Mnemonic from a single-agent tool into a collaboration primitive
+- Turns Mnemonik from a single-agent tool into a collaboration primitive
 - On-chain commitments provide auditability that centralized alternatives (Pinecone, Weaviate) cannot offer
 - The append-only nature of Arweave gives you a "memory git" with full history
 - Multi-party access justifies the complexity of on-chain infrastructure
@@ -125,7 +125,7 @@ A Solana PDA acts as a mutex. Writers acquire the lock before committing. Only o
 
 ### Comparison Table
 
-| Model | Fit for Mnemonic? | Why |
+| Model | Fit for Mnemonik? | Why |
 |-------|-------------------|-----|
 | Last-Write-Wins | No | 9 writers = lose 8/9 of concurrent work |
 | **Event Sourcing** | **Best fit** | Append-only deltas, replay in Solana slot order |
@@ -230,14 +230,14 @@ The current system commits `SHA3-256(encrypted_blob)` to Solana. With multiple c
 - Each "stream" is a DAG of commits, each signed by the controller
 - Anchored to Ethereum (batched via Merkle tree)
 - Default conflict resolution: last-write-wins; custom resolution supported
-- **Lesson:** Separates data layer (IPFS/Arweave) from ordering layer (Ethereum). Exactly the Mnemonic architecture.
+- **Lesson:** Separates data layer (IPFS/Arweave) from ordering layer (Ethereum). Exactly the Mnemonik architecture.
 - **Limitation:** LWW default is too simple for quantized indices.
 
 ### OrbitDB
 
 - Peer-to-peer database on IPFS, uses CRDTs for merge
 - "Feed" type = append-only log — maps directly to event sourcing model
-- No blockchain anchoring — the gap Mnemonic fills
+- No blockchain anchoring — the gap Mnemonik fills
 - **Lesson:** CRDT merge for sets works for the memory item layer.
 - **Limitation:** No notion of quantized indices or corpus-dependent state.
 
@@ -245,13 +245,13 @@ The current system commits `SHA3-256(encrypted_blob)` to Solana. With multiple c
 
 - Multi-writer append-only logs with IPFS storage
 - DAG of records, signed by participants, ACL-based write control
-- **Lesson:** Closest precedent to what Mnemonic needs. Multiple authorized writers append to a shared log. DAG handles concurrent appends.
+- **Lesson:** Closest precedent to what Mnemonik needs. Multiple authorized writers append to a shared log. DAG handles concurrent appends.
 
 ### Iroh (by n0/number0)
 
 - Rust-based CRDT document sync on BLAKE3 content addressing
 - "Authors" and "namespaces" — each namespace is a key-value store with multi-value register CRDT
-- **Lesson:** Namespace model maps to Mnemonic's per-agent memory spaces. Multi-value register (keep all concurrent writes, app resolves) is pragmatic.
+- **Lesson:** Namespace model maps to Mnemonik's per-agent memory spaces. Multi-value register (keep all concurrent writes, app resolves) is pragmatic.
 
 ### Nostr
 
@@ -270,7 +270,7 @@ All successful decentralized multi-writer systems converge on:
 4. External ordering layer (blockchain or consensus) for global time
 5. Application-level merge logic for domain-specific conflict resolution
 
-Mnemonic already has (1) Arweave, (2) partially via `commit.mjs`, and (4) Solana. It needs to add (3) DAG-structured commit history and (5) merge strategy for quantizer state.
+Mnemonik already has (1) Arweave, (2) partially via `commit.mjs`, and (4) Solana. It needs to add (3) DAG-structured commit history and (5) merge strategy for quantizer state.
 
 ---
 
