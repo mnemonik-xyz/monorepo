@@ -42,28 +42,28 @@ interface RouteSpec {
 const ROUTES = {
   "/": {
     file: "index.html",
-    title: "Verifiable memory for AI agents — Mnemonic Protocol",
+    title: "Verifiable memory for AI agents — Mnemonik Protocol",
     url: `${ORIGIN}/`,
-    shell: "Mnemonic Protocol · v0.1",
+    shell: "Mnemonik Protocol · v0.1",
     jsonLd: true,
   },
   "/ledger": {
     file: "ledger/index.html",
-    title: "Ledger — Mnemonic Protocol",
+    title: "Ledger — Mnemonik Protocol",
     url: `${ORIGIN}/ledger`,
     shell: "Recalled artifacts",
     jsonLd: false,
   },
   "/analytics": {
     file: "analytics/index.html",
-    title: "Analytics — attestations over time — Mnemonic Protocol",
+    title: "Analytics — attestations over time — Mnemonik Protocol",
     url: `${ORIGIN}/analytics`,
     shell: "Network analytics",
     jsonLd: true,
   },
   "/blog": {
     file: "blog/index.html",
-    title: "Blog — Mnemonic Protocol",
+    title: "Blog — Mnemonik Protocol",
     url: `${ORIGIN}/blog`,
     shell: "Signed public attestations",
     jsonLd: false,

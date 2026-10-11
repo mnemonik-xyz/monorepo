@@ -1,14 +1,14 @@
 import {beforeAll,afterAll,describe,it,expect} from 'vitest';
 import * as wasm from '../../../core/pkg-nodejs/mnemonic_core.js';
 import {__setWasmForTesting} from '../src/wasm.js';
-import {MnemonicClient} from '../src/client.js';
+import {MnemonikClient} from '../src/client.js';
 import {Keypair} from '../src/keypair.js';
 import {LocalSigner} from '../src/signer.js';
 import v from './fixtures/sealed-a2a.json';
 const toBytes=(h:string)=>Uint8Array.from(h.match(/../g)!.map(x=>parseInt(x,16)));
 const id='A'.repeat(43);
 beforeAll(()=>{globalThis.self=globalThis as any;__setWasmForTesting(wasm);});afterAll(()=>__setWasmForTesting(null));
-function client(fetch:typeof globalThis.fetch,identity=v.author){const kp=new Keypair(identity);const c=new MnemonicClient({baseUrl:'https://mcp.invalid',signer:new LocalSigner(kp),jwt:'SECRET-JWT',fetch,a2aGatewayUrl:'https://gateway.invalid',a2aIndexUrl:'https://index.invalid/graphql'});c.setKeypair(kp);return c;}
+function client(fetch:typeof globalThis.fetch,identity=v.author){const kp=new Keypair(identity);const c=new MnemonikClient({baseUrl:'https://mcp.invalid',signer:new LocalSigner(kp),jwt:'SECRET-JWT',fetch,a2aGatewayUrl:'https://gateway.invalid',a2aIndexUrl:'https://index.invalid/graphql'});c.setKeypair(kp);return c;}
 function edge(hex=v.stream,overrides:Record<string,string>={}){const b=JSON.parse(wasm.verify_a2a(toBytes(hex),v.author.pubkey_base58));return {cursor:id,node:{id,tags:Object.entries({'App-Name':'mnemonic-protocol','Mnemonic-Type':'a2a','Producer':v.author.pubkey_base58,'Context-Id':v.context_id,'Content-Hash':b.content_hash,...overrides}).map(([name,value])=>({name,value}))}};}
 function remote(edges:any[],blob=v.stream,hasNext=false){return (async(url:any,init?:RequestInit)=>{expect(String(url)).not.toContain('mcp.invalid');expect(new Headers(init?.headers).has('authorization')).toBe(false);return String(url).includes('index.invalid')?Response.json({data:{transactions:{edges,pageInfo:{hasNextPage:hasNext}}}}):new Response(toBytes(blob));}) as typeof fetch;}
 describe('SQL-independent client recovery',()=>{
@@ -32,7 +32,7 @@ describe('ancestry and provider bounds',()=>{
    const large=client((async()=>new Response(new Uint8Array(1048577))) as typeof fetch);await expect(large.importA2AAttestation(`ar://${id}`,v.author.pubkey_base58)).rejects.toThrow('too large');
  });
  it('defaults discovery to the arweave.net GraphQL index with height ordering',async()=>{
-   let url='',query='';const kp=new Keypair(v.author);const c=new MnemonicClient({baseUrl:'https://mcp.invalid',signer:new LocalSigner(kp),fetch:(async(u,init)=>{url=String(u);query=JSON.parse(init!.body as string).query;return Response.json({data:{transactions:{edges:[],pageInfo:{hasNextPage:false}}}});}) as typeof fetch});await c.restoreA2AContext(v.context_id,{expectedAuthors:[v.author.pubkey_base58]});expect(url).toBe('https://arweave.net/graphql');expect(c._a2aGateway()).toBe('https://arweave.net');expect(query).toContain('sort:HEIGHT_ASC');expect(query).not.toContain('block');
+   let url='',query='';const kp=new Keypair(v.author);const c=new MnemonikClient({baseUrl:'https://mcp.invalid',signer:new LocalSigner(kp),fetch:(async(u,init)=>{url=String(u);query=JSON.parse(init!.body as string).query;return Response.json({data:{transactions:{edges:[],pageInfo:{hasNextPage:false}}}});}) as typeof fetch});await c.restoreA2AContext(v.context_id,{expectedAuthors:[v.author.pubkey_base58]});expect(url).toBe('https://arweave.net/graphql');expect(c._a2aGateway()).toBe('https://arweave.net');expect(query).toContain('sort:HEIGHT_ASC');expect(query).not.toContain('block');
  });
 });
 

@@ -1,4 +1,4 @@
-//! Minimal Universal Paywall provider client for the Mnemonic MCP server.
+//! Minimal Universal Paywall provider client for the Mnemonik MCP server.
 //!
 //! Implements the provider-neutral boundary described in
 //! `work/universal-paywall-integration/tech-spec.md` for the `exact`

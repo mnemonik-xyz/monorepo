@@ -1,6 +1,6 @@
 # @mnemonik-xyz/mcp
 
-MCP shim for the Mnemonic Protocol. Ships `mnemonik-mcp` — a thin Node entrypoint
+MCP shim for the Mnemonik Protocol. Ships `mnemonik-mcp` — a thin Node entrypoint
 that lazily downloads and verifies the matching `mnemonic-mcp` Rust binary from
 GitHub Releases on first invocation, then dispatches subcommands to it.
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**Mnemonic Protocol** — signed memory artifacts and recovery tools for AI agents. Client-prepared sealed memory is encrypted and signed locally; external delivery retains original bytes. Embeddings and TurboQuant support particular search/artifact paths, not every memory. Plain stdio-local rows are unsigned. Arweave provides current external delivery: the operator uploads through ArDrive Turbo and reads from any Arweave gateway. Arweave is the single record of each anchored memory; the server writes no memory record to Solana. Source capabilities, supported artifact/backend combinations and release limits are listed in [docs/source-capabilities.md](docs/source-capabilities.md).
+**Mnemonik Protocol** — signed memory artifacts and recovery tools for AI agents. Client-prepared sealed memory is encrypted and signed locally; external delivery retains original bytes. Embeddings and TurboQuant support particular search/artifact paths, not every memory. Plain stdio-local rows are unsigned. Arweave provides current external delivery: the operator uploads through ArDrive Turbo and reads from any Arweave gateway. Arweave is the single record of each anchored memory; the server writes no memory record to Solana. Source capabilities, supported artifact/backend combinations and release limits are listed in [docs/source-capabilities.md](docs/source-capabilities.md).
 
 **Default branch:** `main`. Branch from `main` (`feat/*`, `fix/*`, `claude/*`) and PR back to `main`. Tagged releases (`v*`) are cut from `main`.
 

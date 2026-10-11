@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-APP_NAME="Mnemonic"
+APP_NAME="Mnemonik"
 MCP_URL="https://mcp.mnemonik.xyz/mcp"
 CONFIG_PATH="${HOME}/.cursor/mcp.json"
 TIMEOUT_S=15
@@ -111,13 +111,13 @@ got_type = entry.get("type") or entry.get("transport") or "http"
 if got_type != "http":
     print(f"FAIL: transport must be http, got {got_type!r}", file=sys.stderr)
     sys.exit(1)
-print(f"OK: Mnemonic entry present, url={got_url}, type={got_type}")
+print(f"OK: Mnemonik entry present, url={got_url}, type={got_type}")
 PY
 
 green "PASS: Cursor accepted the install deeplink and persisted the entry."
 echo
 echo "Manual next steps (per m13v's note: AX-opaque, not scripted):"
-echo "  1. Open Cursor → click on Mnemonic in MCP servers list"
+echo "  1. Open Cursor → click on Mnemonik in MCP servers list"
 echo "  2. Look for Connect / Authorize button (Cursor 3.2.16: may not appear)"
 echo "  3. If no button — paste a JWT into the entry's headers field manually,"
 echo "     restart Cursor, retry tool call. See manual-verify.md for the"

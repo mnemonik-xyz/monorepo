@@ -1,7 +1,7 @@
 {
   "_comment": [
     "Reproducible fixture — generated with a fixed private key (0x42 × 32).",
-    "To verify without Mnemonic code:",
+    "To verify without Mnemonik code:",
     "  echo -n '<documentJson>' | cast keccak  →  must equal feedbackHash",
     "  jq -j '.feedback' fixture.json | npx jcs | cast keccak  →  must equal payloadHash"
   ],

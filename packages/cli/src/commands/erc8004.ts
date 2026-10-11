@@ -5,7 +5,7 @@
 // feedback-verify — offline: verifies hashes + Ed25519 proof; optionally
 //                   checks on-chain sender binding.
 //
-// Neither command makes a Mnemonic server call. The private key is read from
+// Neither command makes a Mnemonik server call. The private key is read from
 // the local keystore only by `feedback` (same as `mnemonic prove`).
 
 import { readFileSync, writeFileSync } from "node:fs";

@@ -16,7 +16,7 @@ related:
 
 ## Что делаем
 
-Превращаем Ed25519-ключ пользователя в **невидимый сетевой ресурс**, который живёт ровно в одном месте на машине, защищён OS keychain'ом где возможно, и одинаково виден всем поверхностям Mnemonic (Node CLI `@mnemonik-xyz/cli`, Rust stdio MCP-сервер `mnemonic-mcp`, webapp `mnemonik.xyz`, IDE-плагины через JWT).
+Превращаем Ed25519-ключ пользователя в **невидимый сетевой ресурс**, который живёт ровно в одном месте на машине, защищён OS keychain'ом где возможно, и одинаково виден всем поверхностям Mnemonik (Node CLI `@mnemonik-xyz/cli`, Rust stdio MCP-сервер `mnemonic-mcp`, webapp `mnemonik.xyz`, IDE-плагины через JWT).
 
 Поглощает целиком `work/keypair-sync/` — после shipа этой feature `keypair-sync` архивируется в `work/completed/keypair-sync/` с одностраничной заметкой-перенаправлением.
 
@@ -90,7 +90,7 @@ status: signed (local mode)
 
 ### Сценарий 2 — Первый запуск Cursor / Claude Desktop с stdio MCP
 
-Пользователь добавил Mnemonic как MCP-сервер в Cursor через webapp install button (см. сценарий 6) или ручную правку `mcp.json`. При первом MCP-вызове из чата:
+Пользователь добавил Mnemonik как MCP-сервер в Cursor через webapp install button (см. сценарий 6) или ручную правку `mcp.json`. При первом MCP-вызове из чата:
 
 1. Cursor запускает `mnemonic-mcp --transport stdio`.
 2. Rust mcp-server вызывает `identity::ensure()` в startup-секции `main.rs`.
@@ -327,7 +327,7 @@ Cursor открывается через deeplink `cursor://mcp/install?config=<
 ### Пользователь проверяет
 
 - На свежей виртуалке (macOS / Ubuntu / Windows) — `npm install -g @mnemonik-xyz/cli && mnemonic sign "hello"` работает без шагов init и login.
-- В Cursor добавить Mnemonic MCP через webapp install button — первый MCP tool call из чата сразу аутентифицирован.
+- В Cursor добавить Mnemonik MCP через webapp install button — первый MCP tool call из чата сразу аутентифицирован.
 - Сценарий drift: на webapp нажать "Generate new" → увидеть модалку с опциями Send-to-CLI / Backup / Cancel.
 - Сценарий sync: на CLI `mnemonic identity push-to-webapp` → отсканировать QR в браузере → webapp localStorage обновился, теперь оба показывают тот же pubkey в `mnemonic whoami` / webapp `/whoami`.
 - Сценарий миграции: на машине с уже существующим legacy `identity.json` — после апгрейда CLI старый pubkey сохраняется, файл переписан в stub, keychain содержит секрет. `mnemonic whoami` возвращает тот же pubkey что и до апгрейда.

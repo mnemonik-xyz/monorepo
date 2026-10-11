@@ -37,7 +37,7 @@ Total scope: ~13 dev-days (was 11; +2 days for browser-mediated signing flow), 1
 **OAuth flow:**
 
 1. User opens `mnemonik.xyz/install`. Webapp loads WASM core; if no keypair in `localStorage`, calls `generate_keypair()` and stores the JSON.
-2. User clicks "Install in Cursor". Webapp generates a Cursor deeplink with `config={base64({"url":"https://mcp.mnemonik.xyz","name":"Mnemonic"})}`. Cursor opens, prompts to add the connector.
+2. User clicks "Install in Cursor". Webapp generates a Cursor deeplink with `config={base64({"url":"https://mcp.mnemonik.xyz","name":"Mnemonik"})}`. Cursor opens, prompts to add the connector.
 3. Cursor initiates OAuth: redirects browser to `https://mcp.mnemonik.xyz/oauth/authorize?response_type=code&client_id=cursor&code_challenge=<S256>&...`.
 4. The hosted MCP serves a small consent page (or redirects back to webapp) that asks the user to sign the auth-request hash with their localStorage keypair. Webapp calls `sign_challenge(hash)` via WASM, posts the signature to `/oauth/authorize`. Server validates signature against the embedded pubkey; if valid, issues an authorization code bound to that pubkey.
 5. Cursor exchanges the code at `/oauth/token` (with `code_verifier`); server issues a JWT containing `sub=<pubkey_b58>`.
@@ -414,7 +414,7 @@ Technical AC supplementing user-spec MUST:
 ### Wave 3: UI + tests (parallel)
 
 #### Task 6: Webapp landing + install-hub + identity panel + sign-approval page
-- **Description:** Add 3 new routes to webapp: `/` (Landing — protocol pitch + Get started CTA), `/install` (install-hub — deeplinks for Cursor/VS Code/Claude.ai + identity panel: Generate/Import/Export keypair via WASM), `/sign/<correlation_id>` (sign-approval — fetches pending bundle from `GET /api/pending/<id>` using JWT, displays content preview with monospace formatting + countdown timer for 5-min TTL + "Sign with my Mnemonic identity" / "Reject" buttons; on Sign calls `sign_attestation_bundle` via WASM, posts result to `POST /api/sign-callback`). Move existing chat demo from `/` to `/chat`. Use existing Tailwind tokens from `ux-guidelines.md`.
+- **Description:** Add 3 new routes to webapp: `/` (Landing — protocol pitch + Get started CTA), `/install` (install-hub — deeplinks for Cursor/VS Code/Claude.ai + identity panel: Generate/Import/Export keypair via WASM), `/sign/<correlation_id>` (sign-approval — fetches pending bundle from `GET /api/pending/<id>` using JWT, displays content preview with monospace formatting + countdown timer for 5-min TTL + "Sign with my Mnemonik identity" / "Reject" buttons; on Sign calls `sign_attestation_bundle` via WASM, posts result to `POST /api/sign-callback`). Move existing chat demo from `/` to `/chat`. Use existing Tailwind tokens from `ux-guidelines.md`.
 - **Skill:** code-writing
 - **Reviewers:** security-auditor, test-reviewer
 - **Verify-smoke:** `cd webapp && npm run dev` — open localhost:5173/, /install, /chat, /sign/test-uuid — all render without console errors

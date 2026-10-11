@@ -10,7 +10,7 @@ Author: claude (research synthesis from `work/docs-actualization/` review).
 
 Origin: gap analysis on this branch (`claude/document-architecture-gaps-vfUxJ`) identified the missing A2A bridge as the highest-leverage of five gaps:
 - Six of eleven `docs/usecases/*.md` are A2A-shaped today but have no implementation glue.
-- Whitepaper §8 explicitly positions Mnemonic underneath A2A; no code matches the prose.
+- Whitepaper §8 explicitly positions Mnemonik underneath A2A; no code matches the prose.
 - Differentiation against unsigned-memory competitors (letta / zep / mem0 / cognee) is strongest along the signed-attestation × multi-agent-protocol-binding axis, which no competitor occupies.
 
 Scope locked-in for V1: Task / Message / Artifact attestation; `contextId`-keyed recall; AgentCard `x-mnemonic` extension; sidecar + library + SDK + MCP exposure; conformance fixtures; threat model.
@@ -23,7 +23,7 @@ Out of V1: SSE per-chunk attestation, semantic recall over A2A events, chain-plu
 
 Do not merge JCS (RFC 8785, JSON) and deterministic CBOR. The bridge canonicalizes A2A objects via JCS and wraps the resulting bytes verbatim inside a CBOR envelope. Two canonical forms, both stable, neither modified.
 
-Why: JCS is what A2A's own AgentCard JWS uses. Re-canonicalizing through CBOR would mean any A2A-native verifier diverges from us. Preserving JCS bytes verbatim means a verifier with only A2A tooling can still verify the inner payload and a verifier with only Mnemonic tooling can still verify the COSE envelope.
+Why: JCS is what A2A's own AgentCard JWS uses. Re-canonicalizing through CBOR would mean any A2A-native verifier diverges from us. Preserving JCS bytes verbatim means a verifier with only A2A tooling can still verify the inner payload and a verifier with only Mnemonik tooling can still verify the COSE envelope.
 
 Downstream: `core/src/codec/a2a/` modules expose both `to_jcs_bytes(...)` and `to_canonical_cbor_envelope(...)`. The signing path is JCS → CBOR-envelope → blake3 → COSE_Sign1. The verifying path runs the same chain in reverse plus an independent JCS re-canonicalization check.
 
@@ -49,7 +49,7 @@ Why: A2A messages are mostly short and structured; embedding them adds noise and
 
 The body of work in this folder + ERC-8004 follow-on commits the project to a single positioning statement:
 
-> Mnemonic is verifiable memory for trustless agents.
+> Mnemonik is verifiable memory for trustless agents.
 
 Explicit consequences:
 

@@ -1,4 +1,4 @@
-//! Bootstrap algorithm for the Mnemonic Ed25519 identity.
+//! Bootstrap algorithm for the Mnemonik Ed25519 identity.
 //!
 //! Implements the five-path algorithm from tech-spec.md §Architecture
 //! "Bootstrap call path (Rust mcp-server)":
@@ -421,7 +421,7 @@ fn handle_stub(
             anyhow::anyhow!(
                 "identity file {} references an OS keychain entry that no longer \
                  exists; run `mnemonic identity pull-from-webapp` to restore it, \
-                 or delete {} and let Mnemonic create a new identity",
+                 or delete {} and let Mnemonik create a new identity",
                 identity_path.display(),
                 identity_path.display()
             )
@@ -660,10 +660,10 @@ impl Drop for KeychainRollback<'_> {
 // ---------------------------------------------------------------------------
 
 const README_CONTENT: &str = "\
-Mnemonic Identity Directory
+Mnemonik Identity Directory
 ============================
 
-This directory holds your Mnemonic Ed25519 identity.
+This directory holds your Mnemonik Ed25519 identity.
 
   identity.json  — public key (stub) or keypair (legacy fallback)
   README.txt     — this file

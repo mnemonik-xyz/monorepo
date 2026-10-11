@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Orient a newly-connected agent (or its operator) to what Mnemonic offers, when each tool applies, and how local-mode and participate-mode differ. Use when the user asks what Mnemonic is, what it can do, or how it works.
+Orient a newly-connected agent (or its operator) to what Mnemonik offers, when each tool applies, and how local-mode and participate-mode differ. Use when the user asks what Mnemonik is, what it can do, or how it works.
 
 ## Trigger
 
@@ -21,7 +21,7 @@ Orient a newly-connected agent (or its operator) to what Mnemonic offers, when e
 
 ## Context to gather
 
-- Has the user used Mnemonic before in this session? If yes, scope help to what they have not used yet rather than restating everything.
+- Has the user used Mnemonik before in this session? If yes, scope help to what they have not used yet rather than restating everything.
 - Is the user on a personal machine (`mcp-stdio` subprocess) or hitting the hosted endpoint anonymously? Local-mode flows only apply to the former.
 
 ## Tool

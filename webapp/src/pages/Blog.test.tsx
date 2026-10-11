@@ -25,7 +25,7 @@ const HUMAN_POST: BlogPost = {
   summary:
     "A signed, portable memory artifact changes what an agent can prove.",
   body_markdown: "## body",
-  author: "Mnemonic Protocol",
+  author: "Mnemonik Protocol",
   published_at: "2026-06-20T10:00:00.000Z",
   tags: ["thesis"],
 };

@@ -14,9 +14,9 @@
 //     over HTTP(S). The Chrome extension serves `wasm/mnemonic_core_bg.wasm`
 //     from its packaged bundle origin — no `file://` quirks.
 
-import type { MnemonicCoreModule } from "./wasm.js";
+import type { MnemonikCoreModule } from "./wasm.js";
 
-let modulePromise: Promise<MnemonicCoreModule> | null = null;
+let modulePromise: Promise<MnemonikCoreModule> | null = null;
 
 /**
  * Lazily instantiate the WASM module under a browser runtime.
@@ -27,12 +27,12 @@ let modulePromise: Promise<MnemonicCoreModule> | null = null;
  * If `WASM_OVERRIDE` is set via `__setWasmForTesting`, it replaces the
  * dynamic import — that's the entire test-mocking surface.
  */
-export async function loadWasm(): Promise<MnemonicCoreModule> {
+export async function loadWasm(): Promise<MnemonikCoreModule> {
   if (WASM_OVERRIDE) return WASM_OVERRIDE;
   if (modulePromise) return modulePromise;
   modulePromise = (async () => {
     const wasmJsUrl = new URL("./wasm/mnemonic_core.js", import.meta.url);
-    const mod = (await import(wasmJsUrl.href)) as MnemonicCoreModule;
+    const mod = (await import(wasmJsUrl.href)) as MnemonikCoreModule;
     if (typeof mod.default === "function") {
       await mod.default();
     }
@@ -41,10 +41,10 @@ export async function loadWasm(): Promise<MnemonicCoreModule> {
   return modulePromise;
 }
 
-let WASM_OVERRIDE: MnemonicCoreModule | null = null;
+let WASM_OVERRIDE: MnemonikCoreModule | null = null;
 
 /** @internal — tests only. Pass `null` to clear. */
-export function __setWasmForTesting(mock: MnemonicCoreModule | null): void {
+export function __setWasmForTesting(mock: MnemonikCoreModule | null): void {
   WASM_OVERRIDE = mock;
   modulePromise = null;
 }

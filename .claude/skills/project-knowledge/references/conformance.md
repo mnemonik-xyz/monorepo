@@ -2,7 +2,7 @@
 
 Reference for `@mnemonik-xyz/conformance` — the portable fixture package that
 third-party A2A attestation implementations use to prove byte-for-byte parity
-with Mnemonic's serialization pipeline.
+with Mnemonik's serialization pipeline.
 
 ---
 
@@ -60,12 +60,12 @@ This is a standard constant for test fixtures. The resulting keypair is determin
 
 ## Schema-compatibility matrix
 
-| A2A protocol version | Mnemonic schema version | Status |
+| A2A protocol version | Mnemonik schema version | Status |
 |---|---|---|
 | v1.0.0-rc | `a2a-experimental` feature | Experimental — schema can change before GA |
 | v1.0.0 GA | `A2A_*_V1` (locked) | Stable — vectors locked; regeneration requires a version bump |
 
-Until A2A v1.0.0 GA the codec lives behind the `a2a-experimental` cargo feature (Decision: schema lock waits for v1.0.0 GA). The vectors file is named `vectors-a2a-v1.0.0.json` to track the A2A protocol version, not the Mnemonic SDK version.
+Until A2A v1.0.0 GA the codec lives behind the `a2a-experimental` cargo feature (Decision: schema lock waits for v1.0.0 GA). The vectors file is named `vectors-a2a-v1.0.0.json` to track the A2A protocol version, not the Mnemonik SDK version.
 
 ---
 

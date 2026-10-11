@@ -24,7 +24,7 @@
     {
       "severity": "low",
       "owasp": "A02",
-      "issue": "MnemonicClient.keypairJson holds the in-memory secret (64 bytes including the 32-byte Ed25519 seed) as a plain JS array for the lifetime of the client instance after setKeypair(). There is no zeroize/dispose surface (the signer.ts JSDoc explicitly acknowledges this — see signer.ts:32-34). Defense-in-depth concern only: V8 garbage collection is non-deterministic and JS lacks deterministic destructors. Already partially mitigated by the keypair.toJSON() defensive copy on line 90 (an attacker mutating the original Keypair object cannot tamper with the in-flight signer state).",
+      "issue": "MnemonikClient.keypairJson holds the in-memory secret (64 bytes including the 32-byte Ed25519 seed) as a plain JS array for the lifetime of the client instance after setKeypair(). There is no zeroize/dispose surface (the signer.ts JSDoc explicitly acknowledges this — see signer.ts:32-34). Defense-in-depth concern only: V8 garbage collection is non-deterministic and JS lacks deterministic destructors. Already partially mitigated by the keypair.toJSON() defensive copy on line 90 (an attacker mutating the original Keypair object cannot tamper with the in-flight signer state).",
       "file": "packages/sdk/src/client.ts:89-91",
       "recommendation": "Track in backlog as a Phase 2 concern: a TurnkeySigner / WebAuthnSigner removes the secret from JS heap entirely. For Phase 1 (LocalSigner) the threat model accepts heap exposure — document this explicitly in packages/sdk/README.md when it is added in Task 9."
     }
@@ -51,7 +51,7 @@
       "evidence": "grep crypto.subtle in packages/sdk/src/ → only oauth.ts:92 (digest call)"
     },
     {
-      "control": "redactJWT applied at MnemonicError base constructor — every thrown error message is redacted before super() runs",
+      "control": "redactJWT applied at MnemonikError base constructor — every thrown error message is redacted before super() runs",
       "evidence": "errors.ts:48 super(redactJWT(message)); covered by client.test.ts:427-478 (asserts JWT body echo and unrelated-message JWT both redacted)"
     },
     {

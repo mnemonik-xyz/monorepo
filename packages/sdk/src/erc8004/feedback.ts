@@ -23,7 +23,7 @@ import {
 import type {
   Ed25519Proof,
   FeedbackPayload,
-  MnemonicFeedbackV1,
+  MnemonikFeedbackV1,
   PrepareFeedbackInput,
   PrepareFeedbackOpts,
   PreparedFeedback,
@@ -140,7 +140,7 @@ export async function prepareFeedback(
 
   // ── Assemble document ────────────────────────────────────────────────────
 
-  const document: MnemonicFeedbackV1 = {
+  const document: MnemonikFeedbackV1 = {
     schema: "MNEMONIC_FEEDBACK_V1",
     feedback: feedbackPayload,
     payload_hash: payloadHash,
@@ -199,7 +199,7 @@ export async function verifyFeedbackDocument(
     senderBinding: "not-checked",
   };
 
-  let document: MnemonicFeedbackV1;
+  let document: MnemonikFeedbackV1;
   try {
     const parsed = JSON.parse(input.documentJson) as unknown;
     if (!isValidDocumentShape(parsed)) {
@@ -272,7 +272,7 @@ export async function verifyFeedbackDocument(
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-function isValidDocumentShape(v: unknown): v is MnemonicFeedbackV1 {
+function isValidDocumentShape(v: unknown): v is MnemonikFeedbackV1 {
   if (!v || typeof v !== "object") return false;
   const d = v as Record<string, unknown>;
   return (

@@ -2,11 +2,11 @@
 
 ## Pattern summary
 
-Use Mnemonic as the continuity layer that lets an A2A agent preserve useful memory across runtime, provider, and infrastructure changes.
+Use Mnemonik as the continuity layer that lets an A2A agent preserve useful memory across runtime, provider, and infrastructure changes.
 
 ## What gets preserved
 
-Mnemonic can preserve:
+Mnemonik can preserve:
 
 - previous memory items
 - project context
@@ -33,14 +33,14 @@ Without a continuity layer, the agent can interoperate today but lose accumulate
 
 An agent starts on one provider, then moves to another after a model upgrade.
 
-Mnemonic is used to:
+Mnemonik is used to:
 
 - restore raw memory payloads
 - rebuild retrieval state
 - preserve prior project history
 - continue operating in the same collaborative environment
 
-## Mnemonic value in this pattern
+## Mnemonik value in this pattern
 
 - continuity across provider changes
 - runtime-independent durable memory

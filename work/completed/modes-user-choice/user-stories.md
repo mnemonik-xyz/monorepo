@@ -104,7 +104,7 @@ hosted-operator dependency), B3 bridge-only (denies pure-browser users publishin
 **Implications for the (separate) browser build:**
 - **Payment ≠ the server-side x402/balance model.** The browser user pays **chain +
   storage fees directly** from their wallet; there is no per-artifact fee to a
-  Mnemonic operator. `payment_mode` does not govern browser participate.
+  Mnemonik operator. `payment_mode` does not govern browser participate.
 - **Wallet management is net-new browser scope:** the Ed25519 *identity* key (signs
   the COSE artifact) is distinct from the **funding wallet(s)** — an Arweave wallet
   (or a bundler like Turbo that accepts SOL) + a SOL-funded Solana fee-payer.

@@ -3,7 +3,7 @@ import * as wasm from '../../../core/pkg-nodejs/mnemonic_core.js';
 import {__setWasmForTesting} from '../src/wasm.js';
 import {Keypair} from '../src/keypair.js';
 import {LocalSigner} from '../src/signer.js';
-import {MnemonicClient} from '../src/client.js';
+import {MnemonikClient} from '../src/client.js';
 import {decodeAttestation} from '../src/a2a-recovery.js';
 import {checkpointBytes,signRecoveryCheckpoint,verifyRecoveryCheckpoint,checkpointA2ARestoreOptions} from '../src/checkpoint.js';
 import type {RecoveryCheckpoint} from '../src/checkpoint.js';
@@ -40,7 +40,7 @@ describe('authenticated recovery checkpoints',()=>{
   const backup=await createRecoveryBackup(signed,kp,'independently-kept-long-passphrase');
   expect(JSON.stringify(backup)).not.toContain(v.author.pubkey_base58);
   const restored=await openRecoveryBackup(backup,'independently-kept-long-passphrase',kp.pubkey,{artifactKind:'a2a',scope:v.context_id});
-  const client=new MnemonicClient({baseUrl:'https://mcp.invalid',a2aGatewayUrl:'https://gateway.invalid',a2aIndexUrl:'https://index.invalid',signer:new LocalSigner(restored.identity),fetch:async(url)=>{expect(String(url)).not.toContain('mcp.invalid');if(String(url).includes('index.invalid'))throw new Error('index unavailable');return new Response(signedBytes);}});
+  const client=new MnemonikClient({baseUrl:'https://mcp.invalid',a2aGatewayUrl:'https://gateway.invalid',a2aIndexUrl:'https://index.invalid',signer:new LocalSigner(restored.identity),fetch:async(url)=>{expect(String(url)).not.toContain('mcp.invalid');if(String(url).includes('index.invalid'))throw new Error('index unavailable');return new Response(signedBytes);}});
   client.setKeypair(restored.identity);
   const report=await client.restoreA2AContext(v.context_id,await checkpointA2ARestoreOptions(restored.signedCheckpoint,kp.pubkey,v.context_id));
   expect(report.completeToHeads).toBe(true);expect(report.error).toContain('unavailable');
@@ -66,7 +66,7 @@ describe('authenticated recovery checkpoints',()=>{
  it('no-head checkpoint makes no completeness promise and does not recover lost decryption keys',async()=>{
   const signed=await signRecoveryCheckpoint({...spec(),heads:[]},signer);
   expect((await checkpointA2ARestoreOptions(signed,kp.pubkey,v.context_id)).heads).toEqual([]);
-  const outsider=new MnemonicClient({baseUrl:'https://mcp.invalid',signer:new LocalSigner(new Keypair(v.outsider))});outsider.setKeypair(new Keypair(v.outsider));
+  const outsider=new MnemonikClient({baseUrl:'https://mcp.invalid',signer:new LocalSigner(new Keypair(v.outsider))});outsider.setKeypair(new Keypair(v.outsider));
   const row=await decodeAttestation(signedBytes,kp.pubkey,locator);
   await expect(outsider.openA2AAttestation(row,kp.pubkey)).rejects.toThrow();
  });

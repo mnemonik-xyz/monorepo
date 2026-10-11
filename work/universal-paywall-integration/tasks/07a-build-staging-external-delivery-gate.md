@@ -42,11 +42,11 @@ changing the fast local CI path.
   Coding Fabric provides a separate, approval-gated Base Sepolia compose stack
   and manual deployment workflow. The stack is loopback-only, exact-only, and
   does not share the production MCP directory or volumes.
-- Completed: the staging stack now contains its own Mnemonic MCP and a
+- Completed: the staging stack now contains its own Mnemonik MCP and a
   same-origin approval UI asset volume. Caddy exposes only the configured
   staging hostname on the tailnet; the facilitator remains private behind MCP.
 - Completed: Coding Fabric renders the staging `.env`, facilitator receipt
-  key, and Mnemonic delivery keypair from its existing age/SOPS secret source.
+  key, and Mnemonik delivery keypair from its existing age/SOPS secret source.
   `UNIVERSAL_PAYWALL_URL` is the explicit MCP-to-facilitator location boundary,
   so the reference co-located VPS topology can be split across servers later.
 - Completed: the merged Universal Paywall release workflow successfully

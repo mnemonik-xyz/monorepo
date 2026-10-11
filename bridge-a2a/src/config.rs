@@ -58,10 +58,10 @@ impl std::fmt::Display for FailureMode {
     }
 }
 
-/// bridge-a2a: Mnemonic attestation sidecar for A2A JSON-RPC servers.
+/// bridge-a2a: Mnemonik attestation sidecar for A2A JSON-RPC servers.
 ///
 /// Sits between an A2A client and an A2A server. Intercepts `message/send`,
-/// `tasks/get`, and SSE artifact streams; produces Mnemonic attestations;
+/// `tasks/get`, and SSE artifact streams; produces Mnemonik attestations;
 /// injects `x-mnemonic` extension fields into responses.
 #[derive(Debug, Parser)]
 #[command(name = "bridge-a2a", version, about)]

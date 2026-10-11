@@ -1,4 +1,4 @@
-# Standalone container deploy — Mnemonic MCP
+# Standalone container deploy — Mnemonik MCP
 
 This guide describes a **separately provisioned standalone host**. The current
 hosted production service instead uses the coding-fabric-owned stack at

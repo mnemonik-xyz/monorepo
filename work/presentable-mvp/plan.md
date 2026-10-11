@@ -10,7 +10,7 @@ related:
   - work/x402-v2-conformance/scope.md
 ---
 
-# Plan: make Mnemonic presentable and testable
+# Plan: make Mnemonik presentable and testable
 
 Goal: a stranger goes from zero to "my agent remembered something, shared
 it, and someone else verified it" in under 5 minutes, without a wallet.

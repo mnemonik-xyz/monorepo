@@ -508,7 +508,7 @@ Then `tech-spec-validator` ran coverage check — 3 covered / 3 partial / 2 miss
 
 **Context:** Mid-session attempt to close T15's `macos14` row automatically by running the scenario `§2` steps directly on the developer's macOS (15.5 Sequoia) machine. Pre-flight passed: HEAD = `2b15266` (≥ T19 close commit `c05c9fc`), `target/release/mnemonic-mcp` built, `packages/cli/dist/bin/mnemonic.js` built.
 
-**Reason for abort:** Discovered the host has a production Mnemonic identity at `~/.mnemonic/` — stub-shape, pubkey `FkwN...LYAk`, created 2026-05-23. Scenario `Step 1 (clean state)` executes `rm -rf ~/.mnemonic` plus `security delete-generic-password -s xyz.mnemonik.identity` — this would have **destroyed the developer's actual keypair** because:
+**Reason for abort:** Discovered the host has a production Mnemonik identity at `~/.mnemonic/` — stub-shape, pubkey `FkwN...LYAk`, created 2026-05-23. Scenario `Step 1 (clean state)` executes `rm -rf ~/.mnemonic` plus `security delete-generic-password -s xyz.mnemonik.identity` — this would have **destroyed the developer's actual keypair** because:
 - The stub file is trivially backupable
 - The keychain entry holds the only copy of the long-lived secret; deleting it is irreversible without prior `security export` (which requires the user's login password and explicit consent)
 - Scenario hardcodes `service=xyz.mnemonik.identity / account=default` per Decision 1 — no env-var override exists to redirect to a per-run namespace

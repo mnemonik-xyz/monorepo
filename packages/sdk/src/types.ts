@@ -34,7 +34,7 @@ export interface SignerInterface {
 }
 
 /**
- * Constructor configuration for `MnemonicClient`.
+ * Constructor configuration for `MnemonikClient`.
  *
  * `baseUrl` should be the origin of the hosted MCP server, e.g.
  * `https://mcp.mnemonik.xyz`. The SDK appends path segments (`/mcp`,
@@ -45,7 +45,7 @@ export interface SignerInterface {
  * client first, run the OAuth flow, then call `setJwt(...)`. The signer
  * is required: `signMemory` always needs it for the COSE step.
  */
-export interface MnemonicClientConfig {
+export interface MnemonikClientConfig {
   a2aGatewayUrl?: string;
   a2aIndexUrl?: string;
   a2aIndex?: A2AIndexStore;
@@ -60,12 +60,12 @@ export interface MnemonicClientConfig {
   /**
    * Optional lazy keypair source for `signMemory`. The client calls it only
    * when the server asks for a client signature (`awaiting_signature`).
-   * See {@link MnemonicClient.setKeypairProvider}.
+   * See {@link MnemonikClient.setKeypairProvider}.
    */
   keypairProvider?: KeypairProvider;
   /**
    * Optional access-token refresher. See
-   * {@link MnemonicClient.setTokenRefresher}.
+   * {@link MnemonikClient.setTokenRefresher}.
    */
   tokenRefresher?: TokenRefresher;
 }
@@ -256,7 +256,7 @@ export interface SealedHit {
  * Pluggable embedding function. Given a query string, returns a float32
  * vector of arbitrary dimension (must match the stored vectors).
  *
- * The default implementation posts to `POST /api/embed` on the MnemonicClient's
+ * The default implementation posts to `POST /api/embed` on the MnemonikClient's
  * base URL.
  */
 export interface Embedder {

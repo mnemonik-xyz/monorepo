@@ -28,7 +28,7 @@ payment whose Arweave or Solana delivery has not completed.
   id, and transaction identifiers. Do not retrieve artifact plaintext, COSE
   bytes, EIP-3009 typed data, wallet signatures, private keys, or API-key
   values for routine diagnosis.
-- The facilitator's file-backed payment store and Mnemonic SQLite database are
+- The facilitator's file-backed payment store and Mnemonik SQLite database are
   durable state. Never delete their volumes as a retry or rollback action.
 
 ## Ownership and secret boundaries
@@ -37,9 +37,9 @@ payment whose Arweave or Solana delivery has not completed.
 |---|---|---|---|
 | Facilitator receipt signer | Paywall operator | `/opt/universal-paywall-staging/secrets/receipt-private-key.pem`, uid 10001, mode 0600 | Receipt key endpoint and signed receipt verification |
 | EVM settlement key | Paywall operator | SOPS-rendered facilitator `.env`; never CI logs | Base Sepolia RPC reachability and facilitator health |
-| Mnemonic/approval API credentials | Mnemonic operator | SOPS-rendered MCP/approval configuration | Authenticated operation-status request |
-| Solana relay/keypair | Mnemonic operator | SOPS-rendered MCP configuration | relay balance and submitted signature status |
-| ArDrive Turbo upload identity (operator Ed25519 key) | Mnemonic operator | SOPS-rendered MCP configuration | free-tier allowance or Turbo credit balance, and upload availability |
+| Mnemonik/approval API credentials | Mnemonik operator | SOPS-rendered MCP/approval configuration | Authenticated operation-status request |
+| Solana relay/keypair | Mnemonik operator | SOPS-rendered MCP configuration | relay balance and submitted signature status |
+| ArDrive Turbo upload identity (operator Ed25519 key) | Mnemonik operator | SOPS-rendered MCP configuration | free-tier allowance or Turbo credit balance, and upload availability |
 | Base Sepolia RPC / USDC / payee | Release owner | non-secret `.env` values, reviewed at deploy | chain id 84532, USDC address, payee binding |
 
 The facilitator deployment workflow must run through the protected
@@ -54,7 +54,7 @@ Before an external E2E or any remediation, verify:
    using an immutable image reference.
 2. Facilitator `/health` responds locally, its configured chain is Base Sepolia
    (`84532`), and `EXACT_PAYMENTS_ENABLED=1`.
-3. Mnemonic's authenticated operation-status endpoint can read an existing
+3. Mnemonik's authenticated operation-status endpoint can read an existing
    operation only with its single-purpose resume capability.
 4. The Solana relay has sufficient devnet/test funds for one bounded retry and
    the operator wallet has free-tier allowance or Turbo credits for the planned
@@ -82,11 +82,11 @@ the restricted audit record, not high-cardinality public telemetry.
 1. Open a restricted incident record with `operation_id`, time observed,
    authenticated subject reference, and the support request. Do not paste
    content or raw authorizations.
-2. Read the authenticated Mnemonic operation status. Record only its state,
+2. Read the authenticated Mnemonik operation status. Record only its state,
    quote id, receipt id, timestamps, and existing Arweave/Solana identifiers.
 3. Query Universal Paywall `status(operation_id)` with the service API key.
    Verify the signed receipt binding digest, amount, asset, network, payee,
-   payer, and operation id agree with Mnemonic's stored metadata.
+   payer, and operation id agree with Mnemonik's stored metadata.
 4. If a receipt is not settled, the user has not been charged. Handle quote
    expiry or wallet rejection in the UI; do not run delivery recovery.
 5. If settled, inspect the staged delivery attempt state and its redacted
@@ -111,7 +111,7 @@ An operation is `abandoned` only after bounded retries/reconciliation have
 failed or a permanent delivery condition is established. It is never an
 automatic-refund trigger.
 
-The on-call Mnemonic operator owns the incident until it is handed to the
+The on-call Mnemonik operator owns the incident until it is handed to the
 Paywall release owner. The restricted audit record must include:
 
 - `operation_id`, receipt id, binding digest, timestamps, and redacted error
@@ -146,4 +146,4 @@ already-settled operation's delivery work.
 - Documented abandoned-operation review showing either a completed delivery or
   a separately approved refund/service-credit outcome.
 - Monitoring/alert ownership and tested restoration of the facilitator payment
-  store and Mnemonic SQLite state.
+  store and Mnemonik SQLite state.

@@ -11,7 +11,7 @@ import {
   it,
 } from "vitest";
 
-import { MnemonicClient } from "../../src/client.js";
+import { MnemonikClient } from "../../src/client.js";
 import { AuthError } from "../../src/errors.js";
 import { Keypair } from "../../src/keypair.js";
 import { LocalSigner } from "../../src/signer.js";
@@ -38,9 +38,9 @@ afterEach(() => {
   __setWasmForTesting(null);
 });
 
-async function makeClient(): Promise<MnemonicClient> {
+async function makeClient(): Promise<MnemonikClient> {
   const keypair = await Keypair.generate();
-  const client = new MnemonicClient({
+  const client = new MnemonikClient({
     baseUrl: server.url,
     signer: new LocalSigner(keypair),
     jwt: "eyJfake-jwt-1234567890abcdefghijk",

@@ -1,4 +1,4 @@
-# Mnemonic Protocol Whitepaper — Revisions Draft
+# Mnemonik Protocol Whitepaper — Revisions Draft
 
 **Status:** Working draft of revised sections, May 2026
 **Source:** Design conversation, May 2026
@@ -8,7 +8,7 @@
 
 ## How to use this document
 
-This file contains drafted revisions to the Mnemonic whitepaper. Each section below carries a header indicating whether it is **revised**, **new**, or a **note about existing content** that needs alignment.
+This file contains drafted revisions to the Mnemonik whitepaper. Each section below carries a header indicating whether it is **revised**, **new**, or a **note about existing content** that needs alignment.
 
 The revisions follow four discipline rules:
 
@@ -23,15 +23,15 @@ The revisions follow four discipline rules:
 
 AI agents accumulate operational context across sessions, tools, and providers — preferences learned over time, factual knowledge extracted from interactions, procedures refined through use, working state maintained across turns, and persistent self-descriptions that shape their behavior. This memory is valuable, but it remains fragile: bound to single providers, locked in proprietary formats, unverifiable by outside parties, and unable to follow the operator that produced it from one runtime to another. As agents become more autonomous and operate across longer time horizons, the absence of a memory layer with cryptographic provenance becomes a coordination problem rather than a convenience problem.
 
-Mnemonic Protocol is a verifiable memory layer for AI agents. It treats memory as a portable, signed artifact — content-addressed, typed, lineage-linked, signed by the operator's cryptographic identity, and independently verifiable by any party that holds it. The protocol distinguishes five kinds of memory artifact — episodic, semantic, procedural, working, and identity — each with its own schema and semantics. Memory belongs to the operator who signed it; it can be shared between runtimes through an explicit handshake mediated by capability tokens and brought into a target runtime through a defined rehydration pipeline that includes safe-injection framing to prevent memory-mediated prompt injection across trust boundaries. Because memory is bound to operator identity rather than to any specific runtime, an agent built up under one model provider can switch providers and continue from the accumulated state.
+Mnemonik Protocol is a verifiable memory layer for AI agents. It treats memory as a portable, signed artifact — content-addressed, typed, lineage-linked, signed by the operator's cryptographic identity, and independently verifiable by any party that holds it. The protocol distinguishes five kinds of memory artifact — episodic, semantic, procedural, working, and identity — each with its own schema and semantics. Memory belongs to the operator who signed it; it can be shared between runtimes through an explicit handshake mediated by capability tokens and brought into a target runtime through a defined rehydration pipeline that includes safe-injection framing to prevent memory-mediated prompt injection across trust boundaries. Because memory is bound to operator identity rather than to any specific runtime, an agent built up under one model provider can switch providers and continue from the accumulated state.
 
-Mnemonic is independent of where artifacts are stored and how they are anchored. Storage may be local, hosted, or on-chain; anchoring may use any backend that produces a verifiable inclusion proof linking a content-addressed hash to a publicly observable timestamp. Two protocol-level commitments hold across every deployment: verification is free for any party by design, and self-hosting is always available for any operator. These commitments are what make the protocol's trustlessness claim credible — neither the protocol's authors nor any specific operator can gate verification or prevent independent operation. Mnemonic fits underneath agent coordination protocols: A2A makes agents interoperable in motion, the Model Context Protocol makes agents interoperable in capability, and Mnemonic makes them coherent over time. The core thesis is that trustless agents cannot work without trustless agentic memory.
+Mnemonik is independent of where artifacts are stored and how they are anchored. Storage may be local, hosted, or on-chain; anchoring may use any backend that produces a verifiable inclusion proof linking a content-addressed hash to a publicly observable timestamp. Two protocol-level commitments hold across every deployment: verification is free for any party by design, and self-hosting is always available for any operator. These commitments are what make the protocol's trustlessness claim credible — neither the protocol's authors nor any specific operator can gate verification or prevent independent operation. Mnemonik fits underneath agent coordination protocols: A2A makes agents interoperable in motion, the Model Context Protocol makes agents interoperable in capability, and Mnemonik makes them coherent over time. The core thesis is that trustless agents cannot work without trustless agentic memory.
 
 ---
 
 ## NEW — §5 Architecture Overview
 
-Mnemonic is structured in two layers: a **protocol layer** that defines artifact format, identity, and verification semantics, and a **backend layer** that determines where artifacts physically live. The protocol layer is storage-agnostic. Every guarantee about authorship, integrity, lineage, and authorization holds regardless of which backend is chosen. Backends differ only in availability, latency, cost, and the strength of third-party timestamp claims.
+Mnemonik is structured in two layers: a **protocol layer** that defines artifact format, identity, and verification semantics, and a **backend layer** that determines where artifacts physically live. The protocol layer is storage-agnostic. Every guarantee about authorship, integrity, lineage, and authorization holds regardless of which backend is chosen. Backends differ only in availability, latency, cost, and the strength of third-party timestamp claims.
 
 ### §5.1 Protocol Layer (storage-independent)
 
@@ -44,7 +44,7 @@ The protocol layer comprises six primitives, none of which assume anything about
 - **Lineage DAG** — content-addressed parent→child references with cycle detection and directional traversal.
 - **Capability tokens** — signed, scoped authorizations over lineage subtrees.
 
-A verifier needs the artifact bytes, the producer's public key, and (optionally) a capability token. It does not need to know which backend served those bytes. This is the core property that makes Mnemonic portable: a Mnemonic artifact verified locally and the same artifact verified after retrieval from on-chain storage return identical integrity and authorship results.
+A verifier needs the artifact bytes, the producer's public key, and (optionally) a capability token. It does not need to know which backend served those bytes. This is the core property that makes Mnemonik portable: a Mnemonik artifact verified locally and the same artifact verified after retrieval from on-chain storage return identical integrity and authorship results.
 
 ### §5.2 The `StorageBackend` Abstraction
 
@@ -76,7 +76,7 @@ Most deployments run **hybrid**: local SQLite as the hot path for every artifact
 
 ### §5.4 Why On-Chain Is Optional
 
-On-chain anchoring is the only backend that provides independent third-party timestamp without trusting any single operator. It is therefore valuable, but it is also the most expensive: every on-chain transaction costs something. Mnemonic treats on-chain anchoring as one tool in the kit:
+On-chain anchoring is the only backend that provides independent third-party timestamp without trusting any single operator. It is therefore valuable, but it is also the most expensive: every on-chain transaction costs something. Mnemonik treats on-chain anchoring as one tool in the kit:
 
 - **Anchor when** an artifact's existence at a specific time must be verifiable by a party that does not trust the operator.
 - **Do not anchor when** local or cloud durability is sufficient — the vast majority of working memory, draft state, and intra-session artifacts fall here.
@@ -150,7 +150,7 @@ Charging is a feature of operator deployment, not of the protocol. An operator m
 
 #### §5.6.3 Operator pluralism
 
-The protocol does not privilege any operator. There is no canonical hosted service, no preferred node, no central registry of authorized operators. Any party may run a Mnemonic node, accept artifacts from other operators, anchor on behalf of users, and charge for any of these services. Verification of an artifact is independent of which operator produced it.
+The protocol does not privilege any operator. There is no canonical hosted service, no preferred node, no central registry of authorized operators. Any party may run a Mnemonik node, accept artifacts from other operators, anchor on behalf of users, and charge for any of these services. Verification of an artifact is independent of which operator produced it.
 
 This pluralism is what makes the free-tier guarantees credible. An operator that abuses its position — by raising prices, degrading service, or restricting access — does not control the protocol; users can migrate to other operators or to self-hosting without losing accumulated state, because all artifacts are portable by signature and verifiable independently.
 
@@ -290,7 +290,7 @@ Currently lists schemas (`memory`, `rag.context`, `rag.result`, `agent.state`, `
 
 ### §8 Trust Model (was §7)
 
-Should be cross-referenced with §5.6 (Protocol Economics) commitments. The "Mnemonic does not yet guarantee" list should be updated to remove items now addressed by §7 (capability-scoped access, multi-runtime portability) and to keep items genuinely out of scope (multi-party shared namespaces, ZK proofs).
+Should be cross-referenced with §5.6 (Protocol Economics) commitments. The "Mnemonik does not yet guarantee" list should be updated to remove items now addressed by §7 (capability-scoped access, multi-runtime portability) and to keep items genuinely out of scope (multi-party shared namespaces, ZK proofs).
 
 ### §9 Use Cases (was §9)
 

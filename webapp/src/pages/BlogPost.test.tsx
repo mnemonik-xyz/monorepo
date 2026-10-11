@@ -23,7 +23,7 @@ const POST: BlogPost = {
   summary: "How a anchored write earns its anchors.",
   body_markdown:
     "## Two anchors\n\nA write earns **two anchors**:\n\n- Solana SPL Memo\n- Arweave bytes\n",
-  author: "Mnemonic Protocol",
+  author: "Mnemonik Protocol",
   published_at: "2026-06-12T09:15:00.000Z",
   tags: ["solana", "arweave"],
   reading_minutes: 4,

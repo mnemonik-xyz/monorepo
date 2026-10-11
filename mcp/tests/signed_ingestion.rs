@@ -264,17 +264,17 @@ async fn sdk_wasm_real_http_private_ingestion() {
     .unwrap();
     let script = r#"
       import assert from 'node:assert/strict';
-      import {MnemonicClient,Keypair,LocalSigner} from './packages/sdk/dist/index.js';
+      import {MnemonikClient,Keypair,LocalSigner} from './packages/sdk/dist/index.js';
       const kp=new Keypair(JSON.parse(process.env.INGEST_KEY));
       let requestBody;
-      const client=new MnemonicClient({baseUrl:process.env.INGEST_URL,jwt:process.env.INGEST_JWT,signer:new LocalSigner(kp),a2aGatewayUrl:process.env.INGEST_GATEWAY,fetch:async(url,init)=>{if(String(url).includes('/api/ingest-artifact')){requestBody=new Uint8Array(init.body);assert.equal(init.headers['Content-Type'],'application/cbor');}return fetch(url,init);}});
+      const client=new MnemonikClient({baseUrl:process.env.INGEST_URL,jwt:process.env.INGEST_JWT,signer:new LocalSigner(kp),a2aGatewayUrl:process.env.INGEST_GATEWAY,fetch:async(url,init)=>{if(String(url).includes('/api/ingest-artifact')){requestBody=new Uint8Array(init.body);assert.equal(init.headers['Content-Type'],'application/cbor');}return fetch(url,init);}});
       client.setKeypair(kp);
       const saved=await client.sealMemory('private sdk wasm secret',{mode:'anchor'});
       assert.equal(saved.receipt.delivery_status,'verified');
       assert.deepEqual(requestBody,saved.signedBytes);
       assert(!Buffer.from(requestBody).includes(Buffer.from('private sdk wasm secret')));
       assert.equal((await client.openMemory(saved.outerCbor)).content,'private sdk wasm secret');
-      const offline=new MnemonicClient({baseUrl:'https://offline.invalid',signer:new LocalSigner(kp),fetch:async()=>{throw Error('offline')}});offline.setKeypair(kp);
+      const offline=new MnemonikClient({baseUrl:'https://offline.invalid',signer:new LocalSigner(kp),fetch:async()=>{throw Error('offline')}});offline.setKeypair(kp);
       const local=await offline.sealMemory('offline private',{mode:'store'});assert.equal((await offline.openMemory(local.memoryHash)).content,'offline private');
       assert.equal((await offline.openMemory(saved.outerCbor)).content,'private sdk wasm secret');
       const publicMemory=await client.preparePublicMemory('intentional public memory');
@@ -348,9 +348,9 @@ async fn sdk_http_recall_limit_and_evidence() {
     let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let script = r#"
       import assert from 'node:assert/strict';
-      import {MnemonicClient,Keypair,LocalSigner} from './packages/sdk/dist/index.js';
+      import {MnemonikClient,Keypair,LocalSigner} from './packages/sdk/dist/index.js';
       const kp=new Keypair(JSON.parse(process.env.INGEST_KEY));
-      const client=new MnemonicClient({baseUrl:process.env.INGEST_URL,jwt:process.env.INGEST_JWT,signer:new LocalSigner(kp)});
+      const client=new MnemonikClient({baseUrl:process.env.INGEST_URL,jwt:process.env.INGEST_JWT,signer:new LocalSigner(kp)});
       const result=await client.recall('recall test',{topK:1});
       assert.equal(result.hits.length,1);
       assert.equal(result.hits[0].signedAt,'2026-10-02T00:00:00Z');

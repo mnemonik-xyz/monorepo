@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {pathToFileURL} from 'node:url';
-import {MnemonicClient,Keypair,LocalSigner,verifyA2AAttestation} from '../dist/index.js';
+import {MnemonikClient,Keypair,LocalSigner,verifyA2AAttestation} from '../dist/index.js';
 import {decodeAttestation} from '../dist/a2a-recovery.js';
 import {loadWasm} from '../dist/wasm.js';
 const bytes=hex=>new Uint8Array(Buffer.from(hex,'hex'));
@@ -11,7 +11,7 @@ const utf8=value=>new TextEncoder().encode(value);
 const candidateId='A'.repeat(43);
 function isolated(identity,fetch){
   const kp=identity instanceof Keypair?identity:new Keypair(identity),rows=new Map();
-  const client=new MnemonicClient({baseUrl:'https://disabled-operator.invalid',signer:new LocalSigner(kp),fetch,
+  const client=new MnemonikClient({baseUrl:'https://disabled-operator.invalid',signer:new LocalSigner(kp),fetch,
     a2aGatewayUrl:'https://crypto-fixture.invalid',a2aIndexUrl:'https://crypto-fixture.invalid/graphql',
     a2aIndex:{list:async()=>[...rows.values()],put:async row=>{rows.set(row.attestationId,row);}}});
   client.setKeypair(kp);return {client,rows};

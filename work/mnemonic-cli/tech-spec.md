@@ -11,7 +11,7 @@ branch: dev
 
 Ship two pure-ESM npm packages under the `@mnemonik-xyz` scope:
 
-1. **`@mnemonik-xyz/sdk`** — runtime-agnostic JavaScript/TypeScript library that wraps the public Mnemonic MCP HTTP surface. Provides a `MnemonicClient` with the 5 tool methods (`whoami`, `signMemory`, `recall`, `verify`, `proveIdentity`), an OAuth 2.1 + PKCE helper supporting both interactive (browser-spawn) and headless (pre-issued JWT) modes, and a pluggable `Signer` interface (Phase 1 ships only `LocalSigner`; future `TurnkeySigner` / `WebAuthnSigner` are drop-in replacements). Distributed as ESM only. Targets: Node ≥20, Bun, Deno, Cloudflare Workers, modern browsers.
+1. **`@mnemonik-xyz/sdk`** — runtime-agnostic JavaScript/TypeScript library that wraps the public Mnemonik MCP HTTP surface. Provides a `MnemonikClient` with the 5 tool methods (`whoami`, `signMemory`, `recall`, `verify`, `proveIdentity`), an OAuth 2.1 + PKCE helper supporting both interactive (browser-spawn) and headless (pre-issued JWT) modes, and a pluggable `Signer` interface (Phase 1 ships only `LocalSigner`; future `TurnkeySigner` / `WebAuthnSigner` are drop-in replacements). Distributed as ESM only. Targets: Node ≥20, Bun, Deno, Cloudflare Workers, modern browsers.
 
 2. **`@mnemonik-xyz/cli`** — Node-only CLI binary built on top of the SDK. Implements 7 commands: `init`, `login` (interactive OAuth or `--token <jwt>` headless), `sign`, `recall`, `verify`, `whoami`, `prove`, plus identity bootstrap subcommand (`identity import --file <path>` / `identity export --file <path>`). Output: human-readable on TTY (ANSI color), `--json` for machine consumption, `--quiet` for CI. Persistence (identity file + JWT) is the CLI's responsibility — SDK is stateless.
 
@@ -23,7 +23,7 @@ Both packages live in a new top-level `packages/` directory (npm workspace, not 
 
 **New packages (top-level `packages/` directory, npm workspace):**
 
-- `packages/sdk/` — `@mnemonik-xyz/sdk` source. Modules: `client.ts` (MnemonicClient + 5 tool methods), `oauth.ts` (PKCE helper + interactive/headless modes), `signer.ts` (`Signer` interface + `LocalSigner` impl), `cose.ts` (thin wrapper around `@mnemonic/core` WASM `sign_cose_payload` / `sign_challenge`), `keypair.ts` (Keypair JSON parse/serialize/generate via WASM `generate_keypair`), `errors.ts` (typed error hierarchy + redaction helpers), `types.ts` (public TS types). `index.ts` re-exports the public surface.
+- `packages/sdk/` — `@mnemonik-xyz/sdk` source. Modules: `client.ts` (MnemonikClient + 5 tool methods), `oauth.ts` (PKCE helper + interactive/headless modes), `signer.ts` (`Signer` interface + `LocalSigner` impl), `cose.ts` (thin wrapper around `@mnemonic/core` WASM `sign_cose_payload` / `sign_challenge`), `keypair.ts` (Keypair JSON parse/serialize/generate via WASM `generate_keypair`), `errors.ts` (typed error hierarchy + redaction helpers), `types.ts` (public TS types). `index.ts` re-exports the public surface.
 - `packages/cli/` — `@mnemonik-xyz/cli` source. Modules: `bin/mnemonic.ts` (binary entrypoint), `commands/{init,login,sign,recall,verify,whoami,prove,identity}.ts`, `output.ts` (TTY-aware formatter), `config.ts` (`~/.mnemonic/` paths + persistence with proper file-mode enforcement), `errors.ts`.
 
 **Modified files (server side — Decisions 5 + 7):**
@@ -105,7 +105,7 @@ This is the same `/api/sign-callback` endpoint the webapp uses; the only differe
 
 ### Shared Resources
 
-**SDK runtime — none.** Stateless — `MnemonicClient` instances hold `{baseUrl, jwt, signer}` only. Multiple clients share nothing. Native `fetch`, no connection pool managed by SDK. WASM module is loaded once per JS runtime (cached by the loader).
+**SDK runtime — none.** Stateless — `MnemonikClient` instances hold `{baseUrl, jwt, signer}` only. Multiple clients share nothing. Native `fetch`, no connection pool managed by SDK. WASM module is loaded once per JS runtime (cached by the loader).
 
 **CLI runtime — none.** One-shot invocation: read config, do one HTTP exchange, print, exit.
 
@@ -155,7 +155,7 @@ interface Signer {
 
 Phase 1 ships `LocalSigner`, which holds the secret in memory and signs by calling WASM `sign_challenge(keypair_json, bytes)` — that's the existing WASM export for raw Ed25519 signatures over arbitrary byte payloads (NOT to be confused with `sign_cose_payload`, which wraps server-canonical-CBOR in a COSE_Sign1 envelope and is used in the sign-flow only).
 
-Future `TurnkeySigner` (Phase 1.5), `WebAuthnSigner` (Phase 2) are drop-in replacements without API change. `MnemonicClient` accepts `signer: Signer` in its constructor; never inspects the secret directly.
+Future `TurnkeySigner` (Phase 1.5), `WebAuthnSigner` (Phase 2) are drop-in replacements without API change. `MnemonikClient` accepts `signer: Signer` in its constructor; never inspects the secret directly.
 
 ### Decision 5: OAuth — create redirect-URI allowlist (it does not exist today) including loopback for CLI
 
@@ -255,7 +255,7 @@ export interface SignerInterface {
   sign(bytes: Uint8Array): Promise<Uint8Array>;
 }
 
-export interface MnemonicClientConfig {
+export interface MnemonikClientConfig {
   baseUrl: string;
   signer: SignerInterface;
   jwt?: string;
@@ -376,7 +376,7 @@ Unit + integration suites on **Node 20, Node 22, Bun latest, Deno 1.40+** in CI.
 |---|---|---|---|
 | `wasm-pack` target output breaks under one of Node 20 / Node 22 / Bun / Deno | High | High (SDK dead) | Task 1's smoke test is the gate. Fallback: ship two builds (`pkg-web` + `pkg-nodejs`) with `package.json` conditional exports. |
 | `crypto.subtle.sign({name:'Ed25519'})` not implemented in older Cloudflare Workers / Deno | Medium | Medium | Lazy-load `@noble/ed25519` (12KB) in `LocalSigner.sign()` if `subtle.sign` rejects with `NotSupportedError`. |
-| User runs `mnemonic init` after using webapp → mismatched identities → silent failure on first `sign` | High | Medium | Decision 7's bootstrap-ticket flow makes this an explicit, documented step. `mnemonic init` checks for existing webapp use via a one-line tooltip in `--help` ("Used Mnemonic in a browser? Run `mnemonic identity import --ticket` instead."). |
+| User runs `mnemonic init` after using webapp → mismatched identities → silent failure on first `sign` | High | Medium | Decision 7's bootstrap-ticket flow makes this an explicit, documented step. `mnemonic init` checks for existing webapp use via a one-line tooltip in `--help` ("Used Mnemonik in a browser? Run `mnemonic identity import --ticket` instead."). |
 | OAuth loopback redirect blocked by corporate firewall / strict no-localhost-http policy | Low | High for affected users | Headless `--token` fallback documented. Webapp's `/install` page can show a "copy JWT for CLI" button (longer-lived ticket, ~15 min) for pasting — backlog if reports come in. |
 | 442KB WASM bloats SDK install | Medium | Low | CI bundle-size budget (≤500KB SDK, ≤200KB CLI). Swap to `@noble/curves` listed in backlog. |
 | Server-side `BootstrapTickets` LRU evicts an in-flight ticket if 100+ users issue simultaneously | Low | Medium | Eviction returns 410 Gone — user retries. If real, raise the cap or move to Redis. Phase 1 in-memory is fine. |
@@ -479,9 +479,9 @@ Convert repo root `package.json` to an npm workspace including `packages/*` and 
 - Files to modify: `package.json` (root), `webapp/scripts/build-wasm.sh`, `packages/sdk/package.json`, `packages/cli/package.json`, `packages/sdk/scripts/build-wasm.sh`.
 - Files to read: `webapp/package.json`, `webapp/scripts/build-wasm.sh`, `core/Cargo.toml`, `core/src/wasm/mod.rs`, wasm-pack docs.
 
-#### Task 2: SDK core — `MnemonicClient` + `Signer` interface + `LocalSigner` + `Keypair` + contract suite
+#### Task 2: SDK core — `MnemonikClient` + `Signer` interface + `LocalSigner` + `Keypair` + contract suite
 
-Implement the SDK's stateless client surface: `MnemonicClient` class with HTTP-based methods for the 5 MCP tools (sign always handles pending-bundle path, no inline assumption), `Signer` interface, `LocalSigner` impl using WASM `sign_challenge` for raw Ed25519, `Keypair` helpers (generate, fromJSON, toJSON via WASM `export_keypair_json`/`import_keypair_json`), public TS types per § Data Models. Includes the `runSignerContract(signer)` abstract test suite that future signer impls must pass. No OAuth code in this task — that lives in Task 3.
+Implement the SDK's stateless client surface: `MnemonikClient` class with HTTP-based methods for the 5 MCP tools (sign always handles pending-bundle path, no inline assumption), `Signer` interface, `LocalSigner` impl using WASM `sign_challenge` for raw Ed25519, `Keypair` helpers (generate, fromJSON, toJSON via WASM `export_keypair_json`/`import_keypair_json`), public TS types per § Data Models. Includes the `runSignerContract(signer)` abstract test suite that future signer impls must pass. No OAuth code in this task — that lives in Task 3.
 
 - Skill: `code-writing`
 - Reviewers: code-reviewer, security-auditor, test-reviewer
@@ -491,7 +491,7 @@ Implement the SDK's stateless client surface: `MnemonicClient` class with HTTP-b
 
 #### Task 3: SDK OAuth — `buildAuthorizeUrl`, `exchangeCodeForToken`, headless mode
 
-Implement OAuth 2.1 + PKCE primitives in `packages/sdk/src/oauth.ts`. PKCE verifier+challenge via `crypto.subtle.digest`. State token via `crypto.getRandomValues`. State+verifier+redirect_uri stored together in a Map for matching during code exchange. Headless mode = `MnemonicClient({jwt})` constructor accepts pre-issued JWT directly. No `node:http` server here — that's CLI's responsibility.
+Implement OAuth 2.1 + PKCE primitives in `packages/sdk/src/oauth.ts`. PKCE verifier+challenge via `crypto.subtle.digest`. State token via `crypto.getRandomValues`. State+verifier+redirect_uri stored together in a Map for matching during code exchange. Headless mode = `MnemonikClient({jwt})` constructor accepts pre-issued JWT directly. No `node:http` server here — that's CLI's responsibility.
 
 - Skill: `code-writing`
 - Reviewers: code-reviewer, security-auditor, test-reviewer
@@ -556,7 +556,7 @@ Build mock MCP server in `packages/sdk/test/mock-server.ts` covering `/mcp`, `/o
 
 #### Task 9: Documentation — SDK README, CLI README, JSDoc, repo-root pointer
 
-`packages/sdk/README.md` (5-line quick-start, public API reference, runtime-target table, link to backlog), `packages/cli/README.md` (command reference, examples, exit-code table, smoke checklist link), JSDoc on all `MnemonicClient` methods + `Signer` interface (rendered to `.d.ts`). Repo-root `README.md` adds a "Programmatic access" section linking to both packages. `packages/cli/SMOKE.md` with the manual smoke checklist.
+`packages/sdk/README.md` (5-line quick-start, public API reference, runtime-target table, link to backlog), `packages/cli/README.md` (command reference, examples, exit-code table, smoke checklist link), JSDoc on all `MnemonikClient` methods + `Signer` interface (rendered to `.d.ts`). Repo-root `README.md` adds a "Programmatic access" section linking to both packages. `packages/cli/SMOKE.md` with the manual smoke checklist.
 
 - Skill: `documentation-writing`
 - Reviewers: documentation-reviewer

@@ -1,7 +1,7 @@
-# Mnemonic Protocol — Payment Surface Report
+# Mnemonik Protocol — Payment Surface Report
 
 **Scope:** every place a payment is defined, gated, settled, or accounted for in
-the Mnemonic codebase, with exact `path:line` references, flow diagrams, and a
+the Mnemonik codebase, with exact `path:line` references, flow diagrams, and a
 critical assessment of the API-key model and overall *universality* for
 consumers (especially EVM/Arc consumers like Arco).
 
@@ -178,9 +178,9 @@ flowchart LR
 ## 3. "API keys, really?" — critical assessment
 
 Yes — and your instinct is right. The `balance` rail (`mnm_` keys) is the
-weakest, least "Mnemonic-native" part of the payment design. Specifics:
+weakest, least "Mnemonik-native" part of the payment design. Specifics:
 
-1. **It duplicates an identity the protocol already has.** Every Mnemonic
+1. **It duplicates an identity the protocol already has.** Every Mnemonik
    instance has an Ed25519 keypair and a `did:sol:…` (`mnemonic_whoami`).
    Introducing a *separate* `mnm_` bearer secret (`create_api_key`,
    `mcp/src/payment.rs:371`) means two parallel identity systems — a
@@ -215,7 +215,7 @@ against), not a Web2 API key. x402 should be the default agent path.
 
 | Gap | Today | Why it hurts a consumer |
 |---|---|---|
-| **Single chain** | Settlement only on **Solana** (`verify_usdc_transfer` over `&SolanaClient`, `mcp/src/payment.rs:295`) | An Arc/EVM consumer (Arco) lives in **Arc USDC**. To pay Mnemonic it must hold **Solana USDC** + a Solana signer — a second wallet/rail. |
+| **Single chain** | Settlement only on **Solana** (`verify_usdc_transfer` over `&SolanaClient`, `mcp/src/payment.rs:295`) | An Arc/EVM consumer (Arco) lives in **Arc USDC**. To pay Mnemonik it must hold **Solana USDC** + a Solana signer — a second wallet/rail. |
 | **Single asset** | Only **USDC** at one mint (`config.rs:151`) | No native token, no EURC, no other stablecoin, no credits. |
 | **Single recipient** | One operator `TREASURY_PUBKEY` (`config.rs:150`) | No per-tenant/per-app routing, no revenue split, no marketplace. |
 | **x402 network unenforced** | `X402PaymentProof.network` parsed but **not inspected** (`payment.rs:38-42`) | Network field is decorative; verification is implicitly whatever Solana RPC is configured — no EVM x402 facilitator. |
@@ -223,7 +223,7 @@ against), not a Web2 API key. x402 should be the default agent path.
 | **No delegated/sponsored pay** | Caller must pay directly | No "operator sponsors, meters back via app" primitive — the exact thing Arco needs to keep users on one rail. |
 
 **Net:** for an EVM consumer the cleanest integration today is *operator-fronted*
-(the app's backend holds the Mnemonic relationship and pays Solana-side, users
+(the app's backend holds the Mnemonik relationship and pays Solana-side, users
 stay on Arc) — which works, but the protocol offers no first-class primitive for
 it, and no EVM-native settlement path.
 
@@ -267,7 +267,7 @@ it, and no EVM-native settlement path.
 
 ---
 
-## 7. Can Mnemonic be non-custodial? (analysis)
+## 7. Can Mnemonik be non-custodial? (analysis)
 
 **Short answer: yes — the *payment* layer can be made non-custodial today, and
 the *anchoring* layer can be made trust-minimized but not fully trustless
@@ -355,7 +355,7 @@ flowchart TD
 
 > Bottom line: **x402 + EVM settlement + on-chain allowance gets you a defensible
 > "non-custodial payments" story** without sacrificing the operator-signed
-> anchoring that makes Mnemonic easy to consume. Fully trustless *anchoring*
+> anchoring that makes Mnemonik easy to consume. Fully trustless *anchoring*
 > (Level 3) is possible but is a different product with a much heavier client.
 
 > **Correction (post-review).** §7.3/§7.4 understated authorship. **User-signing

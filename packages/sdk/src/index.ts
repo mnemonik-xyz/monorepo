@@ -1,7 +1,7 @@
 // @mnemonik-xyz/sdk — public entrypoint.
 //
 // Public API surface (Phase 1, Wave 1+2):
-//   - MnemonicClient (5 tool methods, signMemory uses pending-bundle flow)
+//   - MnemonikClient (5 tool methods, signMemory uses pending-bundle flow)
 //   - Signer interface + LocalSigner
 //   - Keypair helpers
 //   - Typed error classes + redactJWT helper
@@ -12,7 +12,7 @@
 // re-exported. The CLI imports only from this barrel.
 
 // ── T2: client + signer + keypair + types + errors ──────────────────────────
-export { MnemonicClient } from "./client.js";
+export { MnemonikClient } from "./client.js";
 export { parseOperatorList, connectOperator, verifyOperatorIdentity, OPERATOR_PROOF_DOMAIN } from "./operators.js";
 export type { OperatorConfig, OperatorList, OperatorProofOptions } from "./operators.js";
 export { ArweaveDiscoverySource, DiscoveryError } from "./discovery.js";
@@ -31,7 +31,7 @@ export {
   AuthError,
   IdentityRequiresKeystore,
   IntegrityError,
-  MnemonicError,
+  MnemonikError,
   ServerError,
   UserError,
   redactJWT,
@@ -53,7 +53,7 @@ export type {
   Embedder,
   GrantEntry,
   KeypairProvider,
-  MnemonicClientConfig,
+  MnemonikClientConfig,
   OpenMemoryResult,
   ProveResult,
   RecallA2AContextOptions,
@@ -79,7 +79,7 @@ export type {
 export { prepareFeedback, verifyFeedbackDocument, FeedbackError } from "./erc8004/feedback.js";
 export { checkSelfPromotion } from "./erc8004/self-promotion.js";
 export type {
-  MnemonicFeedbackV1,
+  MnemonikFeedbackV1,
   PreparedFeedback,
   PrepareFeedbackInput,
   PrepareFeedbackOpts,

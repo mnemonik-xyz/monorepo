@@ -564,7 +564,7 @@ mod tests {
             slugify("Multiple---separators__here"),
             "multiple-separators-here"
         );
-        assert_eq!(slugify("Mnemonic v2: the Ledger"), "mnemonic-v2-the-ledger");
+        assert_eq!(slugify("Mnemonik v2: the Ledger"), "mnemonik-v2-the-ledger");
     }
 
     #[test]

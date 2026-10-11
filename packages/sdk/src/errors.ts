@@ -62,18 +62,18 @@ export function redactJWT(input: unknown): string {
 
 /**
  * Base class for every error thrown by the SDK. Consumers can
- * `instanceof MnemonicError` to catch any SDK-originated failure.
+ * `instanceof MnemonikError` to catch any SDK-originated failure.
  *
  * @param message - Human-readable message; runs through {@link redactJWT}
  *                  before being stored on the `Error`.
  * @param cause   - Optional underlying cause (Error or any value). Not
  *                  redacted — developer-facing diagnostic chain only.
  */
-export class MnemonicError extends Error {
+export class MnemonikError extends Error {
   readonly cause?: unknown;
   constructor(message: string, cause?: unknown) {
     super(redactJWT(message));
-    this.name = "MnemonicError";
+    this.name = "MnemonikError";
     if (cause !== undefined) this.cause = cause;
   }
 }
@@ -85,7 +85,7 @@ export class MnemonicError extends Error {
  * @param message - Human-readable message (will be JWT-redacted).
  * @param cause   - Optional underlying cause.
  */
-export class AuthError extends MnemonicError {
+export class AuthError extends MnemonikError {
   constructor(message: string, cause?: unknown) {
     super(message, cause);
     this.name = "AuthError";
@@ -100,7 +100,7 @@ export class AuthError extends MnemonicError {
  * @param status  - Optional HTTP status code from the failing response.
  * @param cause   - Optional underlying cause.
  */
-export class ServerError extends MnemonicError {
+export class ServerError extends MnemonikError {
   readonly status?: number;
   constructor(message: string, status?: number, cause?: unknown) {
     super(message, cause);
@@ -117,7 +117,7 @@ export class ServerError extends MnemonicError {
  * @param message - Human-readable message (will be JWT-redacted).
  * @param cause   - Optional underlying cause.
  */
-export class IntegrityError extends MnemonicError {
+export class IntegrityError extends MnemonikError {
   constructor(message: string, cause?: unknown) {
     super(message, cause);
     this.name = "IntegrityError";
@@ -131,7 +131,7 @@ export class IntegrityError extends MnemonicError {
  * @param message - Human-readable message (will be JWT-redacted).
  * @param cause   - Optional underlying cause.
  */
-export class UserError extends MnemonicError {
+export class UserError extends MnemonikError {
   constructor(message: string, cause?: unknown) {
     super(message, cause);
     this.name = "UserError";

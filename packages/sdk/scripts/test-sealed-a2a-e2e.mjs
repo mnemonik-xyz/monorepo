@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {MnemonicClient,Keypair,LocalSigner} from '../dist/index.js';
+import {MnemonikClient,Keypair,LocalSigner} from '../dist/index.js';
 const v=JSON.parse(readFileSync(new URL('../test/fixtures/sealed-a2a.json',import.meta.url),'utf8'));
 const remote=process.env.A2A_GATEWAY_URL;
-const make=(identity,jwt,offline=false)=>{const kp=new Keypair(identity);const c=new MnemonicClient({baseUrl:process.env.A2A_TEST_URL,signer:new LocalSigner(kp),...(jwt?{jwt}:{}),a2aGatewayUrl:remote,a2aIndexUrl:`${remote}/graphql`,fetch:async(url,init)=>{if(offline)assert(!String(url).startsWith(process.env.A2A_TEST_URL),'restore contacted MCP');if(String(url).startsWith(remote))assert(!new Headers(init?.headers).has('authorization'));return fetch(url,init);}});c.setKeypair(kp);return c;};
+const make=(identity,jwt,offline=false)=>{const kp=new Keypair(identity);const c=new MnemonikClient({baseUrl:process.env.A2A_TEST_URL,signer:new LocalSigner(kp),...(jwt?{jwt}:{}),a2aGatewayUrl:remote,a2aIndexUrl:`${remote}/graphql`,fetch:async(url,init)=>{if(offline)assert(!String(url).startsWith(process.env.A2A_TEST_URL),'restore contacted MCP');if(String(url).startsWith(remote))assert(!new Headers(init?.headers).has('authorization'));return fetch(url,init);}});c.setKeypair(kp);return c;};
 const context='sql-loss-sealed-chain';const recipients=[{card:v.card,trustedCardSigner:v.reader.pubkey_base58}];
 if(process.argv[2]==='append'){
  const expected=JSON.parse(process.env.A2A_EXPECTED);const c=make(v.author,process.env.A2A_AUTHOR_JWT);const r=await c.restoreA2AContext(context,{expectedAuthors:[v.author.pubkey_base58],heads:[expected.head]});assert.equal(r.completeToHeads,true);await c.attestA2AMessage({...v.payload,messageId:'after-sql-loss',contextId:context},context,{prevId:expected.head,sealed:{recipients}});console.log('chain continuation with empty MCP receipts passed');

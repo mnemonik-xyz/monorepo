@@ -111,10 +111,10 @@ export interface EnsureResult {
 // README content (verbatim per tech-spec §Data Models)
 // ---------------------------------------------------------------------------
 
-const README_CONTENT = `This directory holds your Mnemonic identity and session state.
+const README_CONTENT = `This directory holds your Mnemonik identity and session state.
 
   identity.json — your Ed25519 public key (private key is in the OS keychain).
-  token.json    — your current JWT for the Mnemonic webapp (regenerated on \`mnemonic login\`).
+  token.json    — your current JWT for the Mnemonik webapp (regenerated on \`mnemonic login\`).
 
 If you back up this folder, your private key is NOT included — back up via
 \`mnemonic identity push-to-webapp\` or your OS keychain export.

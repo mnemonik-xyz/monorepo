@@ -41,7 +41,7 @@ Identity model: one Ed25519 keypair per user across all clients. Cloud-tier sign
   - `embed/transformers-embedder.ts` — `transformers.js` with `Xenova/all-MiniLM-L6-v2` (384 dim, ~25MB). Lazy-loaded in a Web Worker on first sign. Implements TS `Embedder` shape mirroring `core/src/embed/mod.rs::Embedder`. Vector dim 384 must match `mcp/src/config.rs` default — golden-fixture test enforces.
   - `compress/turboquant.ts` — calls `@mnemonic/core` WASM `compress_embedding(emb, bits=4)`.
   - `sign/cose.ts` — calls WASM `to_canonical_cbor`, `blake3_hash`, `sign_cose_payload`. Identical bytes to server (golden-fixture parity).
-  - `sync/cloud-client.ts` — talks to existing MCP HTTP server using `MnemonicClient` from SDK. Cloud-mode sign uses deferred-signing flow (`POST /mcp` `mnemonic_sign_memory` returns `correlation_id` → `POST /api/sign-callback` with COSE bytes).
+  - `sync/cloud-client.ts` — talks to existing MCP HTTP server using `MnemonikClient` from SDK. Cloud-mode sign uses deferred-signing flow (`POST /mcp` `mnemonic_sign_memory` returns `correlation_id` → `POST /api/sign-callback` with COSE bytes).
   - `chat/` — `ChatAdapter` interface (see below) + adapter registry + serializer (chat → `{messages: [{role, content, ts}], meta: {model, source, url, chat_id}}`).
 - `src/auth/`:
   - `google-oauth.ts` — `chrome.identity.launchWebAuthFlow` against `GET /oauth/google/start`. PKCE S256. Returns server-issued JWT (existing `aud=mcp` shape, plus optional `google_sub` claim).

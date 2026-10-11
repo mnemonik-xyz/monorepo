@@ -18,13 +18,13 @@ export default function SiteHeader() {
         <Link
           to="/"
           className="group flex items-center gap-2 font-mono text-xs uppercase tracking-[0.18em] text-text-primary"
-          aria-label="Mnemonic Protocol — home"
+          aria-label="Mnemonik Protocol — home"
         >
           <span
             aria-hidden="true"
             className="inline-block h-1.5 w-1.5 rounded-full bg-accent-primary shadow-[0_0_12px_var(--color-accent-primary)] transition-transform group-hover:scale-125"
           />
-          <span className="font-semibold">Mnemonic</span>
+          <span className="font-semibold">Mnemonik</span>
           <span className="text-text-muted/60">/ protocol</span>
         </Link>
 

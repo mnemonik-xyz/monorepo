@@ -3,12 +3,12 @@
   "round": 1,
   "reviewer": "code-reviewer",
   "status": "approved",
-  "summary": "Task 2 implements MnemonicClient + Signer interface + LocalSigner + Keypair + COSE wrapper + redacting errors per Decisions 4, 7, 10, 14. All 46 unit tests pass (18 client + 9 signer + 6 signer-contract + 7 keypair + 6 cose). Implementation is pure ESM, zero `node:*` imports in src, capability-auth on /api/sign-callback verified, JWT redaction works on JWT-shape strings, LocalSigner correctly uses sign_challenge (raw Ed25519) not sign_cose_payload. Commits 720877b. Several minor observations below — none blocking.",
+  "summary": "Task 2 implements MnemonikClient + Signer interface + LocalSigner + Keypair + COSE wrapper + redacting errors per Decisions 4, 7, 10, 14. All 46 unit tests pass (18 client + 9 signer + 6 signer-contract + 7 keypair + 6 cose). Implementation is pure ESM, zero `node:*` imports in src, capability-auth on /api/sign-callback verified, JWT redaction works on JWT-shape strings, LocalSigner correctly uses sign_challenge (raw Ed25519) not sign_cose_payload. Commits 720877b. Several minor observations below — none blocking.",
   "findings": [
     {
       "severity": "minor",
       "category": "architecture",
-      "issue": "MnemonicClient requires BOTH `signer` (in constructor) AND `keypair` (via `setKeypair()`) for signMemory. The Signer abstraction (Decision 4) cannot supply keypair JSON since it only exposes `pubkey` + `sign(bytes)`. So signMemory tightly couples to LocalSigner-style keypair JSON via the side-channel `setKeypair` call. Future TurnkeySigner/WebAuthnSigner won't have keypair_json — they'll need a different code path for COSE signing entirely (e.g. signer.signCose(payload)). The Phase 1 design is OK for LocalSigner only, but the comment in client.ts:55-60 acknowledges the wart.",
+      "issue": "MnemonikClient requires BOTH `signer` (in constructor) AND `keypair` (via `setKeypair()`) for signMemory. The Signer abstraction (Decision 4) cannot supply keypair JSON since it only exposes `pubkey` + `sign(bytes)`. So signMemory tightly couples to LocalSigner-style keypair JSON via the side-channel `setKeypair` call. Future TurnkeySigner/WebAuthnSigner won't have keypair_json — they'll need a different code path for COSE signing entirely (e.g. signer.signCose(payload)). The Phase 1 design is OK for LocalSigner only, but the comment in client.ts:55-60 acknowledges the wart.",
       "file": "packages/sdk/src/client.ts:54-91",
       "recommendation": "Phase 1.5+: extend Signer interface with an optional `signCose(payload: Uint8Array): Promise<Uint8Array>` method (or expose keypair-only impls via a sub-interface). For Phase 1 the current dual-bind pattern is acceptable but document the limitation in JSDoc on `setKeypair`."
     },
@@ -22,7 +22,7 @@
     {
       "severity": "minor",
       "category": "error_handling",
-      "issue": "MnemonicError stores `cause` verbatim (line 50); cause objects can carry sensitive info (response bodies with JWTs, etc.) into `error.cause` that consumers might `console.error()`. The `message` is redacted but the cause is not. At client.ts:375 `new ServerError(..., res.status, e)` passes the JSON parse error as cause, and that error may quote the malformed body containing a JWT.",
+      "issue": "MnemonikError stores `cause` verbatim (line 50); cause objects can carry sensitive info (response bodies with JWTs, etc.) into `error.cause` that consumers might `console.error()`. The `message` is redacted but the cause is not. At client.ts:375 `new ServerError(..., res.status, e)` passes the JSON parse error as cause, and that error may quote the malformed body containing a JWT.",
       "file": "packages/sdk/src/errors.ts:46-51",
       "recommendation": "Either (a) document in JSDoc that `cause` may contain unredacted detail and is for developers, OR (b) shallowly stringify-and-redact cause's message before storing. Decision 10 explicitly says 'cause chain' is developer-facing, so option (a) is sufficient — add a one-line JSDoc note on the cause field."
     },
@@ -43,7 +43,7 @@
     {
       "severity": "minor",
       "category": "consistency",
-      "issue": "redactJWT is invoked on the message via the base MnemonicError constructor, AND ALSO pre-applied in `readBodySafely` at client.ts:447. Double redaction is idempotent so this is harmless but slightly redundant. The intent (defense in depth) is fine.",
+      "issue": "redactJWT is invoked on the message via the base MnemonikError constructor, AND ALSO pre-applied in `readBodySafely` at client.ts:447. Double redaction is idempotent so this is harmless but slightly redundant. The intent (defense in depth) is fine.",
       "file": "packages/sdk/src/client.ts:444-451",
       "recommendation": "Add a one-line comment in `readBodySafely` clarifying that the second redaction is intentional defense-in-depth so future maintainers don't remove it."
     }

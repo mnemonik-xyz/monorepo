@@ -1,6 +1,6 @@
 # Protocol Integrations
 
-Status of Mnemonic's integration with external multi-agent protocols. Source of truth for which bindings exist, which are planned, and which are deliberately deferred.
+Status of Mnemonik's integration with external multi-agent protocols. Source of truth for which bindings exist, which are planned, and which are deliberately deferred.
 
 ---
 
@@ -8,15 +8,15 @@ Status of Mnemonic's integration with external multi-agent protocols. Source of 
 
 The protocol-integration roadmap exists to deliver one positioning, locked in 2026-05-01:
 
-> **Mnemonic is verifiable memory for trustless agents.**
+> **Mnemonik is verifiable memory for trustless agents.**
 
-The trustless-agent stack as it exists in May 2026 (A2A v1.0.0-rc + ERC-8004 mainnet + TEE / crypto-economic validators) is missing the layer that proves what an agent claims to remember. Mnemonic fills that gap. Full rationale, gap analysis, three-regime decision matrix, and what the positioning forecloses live in [`work/a2a-bridge/research/positioning-trustless-agents.md`](../../../../work/a2a-bridge/research/positioning-trustless-agents.md). That document is the strategic charter for everything in the table below.
+The trustless-agent stack as it exists in May 2026 (A2A v1.0.0-rc + ERC-8004 mainnet + TEE / crypto-economic validators) is missing the layer that proves what an agent claims to remember. Mnemonik fills that gap. Full rationale, gap analysis, three-regime decision matrix, and what the positioning forecloses live in [`work/a2a-bridge/research/positioning-trustless-agents.md`](../../../../work/a2a-bridge/research/positioning-trustless-agents.md). That document is the strategic charter for everything in the table below.
 
 ---
 
 ## TL;DR
 
-Today the only wire surface is Mnemonic's own MCP tools (5 of them). No protocol bindings ship yet. The active backlog item is the **A2A bridge** (`work/a2a-bridge/`); the next is the **ERC-8004 follow-on** detailed in `work/a2a-bridge/backlog.md`. Both are required to land the positioning above; they are sequenced together because they share substrate.
+Today the only wire surface is Mnemonik's own MCP tools (5 of them). No protocol bindings ship yet. The active backlog item is the **A2A bridge** (`work/a2a-bridge/`); the next is the **ERC-8004 follow-on** detailed in `work/a2a-bridge/backlog.md`. Both are required to land the positioning above; they are sequenced together because they share substrate.
 
 ---
 
@@ -37,9 +37,9 @@ Today the only wire surface is Mnemonic's own MCP tools (5 of them). No protocol
 
 ## A2A bridge (active)
 
-A2A is Google's Agent2Agent protocol — JSON-RPC + SSE over HTTP, currently v1.0.0-rc, with `Task` / `Message` / `Part` / `Artifact` / `AgentCard` as core types and AgentCard JWS signing for producer identity. The protocol explicitly defers memory ("agents collaborate without needing access to each other's internal state, memory, or tools"), which is exactly the gap Mnemonic fills.
+A2A is Google's Agent2Agent protocol — JSON-RPC + SSE over HTTP, currently v1.0.0-rc, with `Task` / `Message` / `Part` / `Artifact` / `AgentCard` as core types and AgentCard JWS signing for producer identity. The protocol explicitly defers memory ("agents collaborate without needing access to each other's internal state, memory, or tools"), which is exactly the gap Mnemonik fills.
 
-**Why it matters for Mnemonic.** Six of eleven `docs/usecases/*.md` are A2A-shaped (`task-memory-ledger`, `shared-memory-layer`, `shared-project-memory-namespace`, `artifact-attestation-service`, `provenance-attestation-layer`, `reliability-oracle-for-orchestration`). Without a bridge, each integrator hand-rolls the mapping from A2A wire types to `MEMORY_V1` and maintains it across A2A versions. A first-class bridge converts the whitepaper's positioning sentence ("A2A makes agents interoperable in motion; Mnemonic makes them coherent over time") from prose into a working integration surface, and creates a defensible double moat — signed memory + native multi-agent protocol binding — that no current memory competitor (letta / zep / mem0 / cognee) holds.
+**Why it matters for Mnemonik.** Six of eleven `docs/usecases/*.md` are A2A-shaped (`task-memory-ledger`, `shared-memory-layer`, `shared-project-memory-namespace`, `artifact-attestation-service`, `provenance-attestation-layer`, `reliability-oracle-for-orchestration`). Without a bridge, each integrator hand-rolls the mapping from A2A wire types to `MEMORY_V1` and maintains it across A2A versions. A first-class bridge converts the whitepaper's positioning sentence ("A2A makes agents interoperable in motion; Mnemonik makes them coherent over time") from prose into a working integration surface, and creates a defensible double moat — signed memory + native multi-agent protocol binding — that no current memory competitor (letta / zep / mem0 / cognee) holds.
 
 **Surface (planned).** Three layers:
 - Schemas in `mnemonic-core` (`core/src/codec/a2a/`).
@@ -60,7 +60,7 @@ When MCP server A delegates a tool call to MCP server B on the user's behalf, to
 
 **Schema sketch.** `MCP_DELEGATION_V1 = {caller_pubkey, callee_pubkey, tool_name, request_hash, response_hash, started_at, completed_at, status}`. Adapter pattern reuses `mnemonic-a2a` 70/30 (most of the lineage / canonicalization plumbing transfers).
 
-**Why it matters.** Closes the audit gap for "agent toolchains where one MCP server forwards calls to another" — currently only the outermost server's logs exist. Mnemonic itself becomes a first-class delegation target ("agent X called `mnemonic_sign_memory` Y times this session"). Differentiates against generic MCP registries (smithery etc.): they list servers, we attest interactions between them.
+**Why it matters.** Closes the audit gap for "agent toolchains where one MCP server forwards calls to another" — currently only the outermost server's logs exist. Mnemonik itself becomes a first-class delegation target ("agent X called `mnemonic_sign_memory` Y times this session"). Differentiates against generic MCP registries (smithery etc.): they list servers, we attest interactions between them.
 
 ---
 
@@ -82,13 +82,13 @@ ERC-8004 is the on-chain trust layer designed to extend A2A. Three registries on
 - **Reputation Registry** — `giveFeedback` / `appendResponse` / `revokeFeedback` / `readAllFeedback` / `getSummary`; on-chain commits a hash, off-chain JSON carries the rich payload.
 - **Validation Registry** — `validationRequest` / `validationResponse` with `responseURI` + `responseHash` for off-chain attestations. Spec note: still under active update with the TEE community.
 
-**Why Mnemonic plugs in cleanly.** The Validation Registry is *literally designed* for off-chain signed attestations like Mnemonic's COSE_Sign1-over-deterministic-CBOR. Two existing validator categories are filling fast (TEE — Phala / Marlin; crypto-economic — staking-based). Mnemonic occupies a third, distinct trust category — **signed-memory** — that no current ERC-8004 participant holds. First-mover window is months, not years.
+**Why Mnemonik plugs in cleanly.** The Validation Registry is *literally designed* for off-chain signed attestations like Mnemonik's COSE_Sign1-over-deterministic-CBOR. Two existing validator categories are filling fast (TEE — Phala / Marlin; crypto-economic — staking-based). Mnemonik occupies a third, distinct trust category — **signed-memory** — that no current ERC-8004 participant holds. First-mover window is months, not years.
 
 **Four integration paths** (full detail in `work/a2a-bridge/backlog.md` § "ERC-8004 — Phase 2 of the bridge stack"):
 
-1. Mnemonic as a registered validator on the Validation Registry (validator-as-a-service).
-2. Mnemonic declared in agents' own registration files (minimal binding).
-3. Mnemonic-attested entries in the Reputation Registry (long-lived signing identity behind every feedback).
+1. Mnemonik as a registered validator on the Validation Registry (validator-as-a-service).
+2. Mnemonik declared in agents' own registration files (minimal binding).
+3. Mnemonik-attested entries in the Reputation Registry (long-lived signing identity behind every feedback).
 4. Three-way identity reconciliation via `did:mnemonic:` — closes the chain `tokenId → registration file → AgentCard URL → x-mnemonic.ed25519_pubkey`.
 
 **Hard prerequisite — Solana decoupling.** Path-b ("ship ERC-8004 while keeping Solana SPL Memo as the only anchor") is rejected because it deepens the SVM dependency the protocol is trying to escape (`work/mnemonic-cli/backlog.md` Phase 3). The chain-pluggable anchor work — narrowed to "Phase 3α", anchor-only, off-chain envelope alg unchanged — must land *during or before* erc8004-1. This is treated as a sequencing constraint, not a "maybe", and is recorded in `work/a2a-bridge/decisions.md`.
@@ -115,7 +115,7 @@ Six integration surfaces, ordered by effort, in the proposal:
 2. **First-class Memory Provider** (1–2 wks, upstream PR) — the strategic move; Mnemonik becomes the 8th provider, the only one with COSE_Sign1 signatures + Arweave durability.
 3. **`hermes-mnemonik` plugin** (1 wk) — CLI re-exports + lifecycle hooks (`on_message_complete` auto-attest, `on_session_start` recall).
 4. **RL trajectory attestation** (1–2 wks) — ShareGPT export with Solana tx + Arweave tx + producing-agent DID per turn; the headline collab — "verifiable RL datasets" as a dataset-provenance pitch for Nous's open-training ethos.
-5. **API-server middleware** (2–3 days) — `X-Mnemonic-Attest` header on the OpenAI-compatible endpoint; every downstream client (Open WebUI, LibreChat, NextChat, ChatBox) inherits attestation transparently.
+5. **API-server middleware** (2–3 days) — `X-Mnemonik-Attest` header on the OpenAI-compatible endpoint; every downstream client (Open WebUI, LibreChat, NextChat, ChatBox) inherits attestation transparently.
 6. **x402 as Hermes' agent-billing primitive** (longer horizon) — separate proposal; agents paying agents in stablecoins with payment-gated tool execution.
 
 Recommended sequencing in the proposal: MCP registration → RL attestation demo with Nous → upstream Memory Provider PR → plugin + middleware bundle.

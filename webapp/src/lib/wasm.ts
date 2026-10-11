@@ -14,14 +14,14 @@
 
 // The published `mnemonic-core` package ships its own .d.ts which TypeScript
 // resolves via `node_modules/mnemonic-core/mnemonic_core.d.ts`. We re-export
-// it as `MnemonicWasm` so existing callsites that reference the type stay
+// it as `MnemonikWasm` so existing callsites that reference the type stay
 // compiling — and inheriting from the published types means any future
 // surface change in `core/pkg-web/` is caught at the webapp build boundary.
-export type MnemonicWasm = typeof import("mnemonic-core");
+export type MnemonikWasm = typeof import("mnemonic-core");
 
-let cached: Promise<MnemonicWasm> | null = null;
+let cached: Promise<MnemonikWasm> | null = null;
 
-export function loadWasm(): Promise<MnemonicWasm> {
+export function loadWasm(): Promise<MnemonikWasm> {
   if (cached) return cached;
   cached = (async () => {
     // `mnemonic-core` ships the wasm-pack `--target web` ES module. Vite

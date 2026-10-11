@@ -6,12 +6,12 @@ depends_on:
   - tasks/02-bind-canonical-client-signed-artifact.md
 ---
 
-# Bind the payer wallet to the authenticated Mnemonic subject
+# Bind the payer wallet to the authenticated Mnemonik subject
 
 ## Goal
 
 Replace the configured test payer wallet with a fresh wallet-signed challenge
-bound to the authenticated Mnemonic subject and the operation context.
+bound to the authenticated Mnemonik subject and the operation context.
 
 ## Scope
 

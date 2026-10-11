@@ -75,7 +75,7 @@ Assumes Turnkey adoption rate of 50% (LocalSigner free, Turnkey opt-in for custo
 | **A. Per-call USDC top-up** | $0.01/sign visible per call | Low (cognitive friction every action) | None — pay-as-you-go | Phase 1.5 `PAYMENT_MODE=balance` (already wired in `mcp/src/payment.rs`) |
 | **B. Subscription** ($5/mo for 500 signs) | "I subscribed, just works" | High | Medium (over-usage by power users absorbs margin) | Stripe + usage-tracking middleware (~3 days) |
 | **C. Free tier + paid upgrade** (50 free/mo, then $5/mo) | "Try free, pay when needed" | Medium | Medium | Both A + B + tier-tracking (~5 days) |
-| **D. Self-sovereign** (user pays Turnkey directly, Mnemonic charges only compute) | Cleaner separation | Variable per user | Low (no usage cost on operator) | Webapp UX to walk user through Turnkey signup + own Sub-Org (~4 days) |
+| **D. Self-sovereign** (user pays Turnkey directly, Mnemonik charges only compute) | Cleaner separation | Variable per user | Low (no usage cost on operator) | Webapp UX to walk user through Turnkey signup + own Sub-Org (~4 days) |
 | **E. LocalSigner free + Turnkey opt-in metered** | Default = free, custody-want users pay extra | High | Low | Phase 1.x ships LocalSigner+Turnkey side-by-side; Turnkey signs gated through metered endpoint |
 | **F. Operator absorbs everything** | "It's free!" | High | **Catastrophic at scale** | Trivial (do nothing) — only viable in beta/hackathon |
 
@@ -180,7 +180,7 @@ $5/mo entry, no $0 tier. Stripe + waitlist before launch.
 
 ### Self-sovereign (Option D from earlier)
 
-User brings own Turnkey Sub-Org, own Turbo credits, own Solana keypair. Mnemonic operator only charges for compute (server / RPC / monitoring) flat-fee.
+User brings own Turnkey Sub-Org, own Turbo credits, own Solana keypair. Mnemonik operator only charges for compute (server / RPC / monitoring) flat-fee.
 
 **Why we didn't pick as default:** UX is rough — multi-vendor signup, three account creations before first `sign`. Most users want hosted convenience.
 
@@ -222,11 +222,11 @@ User flagged interest in this — expanding to make it concrete.
 
 - **Privacy-sensitive companies** — law firms, healthcare orgs, financial services. Their data doesn't leave their VPC. Compliance: HIPAA, SOC2, GDPR data-residency.
 - **Research labs / universities** — IRB-protected research data, internal-only attestations.
-- **AI agent platforms** — companies building agentic products on top of Mnemonic want dedicated capacity, custom rate limits, no shared multi-tenancy noise.
+- **AI agent platforms** — companies building agentic products on top of Mnemonik want dedicated capacity, custom rate limits, no shared multi-tenancy noise.
 - **Crypto-native builders** — DAOs, web3 protocols. Want their own Solana keypair, treasury, no operator dependency.
 - **Sovereign deploys** — governments, NGOs. Independence from any single hosted operator.
 
-Enterprise self-host removes Mnemonic operator from the per-sign cost loop entirely. The customer runs the binary on their infra, brings their own Solana keypair / Turbo credits / optional Turnkey Org.
+Enterprise self-host removes Mnemonik operator from the per-sign cost loop entirely. The customer runs the binary on their infra, brings their own Solana keypair / Turbo credits / optional Turnkey Org.
 
 ### What's already built (Phase 1 ready)
 
@@ -260,7 +260,7 @@ Enterprise self-host removes Mnemonic operator from the per-sign cost loop entir
 | **Feature-gate** | Self-host has subset of features; paid tier unlocks (e.g., advanced auth, multi-region replication) | Clean upsell path | Forks the codebase psychologically; risks "open" reputation |
 | **Dual-license** | Apache-2.0 for non-commercial; commercial license required for revenue use | Standard for protocols (MongoDB AGPL → SSPL pattern) | Legal complexity; needs licensing infra |
 
-**Recommended for Phase 2:** **Apache-2.0 binary + paid support tier**. Customers can run free indefinitely. Mnemonic earns from:
+**Recommended for Phase 2:** **Apache-2.0 binary + paid support tier**. Customers can run free indefinitely. Mnemonik earns from:
 - **Hosted tier** — for customers who don't want to run infra (the $5/mo "Verifiable" tier)
 - **Enterprise support contracts** — $500–5K/mo per customer for SLA, custom integrations, migration assistance, security audits
 - **Custom development** — bespoke features funded by customer
@@ -269,12 +269,12 @@ This pattern works for: Postgres (community + enterprise support vendors), Hashi
 
 ### Operator → enterprise customer transition
 
-Some Mnemonic operators today (running `mnemonic-mcp` for their own AI agents) might want to graduate from "casual self-host" to "supported deployment". Phase 2 self-host doc + commercial license offer should make this explicit.
+Some Mnemonik operators today (running `mnemonic-mcp` for their own AI agents) might want to graduate from "casual self-host" to "supported deployment". Phase 2 self-host doc + commercial license offer should make this explicit.
 
 ### Open questions for enterprise self-host
 
 1. **License choice** — Apache-2.0 (permissive, fork-friendly) vs MIT (similar) vs AGPL (network-use copyleft, forces SaaS forks back). Tech-spec already says Apache-2.0; reaffirm.
-2. **Trademark policy** — can a fork call itself "Mnemonic"? Recommended: trademark the name, allow forks but require renaming. Standard for protocols.
+2. **Trademark policy** — can a fork call itself "Mnemonik"? Recommended: trademark the name, allow forks but require renaming. Standard for protocols.
 3. **Data export** — enterprise customer must be able to export all attestations as JSONL / SQL dump for audit / migration. Trivial via SQLite backup; should be one CLI command (`mnemonic-mcp dump`).
 4. **Multi-tenant within enterprise** — does a single enterprise deploy serve multiple internal teams? Already supported via `owner_pubkey` scoping; just needs documentation.
 5. **Federation** — can enterprise A's MCP server verify attestations issued by enterprise B's MCP server? YES — Arweave + Solana are global; cross-tenant verification is the protocol's strength. Needs explicit Phase 2 docs to highlight this.
@@ -360,7 +360,7 @@ These are the things that need proper deliberation before flipping the switch in
 9. **Demo vs product mode.** Hackathon demo: `STORAGE_MODE=full + PAYMENT_MODE=none + RATE_LIMIT=on` works for ~hour-long demo, $50 budget. Real product: requires PAYMENT_MODE=balance + treasury + monitoring + support docs.
 10. **Turnkey vendor cost passthrough vs absorption.** Even at "free LocalSigner" tier, if a free user opts to use Turnkey for recovery without paying, who eats the $0.001/sig? Current recommended hybrid forces paid tier for Turnkey use — locks the vendor cost into the paid line item. Alternative: free Turnkey for first N signs, then forced upgrade.
 11. **Self-sovereign escape hatch.** Can a user export their Turnkey-managed key to a `LocalSigner` profile and switch tiers retroactively? Turnkey supports export — need UX flow + tier-downgrade logic.
-12. **Enterprise self-host.** Companies running their own MCP server pay zero per-sign costs (their own keypair, their own Turbo credits, their own Turnkey Sub-Org). Mnemonic charges enterprise license per seat or contract-based. UX flow: docker-compose + config docs + support tier.
+12. **Enterprise self-host.** Companies running their own MCP server pay zero per-sign costs (their own keypair, their own Turbo credits, their own Turnkey Sub-Org). Mnemonik charges enterprise license per seat or contract-based. UX flow: docker-compose + config docs + support tier.
 
 ---
 

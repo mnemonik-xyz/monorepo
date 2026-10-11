@@ -24,7 +24,7 @@
       "title": "~/.mnemonic/ directory created with umask-dependent permissions, not hardcoded 0o700",
       "location": "core/src/identity/token_store.rs:159",
       "description": "fs::create_dir_all(parent) creates ~/.mnemonic/ using the process's umask. With a permissive umask (e.g., 0o000 or 0o002), the directory may be created world-readable (0o777 or 0o775), meaning other local users can list its contents and discover that token.json exists. The token file itself is protected by 0o600 and is unreadable by others. However, directory listing leaks metadata (filename, mtime).",
-      "impact": "Low: the token file contents are protected by 0o600. Only directory listing is exposed. On multi-user systems, this reveals that the user has a cached Mnemonic token. No credential content is exposed.",
+      "impact": "Low: the token file contents are protected by 0o600. Only directory listing is exposed. On multi-user systems, this reveals that the user has a cached Mnemonik token. No credential content is exposed.",
       "note": "ensure.rs has the same pattern (create_dir_all without explicit mode at line 107), making this a pre-existing codebase-wide pattern rather than a regression introduced by this task. The finding is recorded for completeness but is not blocking.",
       "recommended_fix": "After create_dir_all, set the directory permissions explicitly:\n#[cfg(unix)]\n{\n    use std::os::unix::fs::PermissionsExt;\n    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;\n}\nIf this is done in token_store.rs, it should be mirrored in ensure.rs for consistency (separate PR/task).",
       "blocking": false

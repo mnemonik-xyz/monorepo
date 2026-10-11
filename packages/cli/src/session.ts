@@ -15,7 +15,7 @@
 
 import {
   loginWithIdentity,
-  MnemonicClient,
+  MnemonikClient,
   refreshAccessToken,
   type TokenRefresher,
 } from "@mnemonik-xyz/sdk";
@@ -54,7 +54,7 @@ export interface SessionOptions {
 }
 
 export interface Session {
-  client: MnemonicClient;
+  client: MnemonikClient;
   /** Lazy signer: `pubkey` is known; the secret is read on first use. */
   signer: LazyIdentitySigner;
   /** The token the client starts with (fresh or just renewed). */
@@ -80,7 +80,7 @@ export async function openSession(
   assertIdentityMatchesToken(raw);
   const opts: SessionOptions = { baseUrl, signer, allowKeychain, output };
   const token = await freshToken(opts, raw);
-  const client = new MnemonicClient({
+  const client = new MnemonikClient({
     baseUrl,
     signer,
     jwt: token.jwt,
@@ -165,7 +165,7 @@ export async function renewToken(
 }
 
 /**
- * SDK `TokenRefresher` for `MnemonicClient`. The client calls it when its
+ * SDK `TokenRefresher` for `MnemonikClient`. The client calls it when its
  * JWT is about to expire or after a 401 / 403; both cases renew.
  */
 export function tokenRefresher(
@@ -219,5 +219,5 @@ export function openLocalSession(baseUrl: string): Pick<Session, "client" | "sig
   const signer = lazyIdentitySigner();
   // Preserve mismatch diagnostics when an existing login is available.
   if (tokenExists()) assertIdentityMatchesToken(readTokenFile());
-  return {signer, client:new MnemonicClient({baseUrl, signer})};
+  return {signer, client:new MnemonikClient({baseUrl, signer})};
 }

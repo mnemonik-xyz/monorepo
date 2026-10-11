@@ -61,7 +61,7 @@ branched from `main` unless it depends on #224.
   Must reflect decisions above (3 modes: local / sealed / public; server
   never signs; quota 100/week). Write in passes of ≤150 lines.
 - [ ] **B2 Presentation** (slide deck, via Artifact quickstart `slides`):
-  problem → what Mnemonic is → 3 modes → demo script (plan.md) → use cases →
+  problem → what Mnemonik is → 3 modes → demo script (plan.md) → use cases →
   trust model (who signs, what is on-chain) → roadmap P0/P1/P2 → how to try.
 
 ### P0 code — "works for a first-time tester"

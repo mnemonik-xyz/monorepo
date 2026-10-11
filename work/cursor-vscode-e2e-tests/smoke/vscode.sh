@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-APP_NAME="Mnemonic"
+APP_NAME="Mnemonik"
 MCP_URL="https://mcp.mnemonik.xyz/mcp"
 CONFIG_CANDIDATES=(
   "${HOME}/Library/Application Support/Code/User/mcp.json"
@@ -112,7 +112,7 @@ got_url = entry.get("url")
 if got_url != url:
     print(f"FAIL: url mismatch — expected {url!r}, got {got_url!r}", file=sys.stderr)
     sys.exit(1)
-print(f"OK: VS Code MCP config has Mnemonic entry pointing at {got_url}")
+print(f"OK: VS Code MCP config has Mnemonik entry pointing at {got_url}")
 PY
 
 green "PASS: VS Code accepted the install deeplink and persisted the entry."

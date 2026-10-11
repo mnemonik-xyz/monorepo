@@ -2,7 +2,7 @@
 
 ## Pattern summary
 
-Use Mnemonic as a reliability oracle that informs A2A orchestration decisions.
+Use Mnemonik as a reliability oracle that informs A2A orchestration decisions.
 
 Instead of routing work only by stated capabilities, orchestration can also use memory-backed trust signals.
 
@@ -27,13 +27,13 @@ An orchestrator should be able to ask:
 - whose outputs are regularly reused?
 - which contributors should be down-weighted?
 
-Mnemonic can hold the historical evidence needed to answer those questions.
+Mnemonik can hold the historical evidence needed to answer those questions.
 
 ## Example
 
 A coordinator agent must choose between several specialist agents for a legal-analysis task.
 
-Mnemonic provides historical signals showing that one agent:
+Mnemonik provides historical signals showing that one agent:
 
 - performs well on legal retrieval
 - has low correction rates
@@ -41,7 +41,7 @@ Mnemonic provides historical signals showing that one agent:
 
 That signal influences task routing.
 
-## Mnemonic value in this pattern
+## Mnemonik value in this pattern
 
 - persistent trust history
 - evidence-backed reliability scoring
@@ -50,13 +50,13 @@ That signal influences task routing.
 
 ## Best fit
 
-This is a strong later-stage pattern once enough multi-agent interaction data exists. It is especially aligned with Mnemonic's existing interest in reliability scoring and adversarial mitigation.
+This is a strong later-stage pattern once enough multi-agent interaction data exists. It is especially aligned with Mnemonik's existing interest in reliability scoring and adversarial mitigation.
 
 ---
 
 ## Reference implementation
 
-**Bridge mode:** MCP tool (`mnemonic_recall_by_context`). The orchestrator queries Mnemonic directly before routing a task; no sidecar required on the orchestrator side.
+**Bridge mode:** MCP tool (`mnemonic_recall_by_context`). The orchestrator queries Mnemonik directly before routing a task; no sidecar required on the orchestrator side.
 
 **Schemas involved:** `A2A_TASK_V1` (completed/failed tasks with producer pubkey), `A2A_ARTIFACT_V1` (outputs reused by downstream agents, identified by `prev_id` back-references).
 

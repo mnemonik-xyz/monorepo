@@ -883,7 +883,7 @@ pub fn verify_jwt(state: &OAuthState, token: &str) -> Result<Claims, String> {
 // ── /oauth/authorize-init handler (Decision 10 bootstrap) ───────────────────
 
 /// Query parameters for `GET /oauth/authorize` (the bootstrap endpoint).
-/// Standard OAuth 2.1 + PKCE shape. `pubkey` is a Mnemonic-specific extension
+/// Standard OAuth 2.1 + PKCE shape. `pubkey` is a Mnemonik-specific extension
 /// — the base58 user pubkey from localStorage, supplied by the webapp consent
 /// page when it has identity available; absent on the very first hop from
 /// Cursor/Claude.ai when the user-agent has not yet been redirected to

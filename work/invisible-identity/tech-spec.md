@@ -13,7 +13,7 @@ absorbs: work/keypair-sync/
 
 Two-layer delivery in one feature shipment.
 
-**Layer 1 — Silent bootstrap.** Every Mnemonic surface that needs an Ed25519 identity (Node CLI `@mnemonik-xyz/cli`, Rust stdio MCP server `mnemonic-mcp`) routes through a single internal `identity.ensure()` (TS) / `identity::ensure()` (Rust) on startup. Behavior is identical across both languages and both file/keychain paths:
+**Layer 1 — Silent bootstrap.** Every Mnemonik surface that needs an Ed25519 identity (Node CLI `@mnemonik-xyz/cli`, Rust stdio MCP server `mnemonic-mcp`) routes through a single internal `identity.ensure()` (TS) / `identity::ensure()` (Rust) on startup. Behavior is identical across both languages and both file/keychain paths:
 
 1. If `~/.mnemonic/identity.json` exists and contains `keychain_ref` → read pubkey from file, secret from OS keychain. Done.
 2. Else if it exists and contains `secret` (legacy) → migrate to keychain when available, leave on disk when not. Same pubkey throughout.
@@ -176,7 +176,7 @@ Both directions use the same `/redeem` endpoint. The server tracks ticket origin
 - **Legacy (file-fallback):** `{"secret":[...64 bytes...],"pubkey_base58":"..."}` — unchanged from today
 
 Detection: parse as JSON, branch on presence of `"secret"` key. Both Node and Rust use this exact rule. `~/.mnemonic/README.txt` is written on first creation only, contains one paragraph explaining the directory layout and where to find docs. `[TECHNICAL]`
-**Rationale:** Single file at a single path is the least surprise. Separate `.pub` file would force consumers to know about both. Legacy shape stays bit-identical so older Mnemonic versions (pre-this-feature) can still read the file if a user downgrades. `[USER]`
+**Rationale:** Single file at a single path is the least surprise. Separate `.pub` file would force consumers to know about both. Legacy shape stays bit-identical so older Mnemonik versions (pre-this-feature) can still read the file if a user downgrades. `[USER]`
 **Alternatives considered:** Move to `identity.cose` (binary COSE_Key format) — rejected per user-spec decision B (no breaking format change). Separate `identity.pub` for pubkey + secret in keychain only — rejected because legacy-format users on file-fallback need pubkey + secret in one file anyway.
 
 ### Decision 6: Migration is in-place, idempotent, no `.bak` rename
@@ -329,10 +329,10 @@ File mode 0600 on Unix; on Windows, owner-only ACL via existing helper.
 Written once on first identity creation. Plain text, no JSON, ~5 lines:
 
 ```
-This directory holds your Mnemonic identity and session state.
+This directory holds your Mnemonik identity and session state.
 
   identity.json — your Ed25519 public key (private key is in the OS keychain).
-  token.json    — your current JWT for the Mnemonic webapp (regenerated on `mnemonic login`).
+  token.json    — your current JWT for the Mnemonik webapp (regenerated on `mnemonic login`).
 
 If you back up this folder, your private key is NOT included — back up via
 `mnemonic identity push-to-webapp` or your OS keychain export.
@@ -543,7 +543,7 @@ All entries below were `[PENDING USER APPROVAL]` in the initial draft; they were
 
 **Trust model (pinned):**
 
-The Mnemonic webapp/MCP server is a **trusted broker** for the ticket-redemption step. A compromised server can already mint forged JWTs and serve malicious responses to any client; it can therefore already break the user's identity guarantees independently of this code path. Adding a momentary plaintext window during ticket re-wrap **does not expand the existing trust surface**: an attacker who can dump server process memory at the exact ms of a `/redeem` call can also impersonate the user via JWT signing.
+The Mnemonik webapp/MCP server is a **trusted broker** for the ticket-redemption step. A compromised server can already mint forged JWTs and serve malicious responses to any client; it can therefore already break the user's identity guarantees independently of this code path. Adding a momentary plaintext window during ticket re-wrap **does not expand the existing trust surface**: an attacker who can dump server process memory at the exact ms of a `/redeem` call can also impersonate the user via JWT signing.
 
 Mitigations within this trust model:
 - **Plaintext window is sub-millisecond** — secret bytes are in scope only for the duration of `crypto_box::open()` → `crypto_box::seal()`. No logging, no persistence, no async boundary that could extend the lifetime.

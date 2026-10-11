@@ -9,7 +9,7 @@ size: M
 
 ## Что делаем
 
-Build a layered test suite that covers the full Mnemonic MCP authorization + tool-call flow from each major client perspective: **Cursor**, **VS Code (with Copilot Chat MCP)**, **Claude Desktop**. Per m13v's guidance on issue #59, the suite is split into three tiers by determinism:
+Build a layered test suite that covers the full Mnemonik MCP authorization + tool-call flow from each major client perspective: **Cursor**, **VS Code (with Copilot Chat MCP)**, **Claude Desktop**. Per m13v's guidance on issue #59, the suite is split into three tiers by determinism:
 
 1. **Tier 1 — CI-runnable, deterministic.** Network-free Rust unit tests + Playwright tests against the live (or local) MCP server that exercise the protocol-level flows: tools/list shape, allowlist semantics, OAuth handshake, deferred-sign flow, WWW-Authenticate header presence, path-specific `/.well-known/oauth-protected-resource/mcp` shape, install-deeplink URL formats. PTY-driven CLI tests (via `child_process.spawn` already in use) cover `mnemonic init / login / sign / recall / verify`. Run on every PR.
 
@@ -39,10 +39,10 @@ Without tests, every server-side change that touches OAuth, tools/list, install-
 **Tier 2 acceptance:**
 
 - A `bash work/cursor-vscode-e2e-tests/smoke/cursor.sh` script that, on a Mac with Cursor + cliclick installed, performs:
-  1. `open 'cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonic&config=...'`
+  1. `open 'cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonik&config=...'`
   2. waits for Cursor's MCP install dialog (~3s)
   3. uses `cliclick c:` clicks to confirm
-  4. opens Cursor settings, screenshots, asserts "Mnemonic" appears under MCP Servers
+  4. opens Cursor settings, screenshots, asserts "Mnemonik" appears under MCP Servers
   5. exits 0 if all checks pass
 - Same for VS Code (`smoke/vscode.sh`) and Claude Desktop (`smoke/claude-desktop.sh`).
 - Smoke scripts are MANUAL — operator runs them before each `v*` tag push. Not in CI (would need a macOS GUI runner).

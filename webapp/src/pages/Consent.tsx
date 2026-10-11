@@ -149,7 +149,7 @@ export default function Consent() {
     >
       <h1 className="text-2xl font-semibold">Authorize MCP client</h1>
       <p className="mt-3 text-sm text-text-muted">
-        An external AI tool is asking to act on your behalf via the Mnemonic
+        An external AI tool is asking to act on your behalf via the Mnemonik
         protocol. Approving will sign a one-time challenge with your
         localStorage keypair so the client can call{" "}
         <code className="font-mono">/mcp</code> as you.

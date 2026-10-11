@@ -17,7 +17,7 @@
       "severity": "info",
       "dimension": "Cross-File Consistency",
       "status": "pass",
-      "detail": "DRAG_ANALYSIS.md line 37 (delete-line) confirmed: grep 'SHA3' on the file is empty (exit=1). The standalone line 'Mnemonic records: SHA3-256 hash of the encrypted memory blob via Solana memo.' was removed; preceding 'D-RAG records: source reliability scores via smart contracts.' is followed by the 'Both systems are cheap to run on-chain...' paragraph as expected per code-research.md \u00a74.4 entry 1."
+      "detail": "DRAG_ANALYSIS.md line 37 (delete-line) confirmed: grep 'SHA3' on the file is empty (exit=1). The standalone line 'Mnemonik records: SHA3-256 hash of the encrypted memory blob via Solana memo.' was removed; preceding 'D-RAG records: source reliability scores via smart contracts.' is followed by the 'Both systems are cheap to run on-chain...' paragraph as expected per code-research.md \u00a74.4 entry 1."
     },
     {
       "id": "token-replace-2",
@@ -31,14 +31,14 @@
       "severity": "info",
       "dimension": "Cross-File Consistency",
       "status": "pass",
-      "detail": "WEB_RESEARCH_TRUSTLESS_RAG.md line 64 confirmed: '- Mnemonic commits the memory blob; V3DB proves the retrieval result' (parenthetical ' (SHA3 hash)' removed) matches code-research.md \u00a74.4 entry 3."
+      "detail": "WEB_RESEARCH_TRUSTLESS_RAG.md line 64 confirmed: '- Mnemonik commits the memory blob; V3DB proves the retrieval result' (parenthetical ' (SHA3 hash)' removed) matches code-research.md \u00a74.4 entry 3."
     },
     {
       "id": "token-replace-4",
       "severity": "info",
       "dimension": "Cross-File Consistency",
       "status": "pass",
-      "detail": "WEB_RESEARCH_TRUSTLESS_RAG.md line 132 confirmed: '| Mnemonic | Memory integrity (hash) | \u2705 4/8-bit | \u2705 | Arweave+Solana | v1.0 (active) |' matches code-research.md \u00a74.4 entry 4. Table column count (6) preserved."
+      "detail": "WEB_RESEARCH_TRUSTLESS_RAG.md line 132 confirmed: '| Mnemonik | Memory integrity (hash) | \u2705 4/8-bit | \u2705 | Arweave+Solana | v1.0 (active) |' matches code-research.md \u00a74.4 entry 4. Table column count (6) preserved."
     },
     {
       "id": "sanity-grep",

@@ -1,4 +1,4 @@
-# Mnemonic Protocol
+# Mnemonik Protocol
 
 **Signed memory that agents can keep, verify, and recover beyond one service.**
 
@@ -10,7 +10,7 @@
 [Website](https://mnemonik.xyz) · [Install and connect](https://mnemonik.xyz/install) · [CLI](./packages/cli/README.md) · [SDK](./packages/sdk/README.md) · [Discord](https://discord.gg/ws6wruJj)
 
 Agents change runtimes. Services change operators. A useful memory should survive both.
-Mnemonic makes memory a signed artifact that a client can retain, copy, and verify independently.
+Mnemonik makes memory a signed artifact that a client can retain, copy, and verify independently.
 The operator provides delivery and discovery services; its database is not the authority for the artifact's author or contents.
 
 The goal is practical: save private memory, recover it in a fresh client, and continue with another operator.

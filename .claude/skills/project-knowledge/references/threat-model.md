@@ -1,6 +1,6 @@
 # Threat Model
 
-Per-boundary threat models for Mnemonic. Each entry: attack → the check that
+Per-boundary threat models for Mnemonik. Each entry: attack → the check that
 defeats it, and whether it is an **integrity** failure (cryptographically
 defeated) or an **availability** failure (only *detectable*, not preventable).
 
@@ -31,7 +31,7 @@ with no trust in the server.
 
 ### Residual / out-of-scope
 
-- **Correctness of the model computation** (layer C): Mnemonic binds an external
+- **Correctness of the model computation** (layer C): Mnemonik binds an external
   proof (`VERDICT_V1.proof_ref` + `proof_kind`) by hash but does **not** verify
   zkML/opML/TEE math. A verdict attests that *a judge* passed the step, not that
   the underlying inference was faithful. Trusting the verdict = trusting the

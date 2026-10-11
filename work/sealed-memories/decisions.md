@@ -177,7 +177,7 @@ The hosted server sees plaintext during a write (F2).
 
 **Summary:**
 
-1. `cose.ts`: Extended the `MnemonicCoreModule` interface with `seal_memory`, `open_memory`, and `x25519_public_from_ed25519` WASM bindings (matching the Task 5 exports in `core/src/wasm/mod.rs`). Added `sealMemory`, `openMemory`, and `x25519PublicFromEd25519` TypeScript wrappers. Added the X25519 unlock cache (`deriveOrGetX25519Secret`, `clearUnlockCache`, `__setUnlockCacheForTesting`) with a 15-minute TTL per tech-spec §7.5.
+1. `cose.ts`: Extended the `MnemonikCoreModule` interface with `seal_memory`, `open_memory`, and `x25519_public_from_ed25519` WASM bindings (matching the Task 5 exports in `core/src/wasm/mod.rs`). Added `sealMemory`, `openMemory`, and `x25519PublicFromEd25519` TypeScript wrappers. Added the X25519 unlock cache (`deriveOrGetX25519Secret`, `clearUnlockCache`, `__setUnlockCacheForTesting`) with a 15-minute TTL per tech-spec §7.5.
 
 2. `cloud-client.ts`: Added `anchorSealed` (POST `/api/anchor-sealed`), `storeSealed` (POST `/api/store-sealed`), and `fetchSealed` (GET `/api/sealed`) methods to `CloudClient`. Added `SealedBlobItem` wire type and `base64ToBytes` helper. All three methods follow the existing typed-error contract (`ReauthRequiredError`, `PermanentSyncError`, `TransientSyncError`).
 

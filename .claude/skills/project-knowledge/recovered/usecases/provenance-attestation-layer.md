@@ -2,9 +2,9 @@
 
 ## What it is
 
-Mnemonic can act as a provenance and attestation layer for A2A workflows.
+Mnemonik can act as a provenance and attestation layer for A2A workflows.
 
-In this role, Mnemonic is not just storing memory. It is recording what an agent produced, what inputs it used, when it produced the output, and how that output connects to earlier artifacts.
+In this role, Mnemonik is not just storing memory. It is recording what an agent produced, what inputs it used, when it produced the output, and how that output connects to earlier artifacts.
 
 ## Why it matters
 
@@ -26,7 +26,7 @@ An A2A workflow produces:
 - a decision summary
 - a compliance explanation
 
-Mnemonic stores attestations for:
+Mnemonik stores attestations for:
 
 - task request hash
 - artifact hash
@@ -51,7 +51,7 @@ This role is especially valuable in:
 - scientific collaboration
 - enterprise decision pipelines
 
-## What Mnemonic contributes
+## What Mnemonik contributes
 
 - tamper-evident storage of artifact metadata
 - durable references between artifacts and memories
@@ -66,4 +66,4 @@ This role is especially valuable in:
 
 ## Why this role is strong
 
-This is one of the strongest ways to make Mnemonic materially useful inside multi-agent systems. It turns agent workflows from opaque message passing into auditable knowledge production systems.
+This is one of the strongest ways to make Mnemonik materially useful inside multi-agent systems. It turns agent workflows from opaque message passing into auditable knowledge production systems.

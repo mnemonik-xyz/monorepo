@@ -17,7 +17,7 @@
       "category": "edge",
       "issue": "No test for `signMemory` thrown when no keypair is bound (client.ts:131-135 UserError path). Explicit edge case the SDK raises that callers will hit when they forget to call setKeypair.",
       "file": "packages/sdk/test/client.test.ts (signMemory pending-bundle flow describe block)",
-      "recommendation": "Add a test that constructs MnemonicClient WITHOUT calling setKeypair, calls signMemory, and asserts UserError with message matching /no keypair bound/."
+      "recommendation": "Add a test that constructs MnemonikClient WITHOUT calling setKeypair, calls signMemory, and asserts UserError with message matching /no keypair bound/."
     },
     {
       "severity": "major",

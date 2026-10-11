@@ -15,7 +15,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { MnemonicClient } from "../src/client.js";
+import { MnemonikClient } from "../src/client.js";
 import { IntegrityError, ServerError, UserError } from "../src/errors.js";
 import { Keypair } from "../src/keypair.js";
 import { LocalSigner } from "../src/signer.js";
@@ -231,11 +231,11 @@ afterEach(() => {
 async function makeClient(opts?: {
   jwt?: string;
   responses?: CannedResponse[];
-}): Promise<{ client: MnemonicClient; calls: CapturedCall[]; keypair: Keypair }> {
+}): Promise<{ client: MnemonikClient; calls: CapturedCall[]; keypair: Keypair }> {
   const keypair = await Keypair.generate();
   const signer = new LocalSigner(keypair);
   const { fetchImpl, calls } = makeMockFetch(opts?.responses ?? []);
-  const client = new MnemonicClient({
+  const client = new MnemonikClient({
     baseUrl: "https://example.test",
     signer,
     fetch: fetchImpl,
@@ -500,7 +500,7 @@ describe("sealMemory + openMemory round-trip (mock WASM)", () => {
     ]);
 
     const keypair = await Keypair.generate();
-    const roundTripClient = new MnemonicClient({
+    const roundTripClient = new MnemonikClient({
       baseUrl: "https://example.test",
       signer: new LocalSigner(keypair),
       fetch: roundTripFetch,

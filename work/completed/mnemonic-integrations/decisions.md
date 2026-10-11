@@ -321,8 +321,8 @@ Prepared three deliverables for the Smithery listing + `mcp.mnemonik.xyz` subdom
   - Reject action: local "rejected" state only — server eviction relies on TTL per Decision 12.
 - **New:** `webapp/src/components/IdentityPanel.tsx` — Generate / Import (file picker) / Export (Blob download named `mnemonic-keypair-<pubkey-truncated>.json`) / Clear. WASM module pre-warmed on mount. DID rendered as `did:sol:<pubkey_base58>` per Decision 4. Pubkey + DID exposed via `data-testid` for the test.
 - **New:** `webapp/src/components/InstallButtons.tsx` — three buttons:
-  - Cursor → `cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonic&config=<base64-encoded {"url":"https://mcp.mnemonik.xyz/mcp"}>` (`btoa` of stringified JSON).
-  - VS Code → `vscode:mcp/install?name=Mnemonic&url=<percent-encoded MCP URL>` via `URLSearchParams`.
+  - Cursor → `cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonik&config=<base64-encoded {"url":"https://mcp.mnemonik.xyz/mcp"}>` (`btoa` of stringified JSON).
+  - VS Code → `vscode:mcp/install?name=Mnemonik&url=<percent-encoded MCP URL>` via `URLSearchParams`.
   - Claude.ai → modal with paste URL `mcp.mnemonik.xyz` + copy-to-clipboard button (Claude has no deeplink scheme).
   - Inline note: "After install, the OAuth flow signs the request using your keypair. Make sure your keypair backup is downloaded — losing it means losing access to your memories."
 - **New:** `webapp/src/components/ContentPreview.tsx` — monospace `<pre>` with size indicator (UTF-8 bytes + CBOR bytes when known + char count). `whitespace-pre-wrap break-words` for long content, scrollable max-height.
@@ -338,7 +338,7 @@ Prepared three deliverables for the Smithery listing + `mcp.mnemonik.xyz` subdom
 - **New:** `webapp/src/test/setup.ts` — imports `@testing-library/jest-dom` for the `toBeInTheDocument` matcher etc.
 - **New:** Three component-level tests (vitest + jsdom):
   - `webapp/src/components/IdentityPanel.test.tsx::renders_did_after_generate` — mocks `loadWasm` to return a canned keypair; clicks Generate; asserts the DID + base58 pubkey render and persist to localStorage.
-  - `webapp/src/components/InstallButtons.test.tsx::deeplink_url_well_formed` — asserts the Cursor `<a href>` decodes back to `{"url":"https://mcp.mnemonik.xyz/mcp"}` (base64 → JSON.parse), the VS Code `<a href>` contains the percent-encoded MCP URL + `name=Mnemonic`, and the Claude.ai modal exposes the paste-URL `mcp.mnemonik.xyz`.
+  - `webapp/src/components/InstallButtons.test.tsx::deeplink_url_well_formed` — asserts the Cursor `<a href>` decodes back to `{"url":"https://mcp.mnemonik.xyz/mcp"}` (base64 → JSON.parse), the VS Code `<a href>` contains the percent-encoded MCP URL + `name=Mnemonik`, and the Claude.ai modal exposes the paste-URL `mcp.mnemonik.xyz`.
   - `webapp/src/pages/Sign.test.tsx::countdown_displays_mm_ss` — mocks `useParams` via `MemoryRouter`, mocks `globalThis.fetch` to return canned canonical-CBOR with `expires_at = now + 5 min`, advances fake timers (only `setInterval`/`clearInterval` faked so `waitFor`'s `setTimeout` and the fetch microtask chain keep working), asserts the `Expires in mm:ss` text matches `/Expires in 0[45]:\d{2}/` initially and remains `mm:ss`-shaped after `vi.advanceTimersByTime(1000)`.
 - **Modified:** `webapp/scripts/build-wasm.sh` — fixed `--out-dir` to use an absolute path (`$REPO_ROOT/webapp/src/wasm`). `wasm-pack` interprets `--out-dir` relative to the crate manifest (`core/`), so the previous relative path landed the artifacts in `core/webapp/src/wasm/` instead of `webapp/src/wasm/`. Carry-over fix to Task 3 — needed to unblock the Task 7 smoke build.
 
@@ -823,7 +823,7 @@ All gaps are MINOR — none block hackathon deploy.
 
 **Fix:** added `GET /oauth/authorize` as a NEW handler (`oauth::authorize_init_handler`) registered alongside the existing `POST /oauth/authorize` on the same path (axum dispatches by method via `.get(...).post(...)`). Behavior:
 
-- Accepts standard OAuth 2.1 + PKCE query params: `client_id`, `redirect_uri`, `code_challenge`, `code_challenge_method`, `state`, optional `response_type`, plus a Mnemonic-specific optional `pubkey` query param so the webapp consent page can re-call with localStorage identity available.
+- Accepts standard OAuth 2.1 + PKCE query params: `client_id`, `redirect_uri`, `code_challenge`, `code_challenge_method`, `state`, optional `response_type`, plus a Mnemonik-specific optional `pubkey` query param so the webapp consent page can re-call with localStorage identity available.
 - Rejects `code_challenge_method != "S256"` with HTTP 400 (Decision 10 enforcement at the protocol layer, not just downstream hash divergence).
 - Generates a 16-byte server nonce (hex), 60s `exp`, builds canonical-CBOR per Decision 10 fields `{server_origin, state, client_id, redirect_uri, code_challenge, code_challenge_method, nonce, exp}`, computes blake3 hash via the shared `build_challenge_hash` helper, calls `OAuthState::insert_pending`.
 - Two response modes: JSON `{challenge_cbor: base64, state, exp}` when `Accept: application/json` or `pubkey` is supplied (programmatic clients + webapp); 302 to `https://mnemonik.xyz/oauth/consent?challenge=<base64>&state=<state>` for plain browser navigation.

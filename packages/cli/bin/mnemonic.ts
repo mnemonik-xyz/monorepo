@@ -95,7 +95,7 @@ export function buildProgram(): Command {
   const program = new Command();
   program
     .name("mnemonic")
-    .description("Mnemonic Protocol CLI — verifiable persistent memory")
+    .description("Mnemonik Protocol CLI — verifiable persistent memory")
     .version(readPkgVersion())
     .option("--json", "machine-readable JSON output")
     .option("--quiet", "suppress non-essential output")
@@ -564,7 +564,7 @@ export function buildProgram(): Command {
     .option("--value-decimals <n>", "decimal places 0–18 (default: 2)", (v) => parseInt(v, 10), 2)
     .requiredOption("--client-address <0x...>", "rater's EVM address — MUST equal msg.sender")
     .requiredOption("--feedback-uri <uri>", "URI where the document will be hosted")
-    .requiredOption("--attestation-id <id>", "Mnemonic attestation ID of the cited memory")
+    .requiredOption("--attestation-id <id>", "Mnemonik attestation ID of the cited memory")
     .requiredOption("--blake3 <hex>", "blake3 content hash of the cited attestation (64 hex chars)")
     .option("--tag1 <str>", "optional tag1")
     .option("--tag2 <str>", "optional tag2")

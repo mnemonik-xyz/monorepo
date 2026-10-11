@@ -18,15 +18,15 @@ versioned quote and receipt contract:
 - `exact` — standard one-time x402 payment for one operation;
 - `stake` — optional capped, expiring authorization for recurring operations.
 
-Mnemonic will integrate through a provider-neutral HTTP boundary rather than
+Mnemonik will integrate through a provider-neutral HTTP boundary rather than
 importing the TypeScript resource adapter into the Rust MCP server. Both methods
-bind payment to the same durable Mnemonic operation and produce the same receipt
+bind payment to the same durable Mnemonik operation and produce the same receipt
 shape. One-time x402 ships first; the stake method remains disabled in
 production until its reservation and authorization model is hardened.
 
 ## Current-state gaps
 
-The current Mnemonic x402 gate verifies a previously broadcast USDC transfer
+The current Mnemonik x402 gate verifies a previously broadcast USDC transfer
 from `X-Payment: {tx_sig, network}`. It binds the transfer to amount and
 treasury, but not to an authenticated identity, content hash, correlation ID,
 or expiring quote.
@@ -48,13 +48,13 @@ service that incurs Arweave and Solana costs for each accepted operation.
 ## Architecture
 
 ```text
-Mnemonic client / IDE
+Mnemonik client / IDE
         │ client signs artifact
         ▼
-Mnemonic approval webapp ───── wallet approval ───── EVM wallet
+Mnemonik approval webapp ───── wallet approval ───── EVM wallet
         │ operation + payment proof
         ▼
-Mnemonic MCP (Rust)
+Mnemonik MCP (Rust)
         │ quote / authorize / reserve / commit / status
         ▼
 Universal Paywall HTTP API
@@ -62,7 +62,7 @@ Universal Paywall HTTP API
         ├── exact x402 facilitator ── settle one payment
         └── stake facilitator ─────── reserve + batch settlement
 
-Mnemonic MCP ── operator-funded relay ── ArDrive Turbo (Arweave) + Solana Memo
+Mnemonik MCP ── operator-funded relay ── ArDrive Turbo (Arweave) + Solana Memo
 ```
 
 The payment provider never receives the artifact plaintext. It receives an
@@ -76,13 +76,13 @@ Every quote, proof, reservation, and receipt is bound to:
 {
   "version": 1,
   "operation_id": "<stable UUID/correlation ID>",
-  "payer_subject": "<opaque hash of authenticated Mnemonic subject>",
+  "payer_subject": "<opaque hash of authenticated Mnemonik subject>",
   "payer_wallet": "0x...",
   "artifact_hash": "<blake3 of canonical client-signed artifact>",
   "amount": "<micro-USDC decimal string>",
   "asset": "<USDC contract address>",
   "network": "eip155:<chain-id>",
-  "pay_to": "<Mnemonic treasury/service address>",
+  "pay_to": "<Mnemonik treasury/service address>",
   "expires_at": "<RFC3339 timestamp>",
   "nonce": "<provider-generated random nonce>"
 }
@@ -91,13 +91,13 @@ Every quote, proof, reservation, and receipt is bound to:
 The canonical serialization and digest algorithm must be specified and shared
 as fixtures. Changing any field invalidates the quote or proof.
 
-`operation_id` is the idempotency key across Mnemonic, the webapp, and Universal
+`operation_id` is the idempotency key across Mnemonik, the webapp, and Universal
 Paywall. Provider records must enforce uniqueness for `(service,
 operation_id)`.
 
 ## Quote contract
 
-Mnemonic requests a quote only after it has a canonical client-signed artifact.
+Mnemonik requests a quote only after it has a canonical client-signed artifact.
 The response advertises both supported methods when available:
 
 ```json
@@ -155,7 +155,7 @@ a first-class rail rather than treating it only as legacy middleware.
 - Maintain interoperability fixtures against at least one independent x402
   client and document any extension fields used for operation binding.
 
-For one-time payment, settlement completes before Mnemonic begins paid anchoring.
+For one-time payment, settlement completes before Mnemonik begins paid anchoring.
 If anchoring then fails, the settled receipt remains attached to the same
 resumable operation. It cannot be moved to another artifact and is never paid a
 second time.
@@ -181,7 +181,7 @@ for anchoring.
 
 ### Durable reservation API
 
-The existing serve-then-charge adapter is not used for Mnemonic. Universal
+The existing serve-then-charge adapter is not used for Mnemonik. Universal
 Paywall adds an atomic reservation lifecycle:
 
 ```text
@@ -215,7 +215,7 @@ Requirements:
 
 ## Authentication and identity binding
 
-- Mnemonic binds its OAuth/Ed25519 subject to the payer's EVM wallet using a
+- Mnemonik binds its OAuth/Ed25519 subject to the payer's EVM wallet using a
   fresh challenge signed by that wallet.
 - Universal Paywall access proofs use typed structured data and bind service,
   operation ID, quote digest, chain ID, nonce, and expiry. The current
@@ -227,9 +227,9 @@ Requirements:
 - Raw wallet signatures, authorization payloads, API credentials, and private
   artifact content are never logged.
 
-## Mnemonic paid-operation state
+## Mnemonik paid-operation state
 
-Mnemonic persists the paid operation independently of its recall index:
+Mnemonik persists the paid operation independently of its recall index:
 
 ```text
 awaiting_signature
@@ -257,10 +257,10 @@ payment database.
 ### Stake mapping
 
 - `payment_ready` means an allowance reservation exists.
-- Mnemonic commits the reservation only after delivery verification.
+- Mnemonik commits the reservation only after delivery verification.
 - A retry observes and resumes the same reservation.
 
-## Provider-neutral Mnemonic client
+## Provider-neutral Mnemonik client
 
 Add a Rust payment-provider boundary with operations equivalent to:
 
@@ -325,7 +325,7 @@ charged.
 1. Freeze the versioned operation binding, quote, and receipt schemas.
 2. Productize one-time standard x402 in Universal Paywall.
 3. Implement durable, idempotent exact-payment status and receipts.
-4. Integrate exact payment into Mnemonic behind a staging feature flag.
+4. Integrate exact payment into Mnemonik behind a staging feature flag.
 5. Complete real-wallet tests and the full Arweave/Solana delivery loop.
 
 ### Phase 2 — frictionless client surfaces
@@ -392,8 +392,8 @@ reconciliation, recovery, and refund gates pass. `local` remains free throughout
 
 ## Explicit non-goals
 
-- Universal Paywall does not sign Mnemonic artifacts.
-- Mnemonic does not custody user USDC or private wallet keys.
+- Universal Paywall does not sign Mnemonik artifacts.
+- Mnemonik does not custody user USDC or private wallet keys.
 - The integration does not make Arweave or Solana writes client-submitted.
 - The recurring rail does not permit unlimited or non-expiring policies.
 - Payment state is not used as the source of truth for anchored-memory recall.

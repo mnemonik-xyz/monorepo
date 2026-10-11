@@ -1,7 +1,7 @@
 import {beforeAll,afterAll,expect,it} from 'vitest';
 import * as wasm from '../../../core/pkg-nodejs/mnemonic_core.js';
 import {__setWasmForTesting} from '../src/wasm.js';
-import {MnemonicClient} from '../src/client.js';
+import {MnemonikClient} from '../src/client.js';
 import {Keypair} from '../src/keypair.js';
 import {LocalSigner} from '../src/signer.js';
 import type {Attestation} from '../src/types.js';
@@ -22,7 +22,7 @@ it('retains original bytes across wallet challenge and retries without a second 
     }
     return new Response(Uint8Array.from(submitted!.match(/../g)!.map(x=>parseInt(x,16))));
   };
-  const client=new MnemonicClient({baseUrl:'https://operator.test',signer:new LocalSigner(kp),jwt:'test',fetch:fetcher,a2aIndex:{list:async()=>[...rows.values()],put:async r=>{rows.set(r.attestationId,r);}}});client.setKeypair(kp);
+  const client=new MnemonikClient({baseUrl:'https://operator.test',signer:new LocalSigner(kp),jwt:'test',fetch:fetcher,a2aIndex:{list:async()=>[...rows.values()],put:async r=>{rows.set(r.attestationId,r);}}});client.setKeypair(kp);
   await expect(client.attestA2AMessage(vectors.payload as any,vectors.context_id)).rejects.toMatchObject({status:428,cause:{response:{error:{data:{operation_id:'same-op'}}}}});
   expect(rows.size).toBe(1);const original=[...rows.values()][0]!;expect(original.coseEnvelopeHex).toBe(submitted);
   const delivered=await client.retryA2ADelivery(original.attestationId,{operationId:'same-op'});

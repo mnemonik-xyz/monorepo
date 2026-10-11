@@ -191,7 +191,7 @@ pub fn save_token_to(path: &Path, token: &TokenJson) -> Result<(), TokenStoreErr
     // Tighten the parent directory to 0o700 on Unix — round-1 security
     // audit SA6-002. `fs::create_dir_all` honours umask, which on many
     // Linux distros leaves world-readable mode 0o755; the directory
-    // listing exposes "this user has a Mnemonic token" even though the
+    // listing exposes "this user has a Mnemonik token" even though the
     // token file itself is 0o600. `set_permissions` here is idempotent
     // and matches the Node CLI's `mkdirSync(dir, { recursive: true,
     // mode: 0o700 })` at `packages/cli/src/config.ts:71`.

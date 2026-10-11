@@ -1,4 +1,4 @@
-# Mnemonic — Non-Custodial, Self-Sovereign Paradigm (Target Design)
+# Mnemonik — Non-Custodial, Self-Sovereign Paradigm (Target Design)
 
 **Status:** design / pre-implementation. Companion to the audit in
 [`../payments-robustness/report.md`](../payments-robustness/report.md).
@@ -32,7 +32,7 @@ compress, anchor, index), never a custodian of keys or funds.
 
 ## 2. What already exists (we are promoting, not inventing)
 
-Mnemonic already ships **two** signing modes:
+Mnemonik already ships **two** signing modes:
 
 | Mode | Who signs | Where | Code |
 |---|---|---|---|
@@ -182,10 +182,10 @@ Per review: **clean break, no backward-compat.**
 
 ## 9. Impact on Arco (the EVM consumer)
 
-- **No MetaMask.** The Arco client (backend/agent) holds one **Mnemonic identity
+- **No MetaMask.** The Arco client (backend/agent) holds one **Mnemonik identity
   seed**; it derives an **Arc payment key** from it (§14) and signs the Arc x402
   tx itself. The only external step is **funding the derived address** (faucet on
-  testnet, or a sponsor) — there is no browser wallet in the Mnemonic flow.
+  testnet, or a sponsor) — there is no browser wallet in the Mnemonik flow.
 - Authorship: the same identity signs deliverable/feedback memories, so the
   on-chain `bytes32` points to a **user-signed** artifact (not operator-signed) —
   strictly stronger for the ERC-8004/8183 provenance story.
@@ -539,7 +539,7 @@ flowchart TB
 So visibility is chosen **per memory at sign time**, with sensible per-type defaults.
 
 ### Encryption model (for the shared/private target — future track)
-- Encrypt content to recipients via **X25519 ECIES / key-wrapping**. The Mnemonic
+- Encrypt content to recipients via **X25519 ECIES / key-wrapping**. The Mnemonik
   **Ed25519** identity maps to **X25519** (standard birational conversion), so the
   same identity that *signs* can also be an *encryption recipient*; EVM parties can
   use ECIES over secp256k1. (Note: encryption key ≠ signing key — same two-key
@@ -649,7 +649,7 @@ sequenceDiagram
     autonumber
     participant CL as Client (embedded signer — viem local account)
     participant RPC as Arc RPC (rpc.testnet.arc.network)
-    participant OP as Mnemonic operator
+    participant OP as Mnemonik operator
     participant V as EVM verifier (server, Wave 1)
 
     Note over CL: 1. derive secp256k1 key = HKDF(identity_seed,'pay/arc') mod n

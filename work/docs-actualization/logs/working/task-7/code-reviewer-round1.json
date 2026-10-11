@@ -28,7 +28,7 @@
     {
       "dimension": "references",
       "severity": "info",
-      "note": "References list now has 8 entries; entry 8 is '[Mnemonic Protocol Foundational Paper](./research/paper.pdf)'. Path is repo-relative from docs/WHITEPAPER.md and resolves to docs/research/paper.pdf."
+      "note": "References list now has 8 entries; entry 8 is '[Mnemonik Protocol Foundational Paper](./research/paper.pdf)'. Path is repo-relative from docs/WHITEPAPER.md and resolves to docs/research/paper.pdf."
     },
     {
       "dimension": "consistency-§10-§13",

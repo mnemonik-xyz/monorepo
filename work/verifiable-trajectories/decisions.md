@@ -9,7 +9,7 @@ Append-only log. Each entry: date, who, what, why, what changes downstream.
 Author: claude (from analysis of "Toward a Verifiable Architecture for Agentic
 Cognition" report + substrate audit of `core/src/{lineage,codec,merkle,storage}`).
 
-Origin: request to let Mnemonic "prove the sequences of steps executed by agents
+Origin: request to let Mnemonik "prove the sequences of steps executed by agents
 were good." Audit found the substrate is ~70% present (blake3 + COSE_Sign1 +
 lineage DAG + `merkle.rs`), with four concrete gaps: no ordered hash-linked
 chain (`seq`/`prev_hash`), `chain_valid` never materialized, no verdict binding,
@@ -25,12 +25,12 @@ correctness). We **produce** A, **attest** B (co-sign a judge's verdict),
 
 Why: C carries 100×–10,000× overhead and belongs to dedicated projects; building
 it in `core/` violates the native-only + one-way `core → mcp` dependency rule
-(CLAUDE.md). Mnemonic's defensible position is OCP's "confirm inclusion" leg,
+(CLAUDE.md). Mnemonik's defensible position is OCP's "confirm inclusion" leg,
 which `merkle.rs` already implements. Composition, not competition (mirrors the
 Hindsight + ERC-8004 Validation-Registry stance in `protocol-integrations.md`).
 
 Downstream: `VERDICT_V1.proof_ref` + `proof_kind` carry the external proof hash;
-Mnemonic signs that the verdict exists and is linked, not that the model math is
+Mnemonik signs that the verdict exists and is linked, not that the model math is
 sound.
 
 ---

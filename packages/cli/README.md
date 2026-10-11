@@ -2,7 +2,7 @@
 
 > Project site: [mnemonik.xyz](https://mnemonik.xyz) · Hosted MCP: `https://mcp.mnemonik.xyz/mcp`
 
-`mnemonic` — command-line interface for the Mnemonic Protocol. A thin
+`mnemonic` — command-line interface for the Mnemonik Protocol. A thin
 wrapper over [`@mnemonik-xyz/sdk`](../sdk/) that adds Node-only persistence
 under `~/.mnemonic/`, an interactive PKCE loopback OAuth flow, and
 TTY-aware output formatting. Same OAuth + COSE substrate as the
@@ -224,7 +224,7 @@ mnemonic erc8004 feedback
   --value-decimals <n>     Decimal places (0–18; default 2)
   --client-address <addr>  Your EVM address — MUST equal msg.sender of the tx
   --uri <url>              URI where you will host the document (feedbackUri)
-  --attestation-id <id>    Mnemonic attestation_id of the cited memory
+  --attestation-id <id>    Mnemonik attestation_id of the cited memory
   --blake3 <hex>           blake3 hash of the cited attestation
   --tag1 <str>             Optional rating tag 1
   --tag2 <str>             Optional rating tag 2

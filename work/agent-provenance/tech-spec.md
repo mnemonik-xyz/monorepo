@@ -23,19 +23,19 @@ auditable agent needs. This feature adds the third — **intent binding** — an
 re-frames `safe_to_settle` from "the steps were good" to "the steps did *the
 thing that was asked*."
 
-## The frame: Delta vs. Mnemonic, and the gap we close
+## The frame: Delta vs. Mnemonik, and the gap we close
 
 | Question | Layer | Owner today |
 |---|---|---|
-| What did the agent **know**? (memory authentic, untampered) | memory | Mnemonic `MEMORY_V1` ✓ |
-| Did the steps happen **in order, unaltered**? | chain integrity | Mnemonic `STEP_V1` ✓ |
-| Was each step a **valid move**? | per-step verdict | Mnemonic `VERDICT_V1` ✓ |
+| What did the agent **know**? (memory authentic, untampered) | memory | Mnemonik `MEMORY_V1` ✓ |
+| Did the steps happen **in order, unaltered**? | chain integrity | Mnemonik `STEP_V1` ✓ |
+| Was each step a **valid move**? | per-step verdict | Mnemonik `VERDICT_V1` ✓ |
 | Did the agent do **the right thing vs. the task it was given**? | **intent correspondence** | **GAP — this feature** |
 
 Delta Network answers the last row with a **centralized, closed-source SP1
 zkVM + zkTLS** pipeline: user signs a typed Intent, agent submits a Proposal,
 a hosted prover proves the Proposal satisfies the Intent's policy *before funds
-move*. Mnemonic's answer is deliberately different on three axes the owner named:
+move*. Mnemonik's answer is deliberately different on three axes the owner named:
 
 - **Decentralized** — correspondence is a **re-runnable deterministic policy
   evaluation** over hash-committed evidence, not a hosted prover you must trust.
@@ -45,13 +45,13 @@ move*. Mnemonic's answer is deliberately different on three axes the owner named
 - **Efficient** — no zkVM in `core/`. One small signed mandate, deterministic
   predicate eval (microseconds), one order-preserving Merkle root, one anchor
   write per checkpoint. zk proving cost is always someone else's, bound by ref.
-- **Provenance, not just a gate** — Delta gates *before* the action; Mnemonic
+- **Provenance, not just a gate** — Delta gates *before* the action; Mnemonik
   produces the immutable, anchored, independently-verifiable *record* that the
   action matched intent, and ALSO exposes a gate (`safe_to_settle`) for callers
   who want pre-action enforcement. Both, not either.
 
-The two stacks compose: a Mnemonic `COMPLIANCE_V1` can *bind a Delta SP1 proof
-by hash* as its `proof_ref`. Mnemonic orders, anchors, and makes recallable what
+The two stacks compose: a Mnemonik `COMPLIANCE_V1` can *bind a Delta SP1 proof
+by hash* as its `proof_ref`. Mnemonik orders, anchors, and makes recallable what
 Delta (or a TEE, or a deterministic checker) proves.
 
 ## What exists today (substrate audit — verified against code)
@@ -114,8 +114,8 @@ are re-evaluated deterministically by the policy evaluator below.
 ### New artifact 2 — `EVIDENCE_V1` (the zkTLS analog; optional, per step)
 
 Binds the external data a step relied on, so constraint evaluation has a
-hash-committed input. This is Mnemonic's decentralized analog to Delta's zkTLS
-Evidence Layer — Mnemonic does not *produce* the TLS proof, it commits + orders it.
+hash-committed input. This is Mnemonik's decentralized analog to Delta's zkTLS
+Evidence Layer — Mnemonik does not *produce* the TLS proof, it commits + orders it.
 
 - required: `artifact_id`, `type="evidence"`, `schema_version`, `step_hash`
   (the step that consumed it), `source` (endpoint/source id), `response_hash`,

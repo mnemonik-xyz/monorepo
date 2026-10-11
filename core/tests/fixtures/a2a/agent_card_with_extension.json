@@ -1,6 +1,6 @@
 {
-  "name": "Mnemonic Protocol Agent",
-  "description": "An AI agent with Mnemonic verifiable memory attestation.",
+  "name": "Mnemonik Protocol Agent",
+  "description": "An AI agent with Mnemonik verifiable memory attestation.",
   "url": "https://mnemonik.xyz",
   "version": "1",
   "spec_version": "draft-2026-05",

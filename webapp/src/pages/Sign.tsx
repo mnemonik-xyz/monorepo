@@ -375,7 +375,7 @@ export default function Sign() {
                 className="rounded-md bg-accent-primary px-5 py-2.5 text-sm font-semibold text-background transition-opacity hover:opacity-90"
                 data-testid="sign-approve"
               >
-                Sign with my Mnemonic identity
+                Sign with my Mnemonik identity
               </button>
               <button
                 type="button"

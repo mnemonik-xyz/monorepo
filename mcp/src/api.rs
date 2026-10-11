@@ -586,7 +586,7 @@ pub async fn sign_callback_handler(
     //     Memo data binds the user's blake3 content hash to the server's
     //     on-chain anchor — a third party fetching the memo can re-fetch
     //     the COSE bytes from Arweave and verify the user's COSE signature
-    //     end-to-end without contacting Mnemonic.
+    //     end-to-end without contacting Mnemonik.
     let now = chrono::Utc::now().to_rfc3339();
 
     // Replay guards (work/free-quota-hardening/decisions.md, R2):
@@ -2840,7 +2840,7 @@ fn webapp_public_base() -> String {
 /// When the env var `SERVER_ATTESTATION_PUBKEY` is set to a base58-encoded
 /// Ed25519 public key, the card also includes an `extensions` array containing
 /// the `x-mnemonic` extension descriptor (Decision 3 in work/a2a-bridge).
-/// This lets any A2A-native verifier locate the Mnemonic attestation key
+/// This lets any A2A-native verifier locate the Mnemonik attestation key
 /// directly from the AgentCard without a separate lookup.
 fn agent_card_json() -> serde_json::Value {
     let origin = crate::oauth::server_origin();
@@ -2864,7 +2864,7 @@ fn agent_card_json() -> serde_json::Value {
     };
 
     serde_json::json!({
-        "name": "Mnemonic Protocol",
+        "name": "Mnemonik Protocol",
         "description": "Verifiable, persistent memory for AI agents, exposed over MCP. This API-origin AgentCard advertises discovery + the agent-native publishing capability.",
         "url": "https://mnemonik.xyz",
         "canonical": "https://mnemonik.xyz/.well-known/agent.json",
@@ -2962,7 +2962,7 @@ fn render_atom_feed(posts: &[BlogPost], mcp_origin: &str, webapp_base: &str) -> 
     let mut xml = String::new();
     xml.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
     xml.push_str("<feed xmlns=\"http://www.w3.org/2005/Atom\">\n");
-    xml.push_str("  <title>Mnemonic Protocol Blog</title>\n");
+    xml.push_str("  <title>Mnemonik Protocol Blog</title>\n");
     xml.push_str(&format!("  <id>{}/blog</id>\n", xml_escape(webapp_base)));
     xml.push_str(&format!(
         "  <link href=\"{}/blog\"/>\n",

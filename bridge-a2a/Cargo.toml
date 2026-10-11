@@ -2,7 +2,7 @@
 name = "bridge-a2a"
 version = "0.1.0"
 edition = "2021"
-description = "Mnemonic A2A sidecar bridge — intercepts A2A JSON-RPC, attests via mnemonic-a2a"
+description = "Mnemonik A2A sidecar bridge — intercepts A2A JSON-RPC, attests via mnemonic-a2a"
 
 [lib]
 name = "bridge_a2a"

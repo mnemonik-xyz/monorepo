@@ -9,7 +9,7 @@ import { installHosts } from "../install-hosts.js";
 import { mcpStdio } from "../mcp-stdio.js";
 
 const USAGE = `\
-mnemonik-mcp — MCP shim for Mnemonic Protocol
+mnemonik-mcp — MCP shim for Mnemonik Protocol
 
 Usage:
   mnemonik-mcp install [--confirm]    Wire mcpServers.mnemonik into present host configs

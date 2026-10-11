@@ -1,4 +1,4 @@
-# Smithery manifest for Mnemonic Memory MCP server
+# Smithery manifest for Mnemonik Memory MCP server
 # Listed at https://smithery.ai/mcp/mnemonic once submitted via the Smithery web UI.
 #
 # The official MCP Registry entry lives in server.json (published by release.yml).
@@ -20,7 +20,7 @@ repository: "https://github.com/mnemonik-xyz/monorepo"
 license: "MIT OR Apache-2.0"
 
 author:
-  name: "Mnemonic Team"
+  name: "Mnemonik Team"
   email: "dev@mnemonik.xyz"
 
 tags:
@@ -32,7 +32,7 @@ tags:
 
 mcp_servers:
   - id: "mnemonic"
-    name: "Mnemonic Memory"
+    name: "Mnemonik Memory"
     description: >
       Sign and recall attested memory bundles across AI tools. Memories are
       semantically embedded, content-hashed, and signed with the user's own
@@ -47,7 +47,7 @@ mcp_servers:
           authorizationUrl: "https://mcp.mnemonik.xyz/oauth/authorize"
           tokenUrl: "https://mcp.mnemonik.xyz/oauth/token"
           scopes:
-            mcp: "Call the Mnemonic MCP tools as the signed-in identity"
+            mcp: "Call the Mnemonik MCP tools as the signed-in identity"
     features:
       - "tools"
     tools:
@@ -69,6 +69,6 @@ mcp_servers:
         description: "Confirmation gate before a public write"
 
 install:
-  cursor: "cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonic&url=https%3A%2F%2Fmcp.mnemonik.xyz"
-  vscode: "vscode:mcp/install?name=Mnemonic&url=https%3A%2F%2Fmcp.mnemonik.xyz"
+  cursor: "cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonik&url=https%3A%2F%2Fmcp.mnemonik.xyz"
+  vscode: "vscode:mcp/install?name=Mnemonik&url=https%3A%2F%2Fmcp.mnemonik.xyz"
   claude_desktop: "https://mnemonik.xyz/install"

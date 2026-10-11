@@ -2,7 +2,7 @@
   "name": "mnemonic-monorepo",
   "private": true,
   "version": "0.0.0",
-  "description": "Mnemonic Protocol monorepo — JS/TS workspace root. Hosts @mnemonik-xyz/sdk, @mnemonik-xyz/cli and the existing webapp. The Rust workspace (Cargo.toml) is unaffected.",
+  "description": "Mnemonik Protocol monorepo — JS/TS workspace root. Hosts @mnemonik-xyz/sdk, @mnemonik-xyz/cli and the existing webapp. The Rust workspace (Cargo.toml) is unaffected.",
   "workspaces": [
     "packages/*",
     "webapp"

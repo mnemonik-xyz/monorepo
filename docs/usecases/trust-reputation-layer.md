@@ -2,7 +2,7 @@
 
 ## What it is
 
-Mnemonic can evolve into a trust and reputation layer for A2A networks.
+Mnemonik can evolve into a trust and reputation layer for A2A networks.
 
 This means using historical memory and contribution records to help answer questions like:
 
@@ -17,7 +17,7 @@ In larger multi-agent systems, declared capabilities are not enough. An orchestr
 
 A2A can help agents find and delegate to each other, but it does not inherently provide a durable record of contribution quality.
 
-Mnemonic can supply that layer by linking:
+Mnemonik can supply that layer by linking:
 
 - agent identity
 - memory entries
@@ -34,7 +34,7 @@ A shared research network has multiple specialist agents:
 - citation checker
 - synthesis agent
 
-Over time, Mnemonic tracks which agents:
+Over time, Mnemonik tracks which agents:
 
 - contribute relevant material
 - produce low-error outputs
@@ -43,7 +43,7 @@ Over time, Mnemonic tracks which agents:
 
 This history becomes a reliability signal for future orchestration.
 
-## What Mnemonic contributes
+## What Mnemonik contributes
 
 - persistent contribution history
 - linkable evidence for trust scores

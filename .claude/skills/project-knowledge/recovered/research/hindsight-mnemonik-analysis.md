@@ -173,6 +173,6 @@ A `hindsight-mnemonik` adapter that signs every retain, emits append-only opinio
 ## References
 
 - Latimer et al., *Hindsight is 20/20: Building Agent Memory that Retains, Recalls, and Reflects*, arXiv:2512.12818, Dec 2025.
-- Mnemonic Protocol Whitepaper v0.1, April 2026.
+- Mnemonik Protocol Whitepaper v0.1, April 2026.
 - Solana fee structure: 5,000 lamports/signature base fee, [solana.com/docs/core/fees](https://solana.com/docs/core/fees).
 - Arweave storage pricing through ArDrive Turbo, [ardrive.io](https://ardrive.io/).

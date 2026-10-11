@@ -2,7 +2,7 @@
 
 ## Pattern summary
 
-Use Mnemonic as a shared project-level memory namespace that multiple A2A agents can read from and write to.
+Use Mnemonik as a shared project-level memory namespace that multiple A2A agents can read from and write to.
 
 Instead of each agent carrying isolated memory, the project itself has a durable memory surface.
 
@@ -41,7 +41,7 @@ A research project has four agents:
 
 Each agent adds to the same namespace. The writing agent can later query all prior discoveries without depending on the runtime that originally produced them.
 
-## Mnemonic value in this pattern
+## Mnemonik value in this pattern
 
 - durable shared context
 - semantic retrieval over project history
@@ -50,4 +50,4 @@ Each agent adds to the same namespace. The writing agent can later query all pri
 
 ## Best fit
 
-This is likely the highest-priority integration pattern for Mnemonic in A2A systems.
+This is likely the highest-priority integration pattern for Mnemonik in A2A systems.

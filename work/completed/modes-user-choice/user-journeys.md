@@ -99,7 +99,7 @@ published) anyone's `participate` artifacts by tx id.
 **Actor:** a developer embedding verifiable memory into their own app/agent. The
 mode is a *code-level* decision, set at the call site or threaded from app logic.
 
-**J0 · Onboarding.** `const m = new Mnemonic()` loads/creates the shared identity and
+**J0 · Onboarding.** `const m = new Mnemonik()` loads/creates the shared identity and
 opens the canonical DB (or connects to a running local `mnemonic-mcp`). The envelope
 is exposed as `m.capabilities()` so the app can branch on `supportsParticipate`
 before offering a "publish" feature.
@@ -223,7 +223,7 @@ upgrade, not the baseline.
    Arweave/Solana, read-back-verified, `delivery_receipt` shown. No server in the
    path.
 4. A **third party** runs `mnemonic verify <tx>` on another machine and confirms the
-   bytes are real *and retrievable* — the ERC-8004 gap Mnemonic closes.
+   bytes are real *and retrievable* — the ERC-8004 gap Mnemonik closes.
 5. The user **exports** their signed memory artifact and **imports** it into a
    browser on a second machine — full portability, still no infrastructure. (A power
    user who *also* runs the CLI/IDE can instead bridge to share the canonical DB.)

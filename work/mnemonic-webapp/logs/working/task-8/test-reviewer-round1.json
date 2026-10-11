@@ -34,10 +34,10 @@
   "required_coverage": [
     {
       "scenario": "golden_path",
-      "description": "Open site (GET /) -> heading 'Mnemonic Protocol' visible -> click 'Start chat' -> chat page shown -> fill message input -> click Send (or Enter) -> mock POST /chat to return {response: 'answer text'} -> assert bot message 'answer text' appears in log -> click download link -> assert response Content-Disposition or file download initiated",
+      "description": "Open site (GET /) -> heading 'Mnemonik Protocol' visible -> click 'Start chat' -> chat page shown -> fill message input -> click Send (or Enter) -> mock POST /chat to return {response: 'answer text'} -> assert bot message 'answer text' appears in log -> click download link -> assert response Content-Disposition or file download initiated",
       "mock_strategy": "page.route('/chat', ...) to return deterministic JSON; page.route('/download-knowledge', ...) to return a minimal zip buffer",
       "required_selectors": [
-        "getByRole('heading', {name: 'Mnemonic Protocol'})",
+        "getByRole('heading', {name: 'Mnemonik Protocol'})",
         "getByRole('button', {name: 'Start chat'})",
         "getByLabel('Message input') or getByRole('textbox')",
         "getByRole('button', {name: 'Send'})",
@@ -47,7 +47,7 @@
     },
     {
       "scenario": "out_of_scope_rejection",
-      "description": "On chat page, mock POST /chat to return {response: 'I can only answer questions about the Mnemonic Protocol.'} -> send an off-topic message -> assert rejection text visible in message log",
+      "description": "On chat page, mock POST /chat to return {response: 'I can only answer questions about the Mnemonik Protocol.'} -> send an off-topic message -> assert rejection text visible in message log",
       "mock_strategy": "page.route('/chat', handler that returns the rejection text) -- must be deterministic, no live Ollama",
       "note": "Rejection wording must match whatever the backend prompt instructs. Use a plausible rejection string and assert it appears."
     },

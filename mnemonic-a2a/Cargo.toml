@@ -2,7 +2,7 @@
 name = "mnemonic-a2a"
 version = "0.1.0"
 edition = "2021"
-description = "Mnemonic Protocol A2A adapter — attests, stores, and verifies A2A wire objects"
+description = "Mnemonik Protocol A2A adapter — attests, stores, and verifies A2A wire objects"
 
 [dependencies]
 mnemonic-core = { path = "../core", features = ["a2a-experimental"] }

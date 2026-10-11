@@ -77,7 +77,7 @@
       "severity": "minor",
       "category": "API consistency — install deeplinks differ between smithery.yaml and webapp",
       "location": "smithery.yaml:65-68 vs webapp/src/components/InstallButtons.tsx:22-29",
-      "issue": "smithery.yaml uses `cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonic&url=...` (URL-encoded `url=` parameter). InstallButtons.tsx uses `?name=Mnemonic&config=<base64-of-{\"url\":\"...\"}>` (base64 config). Both formats are documented by Cursor; using one in the registry listing and the other in the webapp deeplink will produce two different install pages depending on origin.",
+      "issue": "smithery.yaml uses `cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonik&url=...` (URL-encoded `url=` parameter). InstallButtons.tsx uses `?name=Mnemonik&config=<base64-of-{\"url\":\"...\"}>` (base64 config). Both formats are documented by Cursor; using one in the registry listing and the other in the webapp deeplink will produce two different install pages depending on origin.",
       "recommendation": "Pick one format and use it in both places — base64 `config` is more flexible (multi-arg). If Smithery's listing renderer supports `config`, switch smithery.yaml. Otherwise, switch InstallButtons.tsx to the simpler `url=` form. Document the chosen format in `decisions.md` so the next contributor doesn't drift."
     },
     {

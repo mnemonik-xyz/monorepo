@@ -28,7 +28,7 @@ interface SealMemoryResult {
   content_hash: Uint8Array;
 }
 
-interface MnemonicCoreModule {
+interface MnemonikCoreModule {
   default: (input?: unknown) => Promise<unknown>;
   generate_keypair: () => unknown;
   sign_challenge: (kp: unknown, bytes: Uint8Array) => Uint8Array;
@@ -91,25 +91,25 @@ export async function signAttestationBundle(
   return cose;
 }
 
-let modulePromise: Promise<MnemonicCoreModule> | null = null;
-let testOverride: MnemonicCoreModule | null = null;
+let modulePromise: Promise<MnemonikCoreModule> | null = null;
+let testOverride: MnemonikCoreModule | null = null;
 
 /** @internal — tests inject the WASM module directly to avoid the
  *  bundler-resolved dynamic import (vitest's jsdom env can't reach the
  *  packaged `wasm/mnemonic_core.js` at the production path). */
-export function __setWasmForTesting(mod: MnemonicCoreModule | null): void {
+export function __setWasmForTesting(mod: MnemonikCoreModule | null): void {
   testOverride = mod;
   modulePromise = null;
 }
 
-async function loadWasm(): Promise<MnemonicCoreModule> {
+async function loadWasm(): Promise<MnemonikCoreModule> {
   if (testOverride) return testOverride;
   if (modulePromise) return modulePromise;
   modulePromise = (async () => {
     const url = new URL("./wasm/mnemonic_core.js", import.meta.url);
     const mod = (await import(
       /* @vite-ignore */ url.href
-    )) as MnemonicCoreModule;
+    )) as MnemonikCoreModule;
     if (typeof mod.default === "function") {
       await mod.default();
     }

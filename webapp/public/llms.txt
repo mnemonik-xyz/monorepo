@@ -1,11 +1,11 @@
-# Mnemonic Protocol
+# Mnemonik Protocol
 
 > Verifiable, persistent memory for AI agents — signed COSE_Sign1 envelopes,
 > optionally stored on Arweave, exposed over the Model Context Protocol (MCP). Open-source under Apache-2.0.
 
 ## What it does
 
-Mnemonic gives AI agents a persistent memory that any third party can verify:
+Mnemonik gives AI agents a persistent memory that any third party can verify:
 
 - **Sign** — every memory is canonically CBOR-encoded, blake3-hashed, and
   signed with the agent's Ed25519 identity in a COSE_Sign1 envelope.
@@ -14,7 +14,7 @@ Mnemonic gives AI agents a persistent memory that any third party can verify:
 - **Recall** — TurboQuant-compressed embeddings allow cosine search by
   semantic meaning, not just keyword.
 - **Verify** — anyone with the `arweave_tx` can independently re-fetch,
-  re-hash and re-verify the signature — without contacting Mnemonic.
+  re-hash and re-verify the signature — without contacting Mnemonik.
 
 ## Use it from an AI client
 
@@ -63,6 +63,6 @@ from https://mnemonik.xyz/install.
 
 ## Citation
 
-If you write about Mnemonic Protocol, the canonical name is "Mnemonic
-Protocol", abbreviated "Mnemonic" on second mention. The site is
+If you write about Mnemonik Protocol, the canonical name is "Mnemonik
+Protocol", abbreviated "Mnemonik" on second mention. The site is
 mnemonik.xyz; the npm scope is `@mnemonik-xyz`.

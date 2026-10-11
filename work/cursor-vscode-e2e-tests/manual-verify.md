@@ -38,8 +38,8 @@ Walk through every step. Tick the checkbox. If anything fails, file a GitHub iss
 
 - [ ] **D1.** Open `https://mnemonik.xyz/install`. Click "Install in Cursor". macOS routes the `cursor://anysphere.cursor-deeplink/...` URL to Cursor.
 - [ ] **D2.** Cursor's MCP install dialog appears. Confirm. Cursor adds the entry to `~/.cursor/mcp.json` (verify with `cat ~/.cursor/mcp.json`).
-- [ ] **D3.** Open Cursor's MCP settings panel. Mnemonic appears as a server.
-- [ ] **D4.** Trigger any Mnemonic tool from chat (e.g. ask the agent to call `mnemonic_whoami`). One of three things happens:
+- [ ] **D3.** Open Cursor's MCP settings panel. Mnemonik appears as a server.
+- [ ] **D4.** Trigger any Mnemonik tool from chat (e.g. ask the agent to call `mnemonic_whoami`). One of three things happens:
   - **Best:** browser pops up to `mcp.mnemonik.xyz/oauth/consent`, approve, JWT lands, tool returns server identity. ✓
   - **Documented Cursor 3.2.16 UX gap:** browser does NOT pop. Workaround: `mnemonic login` in CLI, copy JWT from `~/.mnemonic/token.json`, paste into `~/.cursor/mcp.json` as `"headers": {"Authorization": "Bearer <jwt>"}`. Restart Cursor. Retry.
   - **Failure:** anything else — file a GitHub issue with the Cursor app log (`~/Library/Logs/Cursor/`).
@@ -49,8 +49,8 @@ Walk through every step. Tick the checkbox. If anything fails, file a GitHub iss
 
 - [ ] **E1.** Open `https://mnemonik.xyz/install`. Click "Install in VS Code". macOS routes the `vscode://mcp/install?...` URL to VS Code (note: with `//`, double-slash — see InstallButtons.tsx note about Safari rejecting opaque URIs).
 - [ ] **E2.** VS Code prompts to install MCP server. Approve.
-- [ ] **E3.** Mnemonic appears in VS Code's GitHub Copilot Chat MCP server list.
-- [ ] **E4.** Trigger any Mnemonic tool from Copilot Chat. OAuth flow in browser → JWT → tool succeeds.
+- [ ] **E3.** Mnemonik appears in VS Code's GitHub Copilot Chat MCP server list.
+- [ ] **E4.** Trigger any Mnemonik tool from Copilot Chat. OAuth flow in browser → JWT → tool succeeds.
 
 ## F. Claude Desktop install + OAuth + tool-call (5 min)
 
@@ -58,7 +58,7 @@ Walk through every step. Tick the checkbox. If anything fails, file a GitHub iss
   ```json
   {
     "mcpServers": {
-      "Mnemonic": {
+      "Mnemonik": {
         "url": "https://mcp.mnemonik.xyz/mcp",
         "type": "http"
       }
@@ -66,7 +66,7 @@ Walk through every step. Tick the checkbox. If anything fails, file a GitHub iss
   }
   ```
 - [ ] **F2.** Restart Claude Desktop.
-- [ ] **F3.** First Mnemonic tool call from Claude Desktop chat triggers a browser pop-up to `mcp.mnemonik.xyz/oauth/consent`. Approve. JWT lands. Tool returns server identity. (Per the 2026-05-02 user report, Claude Desktop's MCP OAuth UI works without the friction Cursor has.)
+- [ ] **F3.** First Mnemonik tool call from Claude Desktop chat triggers a browser pop-up to `mcp.mnemonik.xyz/oauth/consent`. Approve. JWT lands. Tool returns server identity. (Per the 2026-05-02 user report, Claude Desktop's MCP OAuth UI works without the friction Cursor has.)
 
 ## G. Send-to-CLI keypair alignment (5 min)
 
@@ -98,7 +98,7 @@ Walk through every step. Tick the checkbox. If anything fails, file a GitHub iss
   pubkey from G2.
 - [ ] **G6.** Extract the JWT: `cat /tmp/aligned-${USER}/token.json |
   python3 -c 'import sys,json; print(json.load(sys.stdin)["jwt"])'`. Copy.
-- [ ] **G7.** Edit `~/.cursor/mcp.json`. Replace the Mnemonic entry's
+- [ ] **G7.** Edit `~/.cursor/mcp.json`. Replace the Mnemonik entry's
   `headers.Authorization` with `Bearer <jwt-from-G6>`. Save. Restart
   Cursor.
 - [ ] **G8.** From Cursor chat, ask the agent to sign a memory. Webapp

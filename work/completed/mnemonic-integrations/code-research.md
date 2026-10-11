@@ -422,12 +422,12 @@ description: "Verifiable persistent memory for AI agents"
 homepage: "https://mnemonik.xyz"
 repository: "https://github.com/mnemonik-xyz/mnemonic-protocol"
 author:
-  name: "Mnemonic Team"
+  name: "Mnemonik Team"
   email: "dev@mnemonik.xyz"
 
 mcp_servers:
   - id: "mnemonic"
-    name: "Mnemonic Memory"
+    name: "Mnemonik Memory"
     description: "Sign and recall attested memory bundles with cryptographic proof"
     url: "https://mcp.mnemonic.dev"  # Smithery probes this for /sse or POST /tools/list
     auth:
@@ -535,7 +535,7 @@ async fn test_cose_roundtrip_via_http_proxy() {
 
 ```
 Cursor:
-cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonic&config=<base64-json>
+cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonik&config=<base64-json>
 
 Where config is:
 {
@@ -548,7 +548,7 @@ Where config is:
 
 **VS Code:**
 ```
-vscode:mcp/install?name=Mnemonic&url=https://mcp.mnemonic.dev
+vscode:mcp/install?name=Mnemonik&url=https://mcp.mnemonic.dev
 ```
 
 **Claude Desktop / .mcpb:**

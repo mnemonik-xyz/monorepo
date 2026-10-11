@@ -1,4 +1,4 @@
-// Unit tests for `MnemonicClient` — covers the 5 tool methods, the
+// Unit tests for `MnemonikClient` — covers the 5 tool methods, the
 // pending-bundle / sign-callback flow, and JWT redaction in error paths.
 //
 // We inject:
@@ -11,7 +11,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { MnemonicClient } from "../src/client.js";
+import { MnemonikClient } from "../src/client.js";
 import {
   AuthError,
   IntegrityError,
@@ -135,14 +135,14 @@ async function makeClient(opts?: {
   jwt?: string;
   responses?: CannedResponse[];
 }): Promise<{
-  client: MnemonicClient;
+  client: MnemonikClient;
   calls: CapturedCall[];
   keypair: Keypair;
 }> {
   const keypair = await Keypair.generate();
   const signer = new LocalSigner(keypair);
   const { fetchImpl, calls } = makeMockFetch(opts?.responses ?? []);
-  const client = new MnemonicClient({
+  const client = new MnemonikClient({
     baseUrl: "https://example.test",
     signer,
     fetch: fetchImpl,
@@ -154,13 +154,13 @@ async function makeClient(opts?: {
 
 // ── construction ───────────────────────────────────────────────────────────
 
-describe("MnemonicClient constructor", () => {
+describe("MnemonikClient constructor", () => {
   it("rejects missing or non-http baseUrl", async () => {
     const kp = await Keypair.generate();
     const signer = new LocalSigner(kp);
     expect(
       () =>
-        new MnemonicClient({
+        new MnemonikClient({
           baseUrl: "ftp://nope",
           signer,
         })
@@ -171,7 +171,7 @@ describe("MnemonicClient constructor", () => {
     expect(
       () =>
         // @ts-expect-error — intentional bad input
-        new MnemonicClient({ baseUrl: "https://example.test" })
+        new MnemonikClient({ baseUrl: "https://example.test" })
     ).toThrow(/signer/);
   });
 
@@ -181,7 +181,7 @@ describe("MnemonicClient constructor", () => {
     const { fetchImpl, calls } = makeMockFetch([
       { body: mcpResult({ server_pubkey: "abc" }) },
     ]);
-    const client = new MnemonicClient({
+    const client = new MnemonikClient({
       baseUrl: "https://example.test///",
       signer,
       fetch: fetchImpl,
@@ -584,7 +584,7 @@ describe("callTool error branches", () => {
     const fetchImpl: typeof fetch = (async () => {
       throw new TypeError("fetch failed");
     }) as typeof fetch;
-    const client = new MnemonicClient({
+    const client = new MnemonikClient({
       baseUrl: "https://example.test",
       signer,
       fetch: fetchImpl,
@@ -607,7 +607,7 @@ describe("signMemory missing keypair", () => {
     const kp = await Keypair.generate();
     const signer = new LocalSigner(kp);
     const { fetchImpl } = makeMockFetch([]);
-    const client = new MnemonicClient({
+    const client = new MnemonikClient({
       baseUrl: "https://example.test",
       signer,
       fetch: fetchImpl,
@@ -690,7 +690,7 @@ describe("setJwt setter", () => {
     const { fetchImpl, calls } = makeMockFetch([
       { body: mcpResult({ server_pubkey: "Pub1" }) },
     ]);
-    const client = new MnemonicClient({
+    const client = new MnemonikClient({
       baseUrl: "https://example.test",
       signer,
       fetch: fetchImpl,
@@ -738,14 +738,14 @@ async function makeKeylessClient(opts: {
   withProvider?: boolean;
   providerKeypair?: Keypair;
 }): Promise<{
-  client: MnemonicClient;
+  client: MnemonikClient;
   calls: CapturedCall[];
   keypair: Keypair;
   providerCalls: () => number;
 }> {
   const keypair = await Keypair.generate();
   const { fetchImpl, calls } = makeMockFetch(opts.responses);
-  const client = new MnemonicClient({
+  const client = new MnemonikClient({
     baseUrl: "https://example.test",
     signer: new LocalSigner(keypair),
     fetch: fetchImpl,
@@ -896,7 +896,7 @@ describe("signMemory mode: anchored", () => {
     const keypair = await Keypair.generate();
     // First attempt stops after the open call (the provider throws).
     const { fetchImpl } = makeMockFetch([signFlow()[0]!, ...signFlow()]);
-    const client = new MnemonicClient({
+    const client = new MnemonikClient({
       baseUrl: "https://example.test",
       signer: new LocalSigner(keypair),
       fetch: fetchImpl,

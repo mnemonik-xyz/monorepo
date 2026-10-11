@@ -28,7 +28,7 @@
       "id": "AC-1",
       "description": "Landing page loads with description + 'Start chat' button",
       "status": "pass",
-      "evidence": "webapp/src/components/LandingPage.tsx exists. Renders <h1>Mnemonic Protocol</h1>, protocol description (3 paragraphs derived from whitepaper), and <button>Start chat</button>. E2E test app.spec.ts + chat.spec.ts verify heading visibility and button click navigation."
+      "evidence": "webapp/src/components/LandingPage.tsx exists. Renders <h1>Mnemonik Protocol</h1>, protocol description (3 paragraphs derived from whitepaper), and <button>Start chat</button>. E2E test app.spec.ts + chat.spec.ts verify heading visibility and button click navigation."
     },
     {
       "id": "AC-2",
@@ -82,7 +82,7 @@
       "id": "AC-10",
       "description": "Out-of-scope rejection",
       "status": "pass",
-      "evidence": "System prompt in chat.rs: 'You are a Mnemonic Protocol expert assistant. Answer questions using ONLY the provided context. If the context does not contain the answer, say so honestly. Do not make up information.' This constrains the LLM to protocol context only. E2E test 'out-of-scope question' covers the UI flow (with mocked response). Actual rejection quality depends on LLM behavior at runtime."
+      "evidence": "System prompt in chat.rs: 'You are a Mnemonik Protocol expert assistant. Answer questions using ONLY the provided context. If the context does not contain the answer, say so honestly. Do not make up information.' This constrains the LLM to protocol context only. E2E test 'out-of-scope question' covers the UI flow (with mocked response). Actual rejection quality depends on LLM behavior at runtime."
     },
     {
       "id": "AC-11",

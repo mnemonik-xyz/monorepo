@@ -1,9 +1,9 @@
 /** Explicit operator selection. This is local configuration, not a public directory. */
 import { verifyAsync } from '@noble/ed25519';
-import { MnemonicClient } from './client.js';
+import { MnemonikClient } from './client.js';
 import { checkpointPublicKey } from './checkpoint.js';
 import { IntegrityError, ServerError, UserError } from './errors.js';
-import type { MnemonicClientConfig } from './types.js';
+import type { MnemonikClientConfig } from './types.js';
 
 export interface OperatorConfig {
   id: string;
@@ -122,14 +122,14 @@ export async function verifyOperatorIdentity(
 export async function connectOperator(
   list: OperatorList,
   id: string,
-  config: Omit<MnemonicClientConfig, 'baseUrl'>,
+  config: Omit<MnemonikClientConfig, 'baseUrl'>,
   options: Omit<OperatorProofOptions, 'fetch'> = {},
-): Promise<{ operator: Readonly<OperatorConfig>; client: MnemonicClient }> {
+): Promise<{ operator: Readonly<OperatorConfig>; client: MnemonikClient }> {
   const operator = parseOperatorList(list).operators.find(row => row.id === id);
   if (!operator) throw new UserError('operator ID is not configured');
   const fetchImpl = config.fetch ?? globalThis.fetch.bind(globalThis);
   await verifyOperatorIdentity(operator, { ...options, fetch: fetchImpl });
-  const client = new MnemonicClient({
+  const client = new MnemonikClient({
     ...config,
     baseUrl: operator.baseUrl,
     // The selected MCP origin cannot redirect requests (including paid writes)

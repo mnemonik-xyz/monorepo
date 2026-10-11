@@ -80,7 +80,7 @@
       "title": "reqwest blocking feature enabled in core — potential deadlock in async contexts",
       "location": "core/Cargo.toml:29",
       "description": "core/Cargo.toml declares reqwest with features = ['json', 'blocking']. The blocking client (used in OpenAIEmbedder::embed in mcp/src/embed.rs:132) spawns a thread pool internally. Calling a blocking reqwest method from inside a tokio async task without tokio::task::spawn_blocking can deadlock the tokio runtime. The current call site in embed.rs is reached from sign_memory which is an async function.",
-      "impact": "Under concurrent load, the Mnemonic MCP server could deadlock when using OpenAI embeddings if all tokio worker threads are consumed by blocking calls. This is a denial-of-service risk.",
+      "impact": "Under concurrent load, the Mnemonik MCP server could deadlock when using OpenAI embeddings if all tokio worker threads are consumed by blocking calls. This is a denial-of-service risk.",
       "recommendation": "Wrap the blocking reqwest call in tokio::task::spawn_blocking: let result = tokio::task::spawn_blocking(move || { /* blocking reqwest call */ }).await?. Alternatively, refactor OpenAIEmbedder to use the async reqwest client.",
       "cwe": "CWE-833"
     },

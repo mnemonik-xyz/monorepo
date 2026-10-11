@@ -1,7 +1,7 @@
 /**
  * @mnemonik-xyz/conformance
  *
- * A2A protocol conformance test vectors for the Mnemonic attestation pipeline.
+ * A2A protocol conformance test vectors for the Mnemonik attestation pipeline.
  *
  * Each vector encodes:
  *  - the A2A object as regular JSON (documentation only),

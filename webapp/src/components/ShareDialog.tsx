@@ -87,7 +87,7 @@ export default function ShareDialog({
         setPhase({
           kind: "error",
           message:
-            "Sealed memory grants require a newer version of the Mnemonic WASM module. " +
+            "Sealed memory grants require a newer version of the Mnemonik WASM module. " +
             "This feature will be available once the sealed crypto tasks are merged.",
         });
         return;

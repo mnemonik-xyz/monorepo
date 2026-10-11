@@ -97,7 +97,7 @@ function Hero() {
             aria-hidden="true"
             className="inline-block h-px w-10 bg-accent-primary"
           />
-          <span>Mnemonic Protocol · v0.1</span>
+          <span>Mnemonik Protocol · v0.1</span>
         </div>
 
         <h1 className="text-balance text-5xl font-bold leading-[1.05] tracking-tight text-text-primary sm:text-6xl md:text-7xl">
@@ -251,7 +251,7 @@ const QUICKSTART_STEPS = [
   {
     chip: "Install",
     title: "Install into the IDE of your choice",
-    body: "Cursor, Claude Desktop, VS Code, Windsurf — pick your tool, click install, finish OAuth. The Mnemonic tools appear in your IDE's tool list automatically.",
+    body: "Cursor, Claude Desktop, VS Code, Windsurf — pick your tool, click install, finish OAuth. The Mnemonik tools appear in your IDE's tool list automatically.",
     meta: "Any MCP client",
   },
   {
@@ -389,7 +389,7 @@ const HOW_IT_WORKS_STEPS = [
   },
   {
     chip: "Install",
-    title: "Connect Mnemonic to your AI tool",
+    title: "Connect Mnemonik to your AI tool",
     body: "Cursor and VS Code accept a deeplink; Claude.ai takes a custom connector URL; Windsurf takes a JSON snippet. All four negotiate OAuth 2.1 + PKCE against mcp.mnemonik.xyz.",
     meta: "OAuth 2.1",
   },

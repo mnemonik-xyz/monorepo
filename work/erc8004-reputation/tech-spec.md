@@ -16,7 +16,7 @@ The whole feature is a client-side function pair plus a command, and it works of
 Four deliverables, all in the TypeScript packages:
 
 1. **A canonical off-chain document** (`MNEMONIC_FEEDBACK_V1`) that carries the score and the
-   Mnemonic evidence, canonicalized with RFC 8785 (JCS) and committed with keccak256.
+   Mnemonik evidence, canonicalized with RFC 8785 (JCS) and committed with keccak256.
 2. **`prepareFeedback`** — builds the document, signs the payload with the caller's Ed25519
    identity, and returns the bytes to host plus ready-to-send `giveFeedback` calldata.
 3. **`verifyFeedbackDocument`** — the offline verifier any third party or aggregator runs.
@@ -110,12 +110,12 @@ flag with no schema change. When it lands, put the **gateway HTTPS URL** on chai
 `ar://`, because no EVM consumer resolves `ar://`; the bytes are content-addressed and the hash
 is on chain, so any gateway is a substitutable mirror, not a trust anchor.
 
-The document is plain JSON, not a signed Mnemonic artifact: a viem or ethers consumer must be
-able to `JSON.parse` it. The Mnemonic signature lives inside it as a `proofs[]` entry.
+The document is plain JSON, not a signed Mnemonik artifact: a viem or ethers consumer must be
+able to `JSON.parse` it. The Mnemonik signature lives inside it as a `proofs[]` entry.
 
 ### Decision 5 — no aggregation in round 1, but no schema change needed later
 
-What Mnemonic's data can give that the registry structurally cannot: rater tenure priced in
+What Mnemonik's data can give that the registry structurally cannot: rater tenure priced in
 time rather than stake (first-anchored timestamp and anchored count, enumerable from Arweave by
 anyone); basis-in-evidence with time-priority; collusion signals from overlapping citations.
 
@@ -201,7 +201,7 @@ against published JCS vectors, so the shortcut is proven rather than assumed.
 
 ## API surface
 
-`submitMnemonicFeedback` from issue #73 is the wrong name: it promises a transaction we
+`submitMnemonikFeedback` from issue #73 is the wrong name: it promises a transaction we
 deliberately never send, and its `(agentId, value, attestationId)` arity omits everything that
 matters. Replace with free functions — no client, no base URL, no JWT, no network:
 
@@ -267,7 +267,7 @@ undetectable at this layer, by construction.
   validation errors for oversized tags, a bad checksum and an out-of-range value.
 - `erc8004.selfpromotion.test.ts` — mocked RPC: owner match, approved-operator match, clean
   pass, RPC error.
-- **`fixtures/erc8004-feedback-v1.json` — reproducible by a third party with no Mnemonic code**:
+- **`fixtures/erc8004-feedback-v1.json` — reproducible by a third party with no Mnemonik code**:
   `jq -j .documentJson fixture.json | cast keccak` must equal `feedbackHash`. The header
   documents that two-command reproduction.
 - `mcp/tests/erc8004_feedback_parity.rs` — reads the same fixture, recomputes keccak256 with

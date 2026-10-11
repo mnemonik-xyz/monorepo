@@ -563,7 +563,7 @@ pub async fn check_universal_paywall(
         }
     }
 
-    // A browser may have settled while Mnemonic was restarting. Provider
+    // A browser may have settled while Mnemonik was restarting. Provider
     // status is durable evidence, so recover it before returning another 402.
     if operation.quote_id.is_some() {
         if let Ok(status) = client.payment_status(&operation_id).await {
@@ -898,7 +898,7 @@ pub fn up_payment_required(
         max_timeout_seconds: 300,
         resource: ResourceInfo {
             uri: resource_uri.to_string(),
-            description: "Mnemonic anchored memory write".into(),
+            description: "Mnemonik anchored memory write".into(),
         },
         extensions: Some(extensions),
     };
@@ -1491,7 +1491,7 @@ impl FreeAnchorDenied {
 }
 
 /// How to become eligible after `google_account_required`.
-pub const GOOGLE_LINK_HINT: &str = "Sign in with Google in the Mnemonic browser extension \
+pub const GOOGLE_LINK_HINT: &str = "Sign in with Google in the Mnemonik browser extension \
      and link this agent key (POST /oauth/google/link). Paid x402 writes need no Google account.";
 
 /// The caller's free anchor quota, as shown by `mnemonic_whoami` and in the

@@ -1,6 +1,6 @@
 import {decodeAttestation,envelopeHex,fetchAttestation,verifyParent} from "./a2a-recovery.js";
 import type {RecoveryHost} from "./a2a-recovery.js";
-// A2A attestation helpers — mixin methods attached to MnemonicClient.
+// A2A attestation helpers — mixin methods attached to MnemonikClient.
 //
 // All four methods wrap `callTool("mnemonic_attest_a2a" | "mnemonic_recall_a2a", ...)`
 // through the same MCP HTTP surface used by `signMemory` / `recall`.
@@ -13,8 +13,8 @@ import type {RecoveryHost} from "./a2a-recovery.js";
 //   → POST /mcp  tools/call mnemonic_recall_a2a
 //   → returns `Attestation[]`
 //
-// The methods are declared here and merged onto MnemonicClient in client.ts
-// via `Object.assign(MnemonicClient.prototype, a2aMethods)`. They share the
+// The methods are declared here and merged onto MnemonikClient in client.ts
+// via `Object.assign(MnemonikClient.prototype, a2aMethods)`. They share the
 // private `callTool` surface via the `WithCallTool` interface below.
 //
 // ## Sealed A2A DataPart (T14 §9.1)
@@ -37,11 +37,11 @@ import type {
   RecallA2AContextOptions,
 } from "./types.js";
 
-// ── Internal interface so a2aMethods can reach into MnemonicClient ───────────
+// ── Internal interface so a2aMethods can reach into MnemonikClient ───────────
 
 /**
  * Minimal interface that the A2A mixin requires from its host class.
- * `MnemonicClient` satisfies this contract.
+ * `MnemonikClient` satisfies this contract.
  */
 export interface WithCallTool extends RecoveryHost {
   _resolveA2AKeypair(): Promise<KeypairJson>;

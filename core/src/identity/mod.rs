@@ -27,7 +27,7 @@ use solana_sdk::signature::{Keypair, Signer};
 // Identity
 // ---------------------------------------------------------------------------
 
-/// A resolved Mnemonic Ed25519 identity.
+/// A resolved Mnemonik Ed25519 identity.
 ///
 /// The `keypair` is eagerly loaded at bootstrap time. Task 4 may convert this
 /// to lazy access via a `SecretAccessor` if the startup cost proves material;

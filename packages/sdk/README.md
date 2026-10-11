@@ -2,7 +2,7 @@
 
 > Project site: [mnemonik.xyz](https://mnemonik.xyz) · Hosted MCP: `https://mcp.mnemonik.xyz/mcp`
 
-Runtime-agnostic JavaScript/TypeScript SDK for the Mnemonic Protocol. Wraps
+Runtime-agnostic JavaScript/TypeScript SDK for the Mnemonik Protocol. Wraps
 the hosted MCP HTTP surface, the OAuth 2.1 + PKCE handshake, and COSE_Sign1
 canonical-CBOR signing through a WASM-compiled `mnemonic-core`. Pure ESM,
 no bundler required, no `node:*` imports — the same artifact loads under
@@ -21,9 +21,9 @@ Existing A2A recipient grants retain their separate signed-artifact path.
 ## Quick start
 
 ```typescript
-import { MnemonicClient, LocalSigner, Keypair } from '@mnemonik-xyz/sdk';
+import { MnemonikClient, LocalSigner, Keypair } from '@mnemonik-xyz/sdk';
 const kp = await Keypair.fromJSON(JSON.parse(localStorage.getItem('mnemonic.identity')!));
-const client = new MnemonicClient({ baseUrl: 'https://mcp.mnemonik.xyz', signer: new LocalSigner(kp), jwt });
+const client = new MnemonikClient({ baseUrl: 'https://mcp.mnemonik.xyz', signer: new LocalSigner(kp), jwt });
 client.setKeypair(kp);
 const saved = await client.sealMemory('hello', { mode: 'store', tags: ['demo'] });
 // Persist saved.signedBytes and saved.outerCbor in your own durable store.
@@ -53,7 +53,7 @@ provider when an operation needs the identity key. Plain hosted `recall` and
 An explicit HTTP local write is rejected rather than stored on the operator.
 
 ```typescript
-const client = new MnemonicClient({ baseUrl, signer: pubkeyOnlySigner, jwt });
+const client = new MnemonikClient({ baseUrl, signer: pubkeyOnlySigner, jwt });
 client.setKeypairProvider(() => loadKeypairFromKeychain()); // called lazily, once
 await client.recall('public research');                    // no private-key access
 await client.signMemory('public claim', { mode: 'anchored' }); // loads the key
@@ -84,10 +84,10 @@ seconds. It also retries a call one time after a 401 or 403 response.
 ### Sign + recall + verify
 
 ```typescript
-import { MnemonicClient, LocalSigner, Keypair } from '@mnemonik-xyz/sdk';
+import { MnemonikClient, LocalSigner, Keypair } from '@mnemonik-xyz/sdk';
 
 const kp = Keypair.fromJSON(JSON.parse(identityJson));        // your stored keypair
-const client = new MnemonicClient({
+const client = new MnemonikClient({
   baseUrl: 'https://mcp.mnemonik.xyz',
   signer: new LocalSigner(kp),
   jwt: storedJwt,
@@ -115,13 +115,13 @@ webapp once and pass it to the SDK directly. The SDK does not validate the
 signature client-side — the server rejects an invalid token on first use.
 
 ```typescript
-import { MnemonicClient, LocalSigner, Keypair, parseJwtPayload } from '@mnemonik-xyz/sdk';
+import { MnemonikClient, LocalSigner, Keypair, parseJwtPayload } from '@mnemonik-xyz/sdk';
 
 const claims = parseJwtPayload(process.env.MNEMONIC_JWT!);
 //   { sub, exp, iat }   — throws AuthError on alg=none, expired, malformed.
 
 const kp = Keypair.fromJSON(JSON.parse(process.env.MNEMONIC_IDENTITY!));
-const client = new MnemonicClient({
+const client = new MnemonikClient({
   baseUrl: 'https://mcp.mnemonik.xyz',
   signer: new LocalSigner(kp),
   jwt: process.env.MNEMONIC_JWT,
@@ -168,10 +168,10 @@ before any HTTP request.
 
 ```typescript
 import { DynamicTool } from '@langchain/core/tools';
-import { MnemonicClient, LocalSigner, Keypair } from '@mnemonik-xyz/sdk';
+import { MnemonikClient, LocalSigner, Keypair } from '@mnemonik-xyz/sdk';
 
 const kp = Keypair.fromJSON(JSON.parse(process.env.MNEMONIC_IDENTITY!));
-const mnemonic = new MnemonicClient({
+const mnemonic = new MnemonikClient({
   baseUrl: 'https://mcp.mnemonik.xyz',
   signer: new LocalSigner(kp),
   jwt: process.env.MNEMONIC_JWT,
@@ -236,7 +236,7 @@ All names below are re-exported from the package root.
 
 ### Client
 
-- **`MnemonicClient`** — HTTP client with session-only default local caches.
+- **`MnemonikClient`** — HTTP client with session-only default local caches.
 
   **Current source interfaces** (compatible builds required):
   - `whoami()` — server identity/capability check.
@@ -299,7 +299,7 @@ All names below are re-exported from the package root.
 
 - **`coseSignPayload(canonicalCbor, keypairJson)`** — wraps server-built
   canonical-CBOR bytes in a COSE_Sign1 envelope. Used internally by
-  `MnemonicClient.signMemory`; exported for advanced consumers.
+  `MnemonikClient.signMemory`; exported for advanced consumers.
 
 ### OAuth 2.1 + PKCE
 
@@ -326,7 +326,7 @@ All names below are re-exported from the package root.
 
 ### Errors
 
-All SDK errors extend `MnemonicError`. The CLI maps each subclass to a
+All SDK errors extend `MnemonikError`. The CLI maps each subclass to a
 documented exit code (Decision 10).
 
 - **`UserError`** — caller-side bad input (CLI exit 1).
@@ -335,7 +335,7 @@ documented exit code (Decision 10).
 - **`IntegrityError`** — content_hash mismatch / verify=tampered (CLI exit 3).
 - **`AuthError`** — 401 / 403, missing or expired JWT, OAuth state
   mismatch (CLI exit 4).
-- **`MnemonicError`** — base class. Constructor runs every message
+- **`MnemonikError`** — base class. Constructor runs every message
   through `redactJWT` so JWT-shaped substrings and 128-hex secrets never
   leak into stderr.
 - **`redactJWT(input)`** — exported helper for downstream consumers.
@@ -343,7 +343,7 @@ documented exit code (Decision 10).
 ### ERC-8004 reputation feedback (offline, no server required)
 
 Four free functions for building and verifying `MNEMONIC_FEEDBACK_V1` documents
-that commit Mnemonic reputation evidence to the ERC-8004 Reputation Registry on
+that commit Mnemonik reputation evidence to the ERC-8004 Reputation Registry on
 Ethereum. No EVM signer, no gas handling, no network: the functions are pure and
 run offline.
 
@@ -375,7 +375,7 @@ All four functions and their TypeScript interfaces are re-exported from
 `@mnemonik-xyz/sdk`. The canonical document format and verification procedure are
 specified in `docs/spec/erc8004-feedback-v1.md`. The reproducible fixture at
 `test/fixtures/erc8004-feedback-v1.json` lets any third party verify
-`feedbackHash` with `cast keccak` and no Mnemonic code.
+`feedbackHash` with `cast keccak` and no Mnemonik code.
 
 ```typescript
 import { prepareFeedback, verifyFeedbackDocument } from '@mnemonik-xyz/sdk';

@@ -2,13 +2,13 @@
 
 // ── Document schema ────────────────────────────────────────────────────────
 
-export interface MnemonicAnchor {
+export interface MnemonikAnchor {
   chain: string;
   kind: string;
   ref: string;
 }
 
-export interface MnemonicReference {
+export interface MnemonikReference {
   schema: string;
   attestation_id: string;
   /** Content hash of the cited attestation — 64 lowercase hex chars. */
@@ -17,7 +17,7 @@ export interface MnemonicReference {
   ed25519_pubkey: string;
   cose_envelope_uri?: string;
   /** Anchor-agnostic shape; slots Ethereum in as {chain:"ethereum",...} with no V2. */
-  anchor?: MnemonicAnchor;
+  anchor?: MnemonikAnchor;
 }
 
 export interface FeedbackTags {
@@ -35,7 +35,7 @@ export interface FeedbackPayload {
   valueDecimals: number;     // 0–18
   tags?: FeedbackTags;       // optional keys omitted, never null
   endpoint?: string;
-  mnemonic: MnemonicReference;
+  mnemonic: MnemonikReference;
   note?: string;             // optional, ≤ 280 chars
 }
 
@@ -53,7 +53,7 @@ export interface Eip191Proof {
 
 export type Proof = Ed25519Proof | Eip191Proof;
 
-export interface MnemonicFeedbackV1 {
+export interface MnemonikFeedbackV1 {
   schema: "MNEMONIC_FEEDBACK_V1";
   feedback: FeedbackPayload;
   /** keccak256(JCS(document.feedback)) — what the Ed25519 key signs. */
@@ -74,8 +74,8 @@ export interface PrepareFeedbackInput {
   clientAddress: string;
   /** URI where the feedback document will be hosted before the tx is sent. */
   feedbackUri: string;
-  /** The cited Mnemonic evidence. */
-  mnemonic: MnemonicReference;
+  /** The cited Mnemonik evidence. */
+  mnemonic: MnemonikReference;
   tags?: FeedbackTags;
   endpoint?: string;
   note?: string;
@@ -122,7 +122,7 @@ export interface PreflightBlock {
 }
 
 export interface PreparedFeedback {
-  document: MnemonicFeedbackV1;
+  document: MnemonikFeedbackV1;
   /** JSON string to upload to feedbackUri before sending the transaction. */
   documentJson: string;
   /** keccak256(JCS(document.feedback)) — the Ed25519-signed hash. */

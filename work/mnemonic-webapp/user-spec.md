@@ -9,21 +9,21 @@ size: L
 
 ## Что делаем
 
-React webapp с бэкендом на MCP-сервере. Протокольный чатбот на базе RAG + Ollama (Qwen2.5-3B), который отвечает на вопросы о Mnemonic Protocol, используя предзагруженные аттестованные знания (whitepaper + docs). Пользователь может скачать knowledge artifact (Markdown + JSON sidecar) и использовать как стартовый контекст в любом другом AI-инструменте (ChatGPT, Claude, Cursor, Gemini, локальные LLM).
+React webapp с бэкендом на MCP-сервере. Протокольный чатбот на базе RAG + Ollama (Qwen2.5-3B), который отвечает на вопросы о Mnemonik Protocol, используя предзагруженные аттестованные знания (whitepaper + docs). Пользователь может скачать knowledge artifact (Markdown + JSON sidecar) и использовать как стартовый контекст в любом другом AI-инструменте (ChatGPT, Claude, Cursor, Gemini, локальные LLM).
 
 ## Зачем
 
-Сейчас узнать о Mnemonic Protocol можно только прочитав whitepaper или код. Нет интерактивного способа познакомиться с протоколом. Webapp решает две задачи:
+Сейчас узнать о Mnemonik Protocol можно только прочитав whitepaper или код. Нет интерактивного способа познакомиться с протоколом. Webapp решает две задачи:
 
 1. **Демо-витрина протокола.** Non-technical users задают вопросы в чате и получают ответы, основанные на аттестованных знаниях -- живая демонстрация RAG + semantic recall.
 
-2. **Cross-provider портативность.** Пользователь скачивает протокольные знания как артефакт с криптографическими метаданными и загружает в свой AI-инструмент -- начинает работу с уже подготовленным контекстом о протоколе. Это демонстрация ключевой ценности Mnemonic: knowledge, который переживает смену провайдера.
+2. **Cross-provider портативность.** Пользователь скачивает протокольные знания как артефакт с криптографическими метаданными и загружает в свой AI-инструмент -- начинает работу с уже подготовленным контекстом о протоколе. Это демонстрация ключевой ценности Mnemonik: knowledge, который переживает смену провайдера.
 
 ## Как должно работать
 
 ### Сценарий 1 -- Новый пользователь знакомится с протоколом
 
-Пользователь открывает сайт. Видит landing page с кратким описанием Mnemonic Protocol и кнопкой "Start chat". Нажимает -- попадает в чат-интерфейс. Пишет "What is Mnemonic Protocol?" -- получает ответ, основанный на whitepaper (RAG recall + Ollama). Продолжает диалог, задаёт уточняющие вопросы. Чатбот отвечает только на основе предзагруженных знаний о протоколе.
+Пользователь открывает сайт. Видит landing page с кратким описанием Mnemonik Protocol и кнопкой "Start chat". Нажимает -- попадает в чат-интерфейс. Пишет "What is Mnemonik Protocol?" -- получает ответ, основанный на whitepaper (RAG recall + Ollama). Продолжает диалог, задаёт уточняющие вопросы. Чатбот отвечает только на основе предзагруженных знаний о протоколе.
 
 ### Сценарий 2 -- Скачивание knowledge artifact
 
@@ -36,7 +36,7 @@ React webapp с бэкендом на MCP-сервере. Протокольны
 
 ### Сценарий 3 -- Вопрос вне scope протокола
 
-Пользователь спрашивает "What is the weather today?" -- чатбот отвечает "I can only answer questions about the Mnemonic Protocol. Try asking about attestations, recall, or how the protocol works."
+Пользователь спрашивает "What is the weather today?" -- чатбот отвечает "I can only answer questions about the Mnemonik Protocol. Try asking about attestations, recall, or how the protocol works."
 
 ### Сценарий 4 -- Ограничения сессии
 
@@ -55,7 +55,7 @@ React webapp с бэкендом на MCP-сервере. Протокольны
 - [ ] Rate limit: 11-й запрос в минуту с одного IP возвращает HTTP 429 с сообщением
 - [ ] Session limit: после 50 сообщений UI показывает уведомление и блокирует ввод (client-side counter)
 - [ ] При недоступности Ollama -- после 2-3 retry отображается "Service temporarily unavailable"
-- [ ] При вопросе вне scope протокола -- чатбот отвечает что может отвечать только о Mnemonic Protocol
+- [ ] При вопросе вне scope протокола -- чатбот отвечает что может отвечать только о Mnemonik Protocol
 - [ ] Первый ответ после холодного старта контейнера -- в течение 90 секунд (Ollama warm-up)
 - [ ] `POST /chat` endpoint на MCP-сервере принимает `{"message": "...", "session_id": "..."}` (max 2000 chars) и возвращает `{"response": "..."}`
 - [ ] Сообщение длиннее 2000 символов возвращает HTTP 400
@@ -69,7 +69,7 @@ React webapp с бэкендом на MCP-сервере. Протокольны
 - **Без истории сессий.** Обновление страницы = новая сессия. Нет persist между визитами. Session limit (50 сообщений) считается client-side.
 - **Hosted MCP server.** Это архитектурный pivot: MCP-сервер развёрнут на VPS как shared сервис (не локальный бинарник у каждого пользователя). Все пользователи разделяют серверный keypair и SQLite store. Это допустимо для MVP с read-only протокольными знаниями.
 - **Один shared knowledge store.** Все пользователи видят одни и те же предзагруженные знания.
-- **Только протокольные знания.** Чатбот не отвечает на вопросы вне контекста Mnemonic Protocol.
+- **Только протокольные знания.** Чатбот не отвечает на вопросы вне контекста Mnemonik Protocol.
 - **Research agent** -- отдельная фича, вне scope.
 - **Шифрование keypair** в localStorage -- вне scope (нет keypair в MVP).
 
@@ -84,7 +84,7 @@ React webapp с бэкендом на MCP-сервере. Протокольны
 - **Frontend:** React + Vite + Tailwind CSS. Тёмная тема per UX guidelines. Deployment: static files served by nginx на том же сервере.
 - **Backend:** Существующий MCP-сервер + новый `POST /chat` endpoint. Endpoint flow: recall top-3 chunks → build prompt (system instruction + context + user message) → POST to Ollama `/api/generate` → stream/return response.
 - **RAG seeding:** Startup скрипт разбивает `docs/WHITEPAPER.md` по `##` секциям. Каждая секция -- отдельный вызов `sign_memory` с тегом `["protocol-knowledge", "whitepaper"]`. Пропускается если `attestation_count > 0`.
-- **LLM:** Ollama + `qwen2.5:3b` model. System prompt: "You are an expert on the Mnemonic Protocol. Answer questions ONLY based on the provided context. If the context does not contain the answer, say so."
+- **LLM:** Ollama + `qwen2.5:3b` model. System prompt: "You are an expert on the Mnemonik Protocol. Answer questions ONLY based on the provided context. If the context does not contain the answer, say so."
 - **Artifact download:** При RAG seeding скрипт генерирует `mnemonic-protocol-knowledge.md` (Markdown с YAML frontmatter) и `mnemonic-protocol-knowledge.json` (метаданные), упаковывает в `.zip` и сохраняет на диск. `GET /download-knowledge` отдаёт предсобранный файл. Не требует runtime-запросов в SQLite.
 - **Rate limiting:** `governor` + `tower_governor` crate в `mcp/Cargo.toml`. Применяется только к `/chat` route. Существующий `/mcp` endpoint не rate-limited (у него есть payment gating).
 - **ZIP generation:** `zip` crate в `mcp/Cargo.toml` для генерации artifact при seeding.
@@ -111,7 +111,7 @@ React webapp с бэкендом на MCP-сервере. Протокольны
 |-----|-----------|-------------------|
 | 1. Docker Compose | `bash: docker compose up -d && docker compose ps` | Все 3 сервиса running |
 | 2. Health check | `bash: curl http://localhost:3000/health` | `{"status":"ok"}` |
-| 3. Chat endpoint | `bash: curl -X POST http://localhost:3000/chat -d '{"message":"What is Mnemonic?","session_id":"test"}'` | JSON response с релевантным ответом |
+| 3. Chat endpoint | `bash: curl -X POST http://localhost:3000/chat -d '{"message":"What is Mnemonik?","session_id":"test"}'` | JSON response с релевантным ответом |
 | 4. Knowledge seeding | `bash: curl -X POST http://localhost:3000/mcp -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mnemonic_whoami"}}'` | `attestation_count > 0` |
 | 5. Artifact download | `bash: curl -o knowledge.zip http://localhost:3000/download-knowledge && unzip -l knowledge.zip` | Содержит .md и .json файлы |
 | 6. Rate limit | `bash: for i in $(seq 12); do curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/chat ...; done` | 11-й запрос = 429 |

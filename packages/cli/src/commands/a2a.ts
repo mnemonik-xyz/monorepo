@@ -1,9 +1,9 @@
-import {MnemonicClient} from "@mnemonik-xyz/sdk";
+import {MnemonikClient} from "@mnemonik-xyz/sdk";
 import {lazyIdentitySigner} from "../identity/lazy-signer.js";
 import {fileA2AIndex} from "../a2a-index.js";
 
 async function a2aSession(baseUrl:string,opts:OutputOptions,offline:boolean,keys:boolean){
- if(offline){const signer=lazyIdentitySigner();return {signer,client:new MnemonicClient({baseUrl,signer})};}
+ if(offline){const signer=lazyIdentitySigner();return {signer,client:new MnemonikClient({baseUrl,signer})};}
  return openSession(baseUrl,opts,keys);
 }
 // `mnemonic a2a <attest|recall|verify>` — A2A attestation subcommands.
@@ -185,7 +185,7 @@ export async function runA2AVerify(opts: A2AVerifyOptions): Promise<void> {
 
 export interface A2ARestoreOptions extends OutputOptions {context:string;authors:string[];heads?:string[];baseUrl?:string;gatewayUrl?:string;indexUrl?:string;}
 export async function runA2ARestore(opts:A2ARestoreOptions):Promise<void>{
- const signer=lazyIdentitySigner();const client=new MnemonicClient({baseUrl:opts.baseUrl??DEFAULT_BASE_URL,signer,a2aIndex:fileA2AIndex(signer.pubkey),...(opts.gatewayUrl?{a2aGatewayUrl:opts.gatewayUrl}:{}),...(opts.indexUrl?{a2aIndexUrl:opts.indexUrl}:{})});
+ const signer=lazyIdentitySigner();const client=new MnemonikClient({baseUrl:opts.baseUrl??DEFAULT_BASE_URL,signer,a2aIndex:fileA2AIndex(signer.pubkey),...(opts.gatewayUrl?{a2aGatewayUrl:opts.gatewayUrl}:{}),...(opts.indexUrl?{a2aIndexUrl:opts.indexUrl}:{})});
  const report=await client.restoreA2AContext(opts.context,{expectedAuthors:opts.authors,...(opts.heads?{heads:opts.heads}:{})});
  format(report,opts,()=>`${report.attestations.length} verified artifacts; completeness: ${report.completeness}`);
  if(report.error||report.budgetExhausted||report.missingParents.length)throw new UserError('restoration partial; inspect JSON report');

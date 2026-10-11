@@ -16,7 +16,7 @@ npx @mnemonik-xyz/cli sign "public claim" --anchor   # signed + anchored on-chai
 
 (If you prefer a standalone CLI-only keypair without webapp pairing, replace step 3's first command with `npx @mnemonik-xyz/cli init --standalone`.)
 
-That's it. The first `sign` saves a private memory on the production Mnemonic server. The `--anchor` write is signed with your key and anchored on-chain, so anyone can verify it.
+That's it. The first `sign` saves a private memory on the production Mnemonik server. The `--anchor` write is signed with your key and anchored on-chain, so anyone can verify it.
 
 ---
 
@@ -98,7 +98,7 @@ arweave_tx:     <real Arweave tx>              ← bytes preserved
 An anchored memory:
 
 - Anyone can semantically search.
-- Anyone with the `arweave_tx` can independently verify (no Mnemonic-server dependency).
+- Anyone with the `arweave_tx` can independently verify (no Mnemonik-server dependency).
 - Will outlive the laptop you signed it on.
 
 ### 4. Recall semantically (1 second)
@@ -115,7 +115,7 @@ Returns the top-k most similar attestations by cosine similarity — *not* keywo
 npx @mnemonik-xyz/cli verify <attestation_id>
 ```
 
-Or, fully outside the Mnemonic ecosystem, anyone can verify an anchored (`--anchor`) memory using only public infrastructure:
+Or, fully outside the Mnemonik ecosystem, anyone can verify an anchored (`--anchor`) memory using only public infrastructure:
 
 ```bash
 # Fetch raw COSE bytes from Arweave (any gateway)
@@ -131,7 +131,7 @@ The point of the protocol is that your claim ("I signed this memory at this time
 
 ## From an MCP-aware AI client (one click)
 
-Mnemonic is exposed over the Model Context Protocol, which means Claude, Cursor, VS Code, and Windsurf can use it directly as a memory backend with no glue code.
+Mnemonik is exposed over the Model Context Protocol, which means Claude, Cursor, VS Code, and Windsurf can use it directly as a memory backend with no glue code.
 
 Install via the one-click connector:
 
@@ -144,11 +144,11 @@ After install, the client will run the same OAuth handshake on first call, and f
 ## From an SDK (TypeScript / Node / Bun / Deno / browsers)
 
 ```ts
-import { MnemonicClient, LocalSigner, Keypair } from "@mnemonik-xyz/sdk";
+import { MnemonikClient, LocalSigner, Keypair } from "@mnemonik-xyz/sdk";
 
 const keypair = Keypair.generate();                      // or load from disk
 const signer = new LocalSigner(keypair);
-const client = new MnemonicClient({ baseUrl: "https://mcp.mnemonik.xyz", signer });
+const client = new MnemonikClient({ baseUrl: "https://mcp.mnemonik.xyz", signer });
 
 // (Run OAuth flow elsewhere, persist the JWT, then:)
 client.setJwt(jwtFromOauth);

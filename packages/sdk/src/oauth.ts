@@ -846,7 +846,7 @@ const JWT_ALLOWED_ALGS = new Set(["HS256"]);
  */
 /**
  * Internal: read the `exp` claim (seconds) of a JWT without validating it.
- * Returns `undefined` for a malformed token. Used by `MnemonicClient` to
+ * Returns `undefined` for a malformed token. Used by `MnemonikClient` to
  * refresh a token that is about to expire. Not re-exported.
  */
 export function readJwtExp(jwt: string): number | undefined {

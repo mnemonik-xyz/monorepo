@@ -26,7 +26,7 @@ Append-only log of decisions and audit findings.
   recipient-ACK handoff. Evidence: cross-operator exchange is dominated by
   *directed* message-passing that explicitly shares no memory (A2A "Opaque
   Execution"); the only *broadcast* pattern shipping is ERC-8004's public
-  attestation/reputation registry — which is Mnemonic-shaped. Verifiable
+  attestation/reputation registry — which is Mnemonik-shaped. Verifiable
   cross-operator *shared memory* is still aspirational, so V1 doesn't bet on it.
   Directed exchange deferred to the A2A bridge.
 - **Delivery-guarantee → D1: durable write + read-back + re-verify.** Cheapest
@@ -34,7 +34,7 @@ Append-only log of decisions and audit findings.
   fills the exact gap ERC-8004/IPFS leave open (hash committed, availability NOT
   guaranteed). Recipient-ACK (D2) is the gold standard but needs an online
   counterparty → deferred. Receipt schema forward-shaped for D2.
-- **Mnemonic wedge identified:** "ERC-8004 proves a hash; Mnemonic proves the
+- **Mnemonik wedge identified:** "ERC-8004 proves a hash; Mnemonik proves the
   bytes are actually retrievable."
 
 ## Open decisions — ✅ ALL RESOLVED (see FINALIZED below)
@@ -140,7 +140,7 @@ key (`pam_artifact`), service-worker single-owner. Two things PAM forced:
 - **Browser artifacts stay first-class verifiable — diverge from PAM here** (user
   pick: "Match the protocol"). PAM's browser edition degrades to **SHA-256 +
   empty `signature`**, so its browser artifacts are unsigned and their hashes
-  don't match the SDK's `blake3:` — a non-verifiable tier. For Mnemonic that
+  don't match the SDK's `blake3:` — a non-verifiable tier. For Mnemonik that
   breaks the whole "verifiable memory" thesis, so the extension runs
   **blake3-wasm + Ed25519-wasm**: every buffered artifact is content-addressed
   and COSE-signed **identically to native/SDK artifacts** (interoperable hashes,

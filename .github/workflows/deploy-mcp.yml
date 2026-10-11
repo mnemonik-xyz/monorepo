@@ -354,7 +354,7 @@ jobs:
         if: ${{ inputs.smoke_chat }}
         run: |
           set -euo pipefail
-          payload='{"message":"What is the Mnemonic Protocol?","session_id":"deploy-smoke"}'
+          payload='{"message":"What is the Mnemonik Protocol?","session_id":"deploy-smoke"}'
           response=$(curl -fsS --max-time 30 -X POST \
             "https://mcp.mnemonik.xyz/chat" \
             -H 'Content-Type: application/json' \

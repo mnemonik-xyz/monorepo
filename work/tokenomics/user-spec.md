@@ -5,7 +5,7 @@ type: design
 size: L
 ---
 
-# User Spec: экономика протокола Mnemonic и нативный токен
+# User Spec: экономика протокола Mnemonik и нативный токен
 
 ## Что делаем
 

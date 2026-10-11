@@ -118,7 +118,7 @@
     {
       "id": "O6",
       "category": "tech_spec_alignment",
-      "note": "Tech-spec testing strategy (line 312 'Per user-spec size M: four layers + redaction tests') puts unit tests in vitest with mocked fetch — matches. The redaction layer (Decision 10) is tested separately in T2's tests; T3 inherits AuthError from errors.ts which already runs through redactJWT in MnemonicError super() call. No duplicate redaction tests required at T3 layer."
+      "note": "Tech-spec testing strategy (line 312 'Per user-spec size M: four layers + redaction tests') puts unit tests in vitest with mocked fetch — matches. The redaction layer (Decision 10) is tested separately in T2's tests; T3 inherits AuthError from errors.ts which already runs through redactJWT in MnemonikError super() call. No duplicate redaction tests required at T3 layer."
     },
     {
       "id": "O7",
