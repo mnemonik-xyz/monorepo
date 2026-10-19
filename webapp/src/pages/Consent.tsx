@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { MCP_BASE, normalizeMcpBase } from "../lib/api";
+import { MCP_BASE, hostedOperatorBase } from "../lib/api";
 import { loadWasm } from "../lib/wasm";
 import { readIdentity } from "../lib/storage";
 
@@ -46,11 +46,41 @@ function base64ToBytes(b64: string): Uint8Array {
   return out;
 }
 
+/**
+ * Schemes the browser may be sent to after approval. Mirrors the server's
+ * redirect_uri allowlist (`oauth::allowed_redirect`): HTTPS, loopback HTTP
+ * and the editor deeplinks. `javascript:`/`data:` and the like never pass,
+ * so a hostile `redirect_uri` cannot run script on this origin.
+ */
+const REDIRECT_SCHEMES = new Set(["https:", "http:", "cursor:", "vscode:"]);
+
+/** Build the client callback URL, or null when the scheme is not allowed. */
+export function buildRedirectUrl(
+  redirectUri: string,
+  code: string,
+  state: string,
+): string | null {
+  let url: URL;
+  try {
+    url = new URL(redirectUri);
+  } catch {
+    return null;
+  }
+  if (!REDIRECT_SCHEMES.has(url.protocol)) return null;
+  url.searchParams.set("code", code);
+  url.searchParams.set("state", state);
+  return url.toString();
+}
+
 export default function Consent() {
   const [params] = useSearchParams();
   const challenge = params.get("challenge") ?? "";
   const state = params.get("state") ?? "";
-  const mcpBase = normalizeMcpBase(params.get("mcp_base") ?? "") ?? MCP_BASE;
+  // The page signs bytes this origin supplies and POSTs the signature
+  // there, so only a hosted operator (or a loopback dev server) may be
+  // named, as on the Sign page. An absent `mcp_base` means the default.
+  const rawMcpBase = params.get("mcp_base") ?? "";
+  const mcpBase = rawMcpBase ? hostedOperatorBase(rawMcpBase) : MCP_BASE;
 
   const challengeBytes = useMemo(() => {
     try {
@@ -81,15 +111,23 @@ export default function Consent() {
       });
       return;
     }
+    if (!mcpBase) {
+      setPhase({
+        kind: "error",
+        message:
+          "`mcp_base` is not a hosted Mnemonic operator. This page signs only for mnemonik.xyz operators or a local dev server.",
+      });
+      return;
+    }
     if (!identity) {
       setPhase({ kind: "no-identity" });
       return;
     }
     setPhase({ kind: "ready" });
-  }, [challenge, state, challengeBytes, identity]);
+  }, [challenge, state, challengeBytes, identity, mcpBase]);
 
   async function handleApprove() {
-    if (!identity || !challengeBytes) return;
+    if (!identity || !challengeBytes || !mcpBase) return;
     setPhase({ kind: "signing" });
     try {
       const wasm = await loadWasm();
@@ -121,10 +159,16 @@ export default function Consent() {
         state: string;
         redirect_uri: string;
       } = await resp.json();
-      const url = new URL(data.redirect_uri);
-      url.searchParams.set("code", data.code);
-      url.searchParams.set("state", data.state);
-      const redirectUrl = url.toString();
+      const redirectUrl = buildRedirectUrl(
+        data.redirect_uri,
+        data.code,
+        data.state,
+      );
+      if (!redirectUrl) {
+        throw new Error(
+          "server returned a redirect_uri with a scheme this page will not open",
+        );
+      }
       setPhase({ kind: "redirecting", redirectUrl });
       window.location.href = redirectUrl;
     } catch (err) {
@@ -165,7 +209,9 @@ export default function Consent() {
           {identity ? identity.pubkey_base58 : "(no keypair in this browser)"}
         </div>
         <div className="mt-3 font-mono text-xs text-text-muted">MCP server</div>
-        <div className="mt-1 break-all font-mono text-xs">{mcpBase}</div>
+        <div className="mt-1 break-all font-mono text-xs">
+          {mcpBase ?? "(rejected)"}
+        </div>
       </div>
 
       {phase.kind === "loading" && (
