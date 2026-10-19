@@ -1406,16 +1406,22 @@ impl BootstrapTickets {
     /// a ticket by `short_code`, then delegates to the same expiry/counter
     /// logic as `consume`. Returns `None` if not found, expired, or redeemed.
     /// Single-use: the entry is removed before returning.
-    /// Currently used only in test/test-support contexts; allow dead-code lint.
-    #[allow(dead_code)]
+    ///
+    /// Only `Cli`-origin tickets carry a short code. `Webapp`-origin tickets
+    /// store an empty `short_code` and are addressed by UUID alone, so an
+    /// empty query must never match them: the redeem route is unauthenticated
+    /// and a webapp ticket holds the raw keypair.
     pub async fn consume_by_short_code(&self, short_code: &str) -> Option<BootstrapTicket> {
+        if short_code.is_empty() {
+            return None;
+        }
         let mut guard = self.inner.lock().await;
         // Find the ticket_id for this short_code by scanning the LRU. The
         // LRU is capped at 1000 entries so the O(n) walk is bounded.
         let ticket_id = guard
             .lru
             .iter()
-            .find(|(_, t)| t.short_code == short_code)
+            .find(|(_, t)| t.origin == TicketOrigin::Cli && t.short_code == short_code)
             .map(|(id, _)| *id)?;
         let entry = guard.lru.pop(&ticket_id)?;
         let now = chrono::Utc::now().timestamp();
@@ -1766,6 +1772,11 @@ pub async fn bootstrap_redeem_by_code_handler(
     State(state): State<Arc<McpState>>,
     Json(body): Json<BootstrapRedeemByCodeRequest>,
 ) -> Response {
+    // This route needs no bearer token, so validate the lookup key before
+    // touching the store. `consume_by_short_code` also refuses an empty code.
+    if body.short_code.trim().is_empty() {
+        return error_resp(StatusCode::BAD_REQUEST, "short_code is required");
+    }
     let entry = match state
         .bootstrap_tickets
         .consume_by_short_code(&body.short_code)
@@ -3197,6 +3208,32 @@ mod tests {
         let id = store.insert("u".into(), "[]".into()).await.unwrap();
         assert!(store.consume(id).await.is_some());
         assert!(store.consume(id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_short_code_never_matches_webapp_ticket() {
+        // Webapp-origin tickets store an empty short_code. The by-code
+        // redeem route is unauthenticated, so an empty query must not
+        // return the raw keypair of a live webapp ticket.
+        let store = BootstrapTickets::new(10, 5, 300);
+        let id = store.insert("u".into(), "[]".into()).await.unwrap();
+        assert!(store.consume_by_short_code("").await.is_none());
+        // The webapp ticket is untouched and still redeemable by UUID.
+        assert!(store.consume(id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_short_code_matches_only_cli_ticket() {
+        let store = BootstrapTickets::new(10, 5, 300);
+        let (_id, code) = store
+            .insert_cli("issuer".into(), vec![1, 2, 3], [7u8; 32])
+            .await
+            .unwrap();
+        assert!(!code.is_empty());
+        let entry = store.consume_by_short_code(&code).await.expect("cli ticket");
+        assert_eq!(entry.origin, TicketOrigin::Cli);
+        // Single-use.
+        assert!(store.consume_by_short_code(&code).await.is_none());
     }
 
     #[tokio::test]
