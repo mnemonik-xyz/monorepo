@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import InstallButtons from "./InstallButtons";
+import InstallButtons, { buildMcpConfig } from "./InstallButtons";
 
 describe("InstallButtons", () => {
   afterEach(() => {
@@ -175,5 +175,21 @@ describe("InstallButtons", () => {
       atob(cursorUrl.searchParams.get("config")!)
     );
     expect(cursorConfig.headers).toBeUndefined();
+  });
+});
+
+describe("buildMcpConfig", () => {
+  it("claude_desktop_snippet_sends_the_jwt_to_the_mcp_host_only", () => {
+    // The snippet bakes the live JWT into `headers.Authorization`. A wrong
+    // host here hands the token to a server the project does not control.
+    const parsed = JSON.parse(buildMcpConfig("jwt-123"));
+    expect(parsed).toEqual({
+      mcpServers: {
+        mnemonic: {
+          url: "https://mcp.mnemonik.xyz/mcp",
+          headers: { Authorization: "Bearer jwt-123" },
+        },
+      },
+    });
   });
 });
