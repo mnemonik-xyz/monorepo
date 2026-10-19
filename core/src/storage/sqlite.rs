@@ -1583,8 +1583,24 @@ impl SqliteStore {
         collect_grant_rows(rows)
     }
 
+    /// Withdraw a grant on behalf of its author. Returns `true` when a live
+    /// grant with this `id` and `author_pubkey` was withdrawn, `false` when
+    /// no such grant exists, it is already withdrawn, or another author owns
+    /// it. HTTP callers must use this form so one owner cannot revoke
+    /// another owner's grant.
+    pub fn withdraw_grant_by_author(&self, id: &str, author_pubkey: &str) -> anyhow::Result<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let changed = self.conn.execute(
+            "UPDATE grants SET withdrawn_at = ?1
+             WHERE id = ?2 AND author_pubkey = ?3 AND withdrawn_at IS NULL",
+            params![now, id, author_pubkey],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Withdraw a grant by setting `withdrawn_at` to the current UTC time.
-    /// No-op if the grant does not exist or is already withdrawn.
+    /// No-op if the grant does not exist or is already withdrawn. Unscoped:
+    /// for owner-local stores and migrations only, never for HTTP handlers.
     pub fn withdraw_grant(&self, id: &str) -> anyhow::Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         self.conn.execute(

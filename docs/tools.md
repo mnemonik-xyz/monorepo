@@ -491,7 +491,8 @@ Its `awaiting_signature` response is only a UI handoff, not evidence that a gran
 was signed, persisted or delivered. It does not establish a complete sharing flow.
 
 New hosted `POST /api/grants` writes and SDK `share` are retired in the current
-source migration. Existing grant reads and withdrawal remain available. Retain
+source migration. Existing grant reads and withdrawal remain available: a caller
+lists only grants addressed to its own key and withdraws only grants it authored. Retain
 and distribute signed grants client-side, or use sealed A2A recipient grants.
 See [client-prepared memory](./client-prepared-memory.md) for compatibility limits.
 A recipient who already has a content key can retain it; withdrawal cannot erase

@@ -133,10 +133,21 @@ struct GrantItem {
     grant_cose_b64: String,
 }
 
+/// True when `reader` names the authenticated subject. Legacy rows store the
+/// reader either as the bare base58 pubkey (what `mnemonic_share` queries
+/// with) or as `did:sol:<pubkey>`; accept both spellings of the caller.
+fn reader_is_caller(reader: &str, sub: &str) -> bool {
+    reader == sub || reader.strip_prefix("did:sol:") == Some(sub)
+}
+
 /// `GET /api/grants?reader=<kid>` — non-withdrawn grants for this reader.
+///
+/// A caller may list only the grants addressed to its own key. Grants carry
+/// `memory_hash` and `author_pubkey`, so an unscoped list would reveal who
+/// shared which sealed memory with whom.
 pub async fn list_grants_handler(
     State(state): State<Arc<McpState>>,
-    Extension(_claims): Extension<Claims>,
+    Extension(claims): Extension<Claims>,
     Query(q): Query<GrantsQuery>,
 ) -> Response {
     let reader = match q.reader {
@@ -148,6 +159,12 @@ pub async fn list_grants_handler(
             );
         }
     };
+    if !reader_is_caller(&reader, &claims.sub) {
+        return error_resp(
+            StatusCode::FORBIDDEN,
+            "reader must be the authenticated identity",
+        );
+    }
     let rows = {
         let store = match state.store.lock() {
             Ok(g) => g,
@@ -185,9 +202,13 @@ pub async fn list_grants_handler(
 // ── DELETE /api/grants/{id} ───────────────────────────────────────────────────
 
 /// `DELETE /api/grants/{id}` — withdraw (sets withdrawn_at).
+///
+/// Only the grant's author may withdraw it. A grant that does not exist, is
+/// already withdrawn, or belongs to another author answers 404, so the route
+/// does not confirm foreign grant ids.
 pub async fn delete_grant_handler(
     State(state): State<Arc<McpState>>,
-    Extension(_claims): Extension<Claims>,
+    Extension(claims): Extension<Claims>,
     Path(id): Path<String>,
 ) -> Response {
     let res = {
@@ -197,10 +218,11 @@ pub async fn delete_grant_handler(
                 return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable");
             }
         };
-        store.withdraw_grant(&id)
+        store.withdraw_grant_by_author(&id, &claims.sub)
     };
     match res {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response(),
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response(),
+        Ok(false) => error_resp(StatusCode::NOT_FOUND, "grant not found"),
         Err(e) => error_resp(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("withdraw failed: {e}"),
