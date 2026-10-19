@@ -196,6 +196,7 @@ export async function verifyFeedbackDocument(
     feedbackHash: false,
     payloadHash: false,
     ed25519: false,
+    kidBinding: false,
     senderBinding: "not-checked",
   };
 
@@ -238,6 +239,13 @@ export async function verifyFeedbackDocument(
       | undefined;
 
     if (ed25519Proof) {
+      // The proof must come from the key the payload attributes the
+      // evidence to. The signature alone proves only that *some* key signed;
+      // an attacker could sign with their own key and name a victim's key
+      // in `mnemonic.ed25519_pubkey`.
+      checks.kidBinding =
+        ed25519Proof.kid === document.feedback.mnemonic.ed25519_pubkey;
+
       const signedMessage = `MNEMONIC_FEEDBACK_V1:${document.payload_hash.toLowerCase()}`;
       const msgBytes = enc.encode(signedMessage);
       const sigBytes = base64ToUint8Array(ed25519Proof.sig);
@@ -265,6 +273,7 @@ export async function verifyFeedbackDocument(
     checks.feedbackHash &&
     checks.payloadHash &&
     checks.ed25519 &&
+    checks.kidBinding &&
     checks.senderBinding !== "mismatch";
 
   return { valid, senderBinding: checks.senderBinding, checks };

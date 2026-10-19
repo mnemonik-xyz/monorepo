@@ -155,6 +155,12 @@ export interface VerifyChecks {
   payloadHash: boolean;
   /** Ed25519 signature over signed_message is valid */
   ed25519: boolean;
+  /**
+   * proof.kid == document.feedback.mnemonic.ed25519_pubkey. Without this
+   * check a document signed by any key could attribute evidence to another
+   * agent's key.
+   */
+  kidBinding: boolean;
   /** onchainSender == document.feedback.clientAddress */
   senderBinding: SenderBindingStatus;
 }
