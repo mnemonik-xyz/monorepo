@@ -41,9 +41,11 @@
 //! - PKCE is **S256-only** — `code_challenge_method != S256` → 400.
 //! - Possession-proof nonce is server-issued, single-use, 5-min TTL.
 //! - Rate limit: 5 lookup OR link calls per 24h per `google_sub` (D5/D9).
-//! - Redirect URIs are HTTPS-only unless the host is `localhost` /
-//!   `127.0.0.1` / `[::1]` (dev). The Chrome extension's
-//!   `https://<extid>.chromiumapp.org/...` deeplink is HTTPS by design.
+//! - Redirect URIs must pass the same allowlist as `/oauth/authorize`
+//!   (DCR registration, static entries, loopback) or be the Chrome
+//!   extension's `https://<extid>.chromiumapp.org/...` identity callback.
+//!   Any other host is refused, because the callback issues a code for the
+//!   signed-in account to whatever URI started the flow.
 //! - If `GOOGLE_OAUTH_CLIENT_ID` is unset, the handlers return 404 — the
 //!   feature is disabled at runtime without panic.
 
@@ -487,7 +489,7 @@ fn default_pkce_method() -> String {
 /// Takes the same tuple state as `google_callback_handler` so axum's router
 /// can group them. The other fields are unused on this path.
 pub async fn google_start_handler(
-    State((_mcp, _oauth, google)): State<(Arc<McpState>, Arc<OAuthState>, Arc<GoogleOAuthState>)>,
+    State((_mcp, oauth, google)): State<(Arc<McpState>, Arc<OAuthState>, Arc<GoogleOAuthState>)>,
     Query(q): Query<GoogleStartQuery>,
 ) -> Response {
     if google.is_disabled() {
@@ -503,8 +505,8 @@ pub async fn google_start_handler(
     {
         return bad_request("client_id, redirect_uri, code_challenge, and state are required");
     }
-    if !is_safe_redirect(&q.redirect_uri) {
-        return bad_request("redirect_uri must be HTTPS or loopback");
+    if !is_allowed_redirect(&oauth, &q.redirect_uri, &q.client_id) {
+        return bad_request("redirect_uri is not on the server allowlist");
     }
 
     let exp = now_secs() + GOOGLE_STATE_TTL_SECS;
@@ -945,21 +947,34 @@ fn build_query(pairs: &[(&str, &str)]) -> String {
     out
 }
 
-/// Allow HTTPS redirects and loopback dev URIs only. Chrome extension
-/// `https://<extid>.chromiumapp.org/` is HTTPS by design and matches.
-fn is_safe_redirect(uri: &str) -> bool {
-    if uri.starts_with("https://") {
-        return true;
-    }
-    // Allow loopback (developer convenience) — HTTPS is mandatory for any
-    // other host. `http://localhost:`, `http://127.0.0.1:`, `http://[::1]:`.
-    if uri.starts_with("http://localhost")
-        || uri.starts_with("http://127.0.0.1")
-        || uri.starts_with("http://[::1]")
-    {
-        return true;
-    }
-    false
+/// Validate the client's `redirect_uri` for the Google flow.
+///
+/// The callback mints an authorization code for the *signed-in* Google
+/// account's linked pubkey and 302s it to this URI, so the URI must belong
+/// to the client that started the flow. Accepting any HTTPS host let an
+/// attacker start a flow with their own PKCE pair and `redirect_uri`, hand
+/// the resulting Google consent URL to a victim, and receive a code for the
+/// victim's identity.
+///
+/// Allowed: the same allowlist as `/oauth/authorize` (DCR registration,
+/// static entries, loopback with any port), plus the Chrome identity API
+/// callback `https://<extension-id>.chromiumapp.org/...`, which only the
+/// extension with that id can receive.
+fn is_allowed_redirect(oauth: &OAuthState, uri: &str, client_id: &str) -> bool {
+    oauth.allows_redirect(uri, client_id) || is_chromium_identity_redirect(uri)
+}
+
+/// `https://<id>.chromiumapp.org/<path>`: exactly one label before the
+/// `chromiumapp.org` suffix, no userinfo, no port.
+fn is_chromium_identity_redirect(uri: &str) -> bool {
+    let Some(rest) = uri.strip_prefix("https://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let Some(id) = host.strip_suffix(".chromiumapp.org") else {
+        return false;
+    };
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 fn now_secs() -> u64 {
