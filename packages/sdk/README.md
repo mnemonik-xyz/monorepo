@@ -357,10 +357,11 @@ run offline.
   - Returns `PreparedFeedback`: `{document, documentJson, feedbackHash, payloadHash, onchain, preflight, warnings}`.
 
 - **`verifyFeedbackDocument(input)`** — offline verifier. Re-derives both hashes,
-  verifies the Ed25519 proof via `@noble/ed25519`, and optionally checks the
+  verifies the Ed25519 proof via `@noble/ed25519`, requires `proof.kid` to equal
+  `feedback.mnemonic.ed25519_pubkey`, and optionally checks the
   `msg.sender == feedback.clientAddress` binding.
   - `input`: `{documentJson, onchainFeedbackHash?, onchainSender?}`
-  - Returns `VerifyFeedbackResult`: `{valid, checks: {feedbackHash, payloadHash, ed25519, senderBinding}, error?}`.
+  - Returns `VerifyFeedbackResult`: `{valid, checks: {feedbackHash, payloadHash, ed25519, kidBinding, senderBinding}, error?}`.
 
 - **`checkSelfPromotion(opts)`** — pre-flight guard. Offline: rejects zero address
   and bad EIP-55 checksum. Online (requires `rpcUrl`): calls `ownerOf`,

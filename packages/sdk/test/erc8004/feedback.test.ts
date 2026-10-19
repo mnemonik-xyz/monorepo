@@ -185,6 +185,7 @@ describe("verifyFeedbackDocument", () => {
     expect(result.checks.feedbackHash).toBe(true);
     expect(result.checks.payloadHash).toBe(true);
     expect(result.checks.ed25519).toBe(true);
+    expect(result.checks.kidBinding).toBe(true);
     expect(result.checks.senderBinding).toBe("not-checked");
   });
 
@@ -245,6 +246,25 @@ describe("verifyFeedbackDocument", () => {
 
     // Stripping the proof changes the document → feedbackHash mismatch.
     expect(result.checks.feedbackHash).toBe(false);
+    expect(result.valid).toBe(false);
+  });
+
+  it("rejects a proof whose kid differs from mnemonic.ed25519_pubkey", async () => {
+    // An attacker signs with their own key but names a victim's key in the
+    // payload. The signature is valid for `proof.kid`, so only the binding
+    // check can refuse the attribution.
+    const signer = await makeSigner();
+    const victimPubkey = bs58Encode(new Uint8Array(32).fill(0x99));
+    const prepared = await prepareFeedback(fixtureInput(victimPubkey), { signer });
+    expect(prepared.warnings.join(" ")).toMatch(/differs from mnemonic.ed25519_pubkey/);
+
+    const result = await verifyFeedbackDocument({
+      documentJson: prepared.documentJson,
+      onchainFeedbackHash: prepared.feedbackHash,
+    });
+
+    expect(result.checks.ed25519).toBe(true);
+    expect(result.checks.kidBinding).toBe(false);
     expect(result.valid).toBe(false);
   });
 
