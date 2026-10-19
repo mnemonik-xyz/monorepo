@@ -360,6 +360,44 @@ fn id_token_claims(sub: &str, aud: &str) -> Value {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
+async fn start_rejects_redirect_uri_outside_the_allowlist() {
+    // The callback issues a code for the signed-in account to whatever
+    // redirect_uri started the flow. An arbitrary HTTPS host would let an
+    // attacker collect a victim's code, so only allowlisted URIs and the
+    // Chrome identity callback pass.
+    let h = make_harness().await;
+    let (_verifier, code_challenge) = pkce_pair();
+
+    for bad in [
+        "https://attacker.example/cb",
+        "https://evil.chromiumapp.org.attacker.example/google",
+        "https://a.b.chromiumapp.org/google",
+        "http://attacker.example/cb",
+    ] {
+        let url = format!(
+            "/oauth/google/start?client_id=mnemonic-extension&redirect_uri={}&code_challenge={}&code_challenge_method=S256&state=s",
+            urlencoding(bad),
+            urlencoding(&code_challenge),
+        );
+        let (status, _loc, _) = get_redirect(&h.app, &url).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "redirect_uri {bad} must be refused");
+    }
+
+    for good in [
+        "https://abcdef.chromiumapp.org/google",
+        "http://127.0.0.1:43123/callback",
+    ] {
+        let url = format!(
+            "/oauth/google/start?client_id=mnemonic-extension&redirect_uri={}&code_challenge={}&code_challenge_method=S256&state=s",
+            urlencoding(good),
+            urlencoding(&code_challenge),
+        );
+        let (status, _loc, _) = get_redirect(&h.app, &url).await;
+        assert_eq!(status, StatusCode::FOUND, "redirect_uri {good} must be accepted");
+    }
+}
+
+#[tokio::test]
 async fn full_pkce_roundtrip() {
     let h = make_harness().await;
     let google_sub = "1234567890-fixture";
