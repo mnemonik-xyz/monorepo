@@ -501,7 +501,9 @@ async fn retired_grant_write_preserves_existing_read_and_withdrawal() {
         )
         .unwrap();
 
-    // GET /api/grants?reader=did:sol:ReaderABC
+    // GET /api/grants?reader=did:sol:ReaderABC as the AUTHOR: the author is
+    // not the reader, so the list is refused. Grants reveal who shared which
+    // sealed memory with whom; only the addressed reader may list them.
     let req = Request::builder()
         .method("GET")
         .uri("/api/grants?reader=did:sol:ReaderABC")
@@ -509,12 +511,35 @@ async fn retired_grant_write_preserves_existing_read_and_withdrawal() {
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // GET as the READER (did:sol:<sub> spelling of the kid) succeeds.
+    let reader_jwt = mint_jwt("ReaderABC", TEST_JWT_SECRET);
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/grants?reader=did:sol:ReaderABC")
+        .header("authorization", format!("Bearer {reader_jwt}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let list: Value = serde_json::from_slice(&bytes).unwrap();
     let grants = list["grants"].as_array().expect("grants array");
     assert!(!grants.is_empty(), "should have at least 1 grant");
 
-    // DELETE /api/grants/{id}
+    // DELETE /api/grants/{id} by someone who is not the author: 404, and
+    // the grant stays live.
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(format!("/api/grants/{grant_id}"))
+        .header("authorization", format!("Bearer {reader_jwt}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // DELETE /api/grants/{id} by the author withdraws it.
     let req = Request::builder()
         .method("DELETE")
         .uri(format!("/api/grants/{grant_id}"))
@@ -524,11 +549,11 @@ async fn retired_grant_write_preserves_existing_read_and_withdrawal() {
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // GET again — should be empty (withdrawn grants excluded).
+    // GET again as the reader — should be empty (withdrawn grants excluded).
     let req = Request::builder()
         .method("GET")
         .uri("/api/grants?reader=did:sol:ReaderABC")
-        .header("authorization", format!("Bearer {jwt}"))
+        .header("authorization", format!("Bearer {reader_jwt}"))
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
